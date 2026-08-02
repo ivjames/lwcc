@@ -1,26 +1,55 @@
 # lwcc — worship guides for lwcc.lab980.com
 
-The site (`public/`, served by `app.py`) and the converter that produces its
-pages from the church's weekly worship-guide PDFs.
+The worship-guide site and the app that keeps it fed: upload the week's PDF
+at `/admin`, it converts and publishes immediately, and the newest Sunday
+becomes the front page.
 
-## Site: deploy on the droplet
+## The app
+
+- `GET /` — the current (newest) Sunday's guide
+- `GET /<YYYY-MM-DD>/` — any published Sunday (permanent URLs)
+- `GET /archive` — every published Sunday
+- `GET /admin` — upload page (browser); the POST is token-protected, not the page
+- `POST /api/upload` — raw PDF body + `X-Upload-Token` header; converts via
+  `wgconvert` and publishes to `public/<date>/`. Parser warnings come back in
+  the response so odd content is reviewed, not silently dropped. Fails closed
+  when no token is configured.
+- `GET /healthz` — liveness for the platform `health-check` sweep
+
+Batch the backlog from a terminal:
+
+```
+for f in backlog/*.pdf; do
+  curl -X POST --data-binary @"$f" -H "X-Upload-Token: $TOKEN" \
+       -H "Content-Type: application/pdf" https://lwcc.lab980.com/api/upload
+done
+```
+
+(or convert locally with `bin/wg-convert convert backlog/*.pdf -o public/`
+and commit/rsync the output — same result.)
+
+## Deploy on the droplet
 
 `lwcc.lab980.com` is provisioned per lab980 conventions (nginx vhost →
 local port, pm2, certbot). First deploy:
 
 ```
 cd /var/www/lwcc                      # provision-site cloned the repo here
+cp .env.example .env                  # then set UPLOAD_TOKEN=$(openssl rand -hex 16)
 pm2 start ecosystem.config.cjs && pm2 save
 ln -sf /var/www/lwcc/bin/lwcc /usr/local/bin/lwcc
 health-check --site lwcc
 ```
 
+The droplet needs `poppler-utils` and `tesseract-ocr` installed (`apt-get
+install -y poppler-utils tesseract-ocr`) for uploads to convert.
+
 The app listens on **8061** (`--port` in `ecosystem.config.cjs`); make sure it
 matches the `proxy_pass` port in `/etc/nginx/sites-available/lwcc.lab980.com`
 — edit whichever side disagrees. Subsequent deploys: `lwcc redeploy`.
 
-`public/index.html` is the current week's guide; converted backlog issues
-will live alongside it as `public/<YYYY-MM-DD>/`.
+Tests: `python3 test/run.py` (converter) and `python3 test/test_app.py`
+(upload flow, end to end).
 
 # Worship-guide converter
 
