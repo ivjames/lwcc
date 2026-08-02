@@ -7,6 +7,14 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 case "${1:-}" in
   redeploy)
     cd "$DIR"
+    if [ ! -d .git ]; then
+      echo "error: $DIR is not a git clone — adopt it in place first:" >&2
+      echo "  cd $DIR && git init -b main && git remote add origin <repo-url>" >&2
+      echo "  git fetch origin && git reset --hard origin/main" >&2
+      echo "  git branch --set-upstream-to=origin/main main" >&2
+      echo "(.env and uploaded guides are untracked and survive the reset)" >&2
+      exit 1
+    fi
     git pull --ff-only
     pm2 restart lwcc --update-env
     pm2 save
