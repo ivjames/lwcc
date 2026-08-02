@@ -260,6 +260,146 @@ def unpublish_date(d):
               os.path.join(PUBLIC, f'.unpublished-{d}-{ts}'))
 
 
+ALLOWED_TAG_RE = re.compile(r'</?(b|i)>|<sup>|</sup>', re.I)
+BLOCK_TYPES = ('para', 'prayer', 'refrain', 'ref', 'verse')
+ITEM_TYPES = ('music', 'prayer', 'litany', 'scripture', 'message', 'plain')
+
+
+def clean_plain(s):
+    """Plain-text field: strip all markup; the renderer escapes it."""
+    return re.sub(r'<[^>]*>', '', str(s or '')).strip()
+
+
+def clean_rich(s):
+    """Rich field: keep only the trusted <b>/<i>/<sup> vocabulary, escape
+    everything else (existing entities pass through untouched)."""
+    s = str(s or '')
+    out, pos = [], 0
+
+    def esc_frag(t):
+        t = re.sub(r'&(?![a-zA-Z]+;|#\d+;)', '&amp;', t)
+        return t.replace('<', '&lt;').replace('>', '&gt;')
+
+    for m in ALLOWED_TAG_RE.finditer(s):
+        out.append(esc_frag(s[pos:m.start()]))
+        out.append(m.group(0).lower())
+        pos = m.end()
+    out.append(esc_frag(s[pos:]))
+    return ''.join(out).strip()
+
+
+def _clean_blocks(blocks):
+    out = []
+    for b in blocks or []:
+        if not isinstance(b, dict):
+            continue
+        btype = b.get('type') if b.get('type') in BLOCK_TYPES else 'para'
+        text = clean_rich(b.get('text'))
+        if text:
+            out.append({'type': btype, 'text': text})
+    return out
+
+
+def sanitize_guide(sub, existing):
+    """Rebuild a guide dict from an edit-form submission: known fields only,
+    types coerced, markup constrained. Protected fields (dateISO, warnings,
+    reviewedWarnings, journal.fromOcr) always come from the existing file."""
+    if not isinstance(sub, dict):
+        sub = {}
+    g = {}
+    g['date'] = clean_plain(sub.get('date')) or existing.get('date')
+    g['dateISO'] = existing.get('dateISO')
+    g['season'] = clean_plain(sub.get('season')) or None
+    series = sub.get('series') if isinstance(sub.get('series'), dict) else {}
+    title = clean_plain(series.get('title'))
+    g['series'] = {'title': title, 'by': clean_plain(series.get('by')) or None} if title else None
+    g['coverAlt'] = clean_plain(sub.get('coverAlt')) or None
+
+    w = sub.get('welcome') if isinstance(sub.get('welcome'), dict) else None
+    g['welcome'] = None
+    if w:
+        body = _clean_blocks(w.get('body'))
+        if body or clean_plain(w.get('heading')):
+            g['welcome'] = {'heading': clean_plain(w.get('heading')) or 'Welcome',
+                            'who': clean_plain(w.get('who')) or None, 'body': body}
+
+    order = []
+    for o in sub.get('order') or []:
+        if not isinstance(o, dict):
+            continue
+        if o.get('kind') == 'stage':
+            text = clean_plain(o.get('text'))
+            if text:
+                order.append({'kind': 'stage', 'text': text})
+            continue
+        item = {
+            'kind': 'item',
+            'type': o.get('type') if o.get('type') in ITEM_TYPES else 'plain',
+            'label': clean_plain(o.get('label')) or None,
+            'title': clean_plain(o.get('title')) or None,
+            'titleQuoted': bool(o.get('titleQuoted')),
+            'who': clean_plain(o.get('who')) or None,
+            'note': clean_plain(o.get('note')) or None,
+            'body': _clean_blocks(o.get('body')),
+        }
+        if item['label'] or item['title'] or item['body']:
+            order.append(item)
+    g['order'] = order
+
+    g['musicTeam'] = []
+    for m in sub.get('musicTeam') or []:
+        if isinstance(m, dict) and clean_plain(m.get('name')):
+            g['musicTeam'].append({'name': clean_plain(m.get('name')),
+                                   'role': clean_plain(m.get('role')) or None})
+    g['musicCredits'] = [clean_plain(l) for l in sub.get('musicCredits') or []
+                         if clean_plain(l)]
+    g['prayerRequests'] = []
+    for pr in sub.get('prayerRequests') or []:
+        if isinstance(pr, dict) and clean_rich(pr.get('text')):
+            g['prayerRequests'].append({'name': clean_plain(pr.get('name')) or None,
+                                        'text': clean_rich(pr.get('text'))})
+    g['announcements'] = []
+    for a in sub.get('announcements') or []:
+        if isinstance(a, dict) and clean_rich(a.get('text')):
+            g['announcements'].append({
+                'heading': clean_plain(a.get('heading')) or None,
+                'text': clean_rich(a.get('text')),
+                'kind': 'attendance' if a.get('kind') == 'attendance' else 'note'})
+    g['specialEvents'] = []
+    for ev in sub.get('specialEvents') or []:
+        if not isinstance(ev, dict) or not clean_plain(ev.get('heading')):
+            continue
+        g['specialEvents'].append({
+            'heading': clean_plain(ev.get('heading')),
+            'paragraphs': [clean_rich(p) for p in ev.get('paragraphs') or [] if clean_rich(p)],
+            'note': clean_plain(ev.get('note')) or None,
+            'sectionTitle': clean_plain(ev.get('sectionTitle')) or 'Coming Up'})
+
+    j = sub.get('journal') if isinstance(sub.get('journal'), dict) else None
+    g['journal'] = None
+    if j and (clean_plain(j.get('morning')) or clean_plain(j.get('evening'))):
+        g['journal'] = {'subtitle': clean_plain(j.get('subtitle')) or None,
+                        'morning': clean_plain(j.get('morning')) or None,
+                        'midday': clean_plain(j.get('midday')) or None,
+                        'evening': clean_plain(j.get('evening')) or None}
+        if (existing.get('journal') or {}).get('fromOcr'):
+            g['journal']['fromOcr'] = True
+
+    g['warnings'] = existing.get('warnings') or []
+    if existing.get('reviewedWarnings'):
+        g['reviewedWarnings'] = existing['reviewedWarnings']
+    return g
+
+
+def save_guide(d, submitted):
+    path = os.path.join(PUBLIC, d, 'guide.json')
+    with open(path, encoding='utf-8') as fh:
+        existing = json.load(fh)
+    g = sanitize_guide(submitted, existing)
+    write_guide_json(path, g)
+    rerender_date(d)
+
+
 PAGE_STYLE = """
   body{font-family:Georgia,'Times New Roman',serif;background:#fbfaf5;color:#26241d;
     max-width:680px;margin:0 auto;padding:40px 20px;line-height:1.6}
@@ -395,6 +535,8 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   ul.warns{margin:4px 0 0;padding-left:18px;color:#8a6410}
   #summary{font-weight:700;margin-top:10px}
   button.mini{padding:4px 12px;font-size:.82em;margin-left:8px;background:#3f6b82}
+  a.minilink{background:#3f6b82;color:#fff;text-decoration:none;border-radius:8px;
+    padding:4px 12px;font-size:.82em;margin-left:8px;font-family:Arial,Helvetica,sans-serif}
 </style></head>
 <body>
 <h1>Publish Worship Guides</h1>
@@ -567,6 +709,7 @@ def manage_html():
         title = f' — {m["title"]}' if m and m['title'] else ''
         rows.append(
             f'<li style="margin:7px 0"><a href="/{d}/">{d}</a>{title} '
+            f'<a class="minilink" href="/admin/edit/{d}">Edit</a>'
             f'<button class="mini" onclick="adminAction(\'rerender\', \'{d}\')">'
             f'Re-render</button>'
             f'<button class="mini" onclick="adminAction(\'unpublish\', \'{d}\')">'
@@ -577,6 +720,236 @@ def manage_html():
                '<ul style="list-style:none;padding-left:0">'
                + ''.join(rows) + '</ul></div>')
     return '\n'.join(out)
+
+
+EDIT_PAGE = (r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edit __DATE__</title><style>__STYLE__
+  fieldset{border:1px solid #d8d6c7;border-radius:10px;margin:14px 0;padding:12px 14px}
+  legend{font-family:Arial,Helvetica,sans-serif;font-weight:700;color:#054253;padding:0 6px}
+  label.f{display:block;margin:8px 0;font-size:.9em;color:#54574a}
+  label.f input[type=text]{width:100%;margin-top:2px}
+  textarea{width:100%;font:inherit;font-size:.95em;padding:8px 10px;border-radius:8px;
+    border:1px solid #d8d6c7;min-height:64px}
+  .row{border-top:1px dashed #d8d6c7;padding-top:10px;margin-top:10px}
+  .rowbtns{float:right}
+  button.mini{padding:3px 10px;font-size:.8em;margin-left:6px;background:#3f6b82}
+  button.mini.del{background:#a20816}
+  select{font:inherit;padding:4px 8px;border-radius:6px;border:1px solid #d8d6c7}
+  .savebar{position:sticky;bottom:0;background:#fbfaf5;padding:12px 0;border-top:2px solid #054253}
+  small.hint{color:#54574a}
+</style></head>
+<body>
+<h1>Edit — __DATE__</h1>
+<p><small class="hint">Text fields may use <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>,
+<code>&lt;sup&gt;</code>; anything else is neutralized on save. Prayers keep their
+line breaks. Saving re-renders the page immediately.</small></p>
+<p><label>Upload token <input type="password" id="token" size="28"></label></p>
+<div id="form"></div>
+<div class="savebar">
+  <button id="save">Save &amp; re-render</button>
+  <a href="/__DATE__/" style="margin-left:14px">View page</a>
+  <a href="/admin" style="margin-left:14px">Back to admin</a>
+  <span id="msg" style="margin-left:14px"></span>
+</div>
+<script id="guide-data" type="application/json">__GUIDE__</script>
+<script>
+const $ = id => document.getElementById(id);
+const G = JSON.parse($('guide-data').textContent);
+$('token').value = localStorage.getItem('wgToken') || '';
+
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'oninput' || k === 'onclick' || k === 'onchange') n[k] = v;
+    else if (k === 'checked') n.checked = v;
+    else if (k === 'value') n.value = v;
+    else n.setAttribute(k, v);
+  }
+  for (const kid of kids) n.append(kid);
+  return n;
+};
+const txt = (obj, key, label, kind = 'input') => {
+  const input = kind === 'input'
+    ? el('input', {type: 'text', value: obj[key] || '',
+                   oninput: e => obj[key] = e.target.value})
+    : el('textarea', {oninput: e => obj[key] = e.target.value}, obj[key] || '');
+  return el('label', {class: 'f'}, label, input);
+};
+const rowBtns = (arr, i, redraw) => el('span', {class: 'rowbtns'},
+  el('button', {class: 'mini', onclick: () => { if (i > 0) { [arr[i-1], arr[i]] = [arr[i], arr[i-1]]; redraw(); } }}, '↑'),
+  el('button', {class: 'mini', onclick: () => { if (i < arr.length - 1) { [arr[i+1], arr[i]] = [arr[i], arr[i+1]]; redraw(); } }}, '↓'),
+  el('button', {class: 'mini del', onclick: () => { arr.splice(i, 1); redraw(); }}, '×'));
+
+function blockRows(item) {
+  const wrap = el('div');
+  const redraw = () => { wrap.replaceChildren(...build()); };
+  const build = () => {
+    const rows = (item.body || []).map((b, i) => el('div', {class: 'row'},
+      rowBtns(item.body, i, redraw),
+      el('select', {onchange: e => b.type = e.target.value},
+        ...['para', 'prayer', 'refrain', 'ref', 'verse'].map(t =>
+          el('option', {value: t, ...(b.type === t ? {selected: ''} : {})}, t))),
+      el('textarea', {oninput: e => b.text = e.target.value}, b.text || '')));
+    rows.push(el('button', {class: 'mini', onclick: () => {
+      item.body = item.body || []; item.body.push({type: 'para', text: ''}); redraw();
+    }}, '+ text block'));
+    return rows;
+  };
+  redraw();
+  return wrap;
+}
+
+function listSection(title, arr, rowFn, addFn) {
+  const fs = el('fieldset', {}, el('legend', {}, title));
+  const wrap = el('div');
+  const redraw = () => {
+    wrap.replaceChildren(
+      ...arr.map((entry, i) => {
+        const row = el('div', {class: 'row'}, rowBtns(arr, i, redraw));
+        rowFn(row, entry, redraw);
+        return row;
+      }),
+      el('button', {class: 'mini', onclick: () => { arr.push(addFn()); redraw(); }}, '+ add'));
+  };
+  redraw();
+  fs.append(wrap);
+  return fs;
+}
+
+function buildForm() {
+  const f = $('form');
+  const head = el('fieldset', {}, el('legend', {}, 'Header'));
+  head.append(txt(G, 'date', 'Date (as printed)'), txt(G, 'season', 'Season line'));
+  G.series = G.series || {title: '', by: ''};
+  head.append(txt(G.series, 'title', 'Message series title'),
+              txt(G.series, 'by', 'Preacher'),
+              txt(G, 'coverAlt', 'Cover image alt text'));
+  f.append(head);
+
+  G.welcome = G.welcome || {heading: 'Opening Announcements', who: '', body: []};
+  const wfs = el('fieldset', {}, el('legend', {}, 'Welcome'));
+  wfs.append(txt(G.welcome, 'heading', 'Section heading'),
+             txt(G.welcome, 'who', 'Speaker'), blockRows(G.welcome));
+  f.append(wfs);
+
+  G.order = G.order || [];
+  const ofs = el('fieldset', {}, el('legend', {}, 'Order of Worship'));
+  const owrap = el('div');
+  const oredraw = () => {
+    owrap.replaceChildren(
+      ...G.order.map((o, i) => {
+        const row = el('div', {class: 'row'}, rowBtns(G.order, i, oredraw));
+        if (o.kind === 'stage') {
+          row.append(el('b', {}, 'Stage direction '), txt(o, 'text', ''));
+        } else {
+          row.append(txt(o, 'label', 'Label'), txt(o, 'title', 'Title'),
+            el('label', {class: 'f'},
+              el('input', {type: 'checkbox', ...(o.titleQuoted ? {checked: true} : {}),
+                           onchange: e => o.titleQuoted = e.target.checked}),
+              ' title in quotes'),
+            txt(o, 'who', 'Speaker / performer'), txt(o, 'note', 'Italic note'),
+            blockRows(o));
+        }
+        return row;
+      }),
+      el('button', {class: 'mini', onclick: () => {
+        G.order.push({kind: 'item', type: 'plain', label: '', title: null,
+                      titleQuoted: false, who: null, note: null, body: []});
+        oredraw();
+      }}, '+ item'),
+      el('button', {class: 'mini', onclick: () => {
+        G.order.push({kind: 'stage', text: ''}); oredraw();
+      }}, '+ stage direction'));
+  };
+  oredraw();
+  ofs.append(owrap);
+  f.append(ofs);
+
+  G.musicTeam = G.musicTeam || [];
+  f.append(listSection('Music Team', G.musicTeam,
+    (row, m) => row.append(txt(m, 'name', 'Name'), txt(m, 'role', 'Role')),
+    () => ({name: '', role: ''})));
+
+  G.musicCredits = G.musicCredits || [];
+  const cfs = el('fieldset', {}, el('legend', {}, 'Music credits (small print)'));
+  const carea = el('textarea', {oninput: e =>
+    G.musicCredits = e.target.value.split('\n').filter(l => l.trim())},
+    (G.musicCredits || []).join('\n'));
+  cfs.append(el('label', {class: 'f'}, 'One line each', carea));
+  f.append(cfs);
+
+  G.prayerRequests = G.prayerRequests || [];
+  f.append(listSection('Prayer Requests', G.prayerRequests,
+    (row, pr) => row.append(txt(pr, 'name', 'Name (optional)'), txt(pr, 'text', 'Text', 'ta')),
+    () => ({name: '', text: ''})));
+
+  G.announcements = G.announcements || [];
+  f.append(listSection('Notes & Announcements', G.announcements,
+    (row, a) => row.append(txt(a, 'heading', 'Heading'),
+      el('label', {class: 'f'}, 'Kind ',
+        el('select', {onchange: e => a.kind = e.target.value},
+          ...['note', 'attendance'].map(k =>
+            el('option', {value: k, ...(a.kind === k ? {selected: ''} : {})}, k)))),
+      txt(a, 'text', 'Text', 'ta')),
+    () => ({heading: '', text: '', kind: 'note'})));
+
+  G.specialEvents = G.specialEvents || [];
+  f.append(listSection('Special Events', G.specialEvents,
+    (row, ev) => {
+      row.append(txt(ev, 'heading', 'Heading'), txt(ev, 'sectionTitle', 'Section title'));
+      const parea = el('textarea', {oninput: e =>
+        ev.paragraphs = e.target.value.split(/\n\s*\n/).filter(p => p.trim())},
+        (ev.paragraphs || []).join('\n\n'));
+      row.append(el('label', {class: 'f'}, 'Paragraphs (blank line between)', parea),
+                 txt(ev, 'note', 'Italic footnote'));
+    },
+    () => ({heading: '', paragraphs: [], note: '', sectionTitle: 'Coming Up'})));
+
+  G.journal = G.journal || {subtitle: '', morning: '', midday: '', evening: ''};
+  const jfs = el('fieldset', {}, el('legend', {}, 'Prayer Journal'));
+  jfs.append(txt(G.journal, 'subtitle', 'Subtitle'),
+             txt(G.journal, 'morning', 'Household Prayer: Morning', 'ta'),
+             txt(G.journal, 'midday', 'Midday note', 'ta'),
+             txt(G.journal, 'evening', 'Household Prayer: Evening', 'ta'));
+  f.append(jfs);
+}
+buildForm();
+
+$('save').addEventListener('click', async () => {
+  const token = $('token').value.trim();
+  if (!token) { $('msg').textContent = 'Enter the upload token first.'; return; }
+  localStorage.setItem('wgToken', token);
+  $('save').disabled = true;
+  $('msg').textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/save', {
+      method: 'POST',
+      headers: {'X-Upload-Token': token, 'Content-Type': 'application/json'},
+      body: JSON.stringify({date: '__DATE__', guide: G}),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || res.statusText);
+    $('msg').innerHTML = 'Saved &amp; re-rendered — <a href="/__DATE__/">view the page</a>.';
+  } catch (e) {
+    $('msg').textContent = 'Failed: ' + e.message;
+  } finally {
+    $('save').disabled = false;
+  }
+});
+</script>
+</body></html>
+""").replace('__STYLE__', PAGE_STYLE)
+
+
+def edit_page(d):
+    path = os.path.join(PUBLIC, d, 'guide.json')
+    with open(path, encoding='utf-8') as fh:
+        guide_json = fh.read()
+    # </script> inside a JSON string would end the data block early
+    guide_json = guide_json.replace('</', '<\\/')
+    return EDIT_PAGE.replace('__DATE__', d).replace('__GUIDE__', guide_json)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -618,6 +991,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == '/admin':
             self.send_page(ADMIN_PAGE.replace('__REVIEW__', manage_html()))
             return
+        m = re.fullmatch(r'/admin/edit/(\d{4}-\d{2}-\d{2})', path)
+        if m:
+            if os.path.exists(os.path.join(PUBLIC, m.group(1), 'guide.json')):
+                self.send_page(edit_page(m.group(1)))
+            else:
+                self.send_error(404, 'Not Found')
+            return
         if path == '/':
             dates = published_dates()
             if dates:
@@ -652,7 +1032,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         body = self.rfile.read(length)
         path = self.path.split('?', 1)[0]
-        if path not in ('/api/upload', '/api/review', '/api/rerender', '/api/unpublish'):
+        if path not in ('/api/upload', '/api/review', '/api/rerender', '/api/unpublish', '/api/save'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
             return
         expected = ENV.get('UPLOAD_TOKEN', '')
@@ -712,6 +1092,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 rerender_date(date)
             elif action == 'unpublish':
                 unpublish_date(date)
+            elif action == 'save':
+                save_guide(date, data.get('guide'))
             audit_log({'action': action, 'date': date, 'ok': True})
             self.send_json({'ok': True, 'date': date})
         except Exception as e:

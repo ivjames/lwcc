@@ -152,6 +152,34 @@ try:
     status, body = req('/archive')
     assert b'needs review' not in body
 
+    # Form editor: page loads with embedded data; save sanitizes server-side,
+    # preserves protected fields, and re-renders.
+    status, body = req('/admin/edit/2026-08-09')
+    assert status == 200 and b'guide-data' in body and b'Love Unleashed' in body
+    status, body = req('/admin/edit/1999-01-01')
+    assert status == 404
+
+    g = json.load(open(gj))
+    g['welcome']['body'][0]['text'] = 'Edited welcome <b>kept</b> <script>alert(1)</script>'
+    g['series']['title'] = 'Edited <i>Title</i>'          # plain field: tags stripped
+    g['dateISO'] = '1999-01-01'                            # protected: ignored
+    g['warnings'] = ['forged']                             # protected: ignored
+    g['bogusKey'] = {'x': 1}                               # unknown: dropped
+    status, body = req('/api/save',
+                       data=json.dumps({'date': '2026-08-09', 'guide': g}).encode(),
+                       headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body)['ok'], body
+    saved = json.load(open(gj))
+    assert '<b>kept</b>' in saved['welcome']['body'][0]['text']
+    assert '<script>' not in saved['welcome']['body'][0]['text'], 'script neutralized'
+    assert saved['series']['title'] == 'Edited Title', 'plain field stripped of tags'
+    assert saved['dateISO'] == '2026-08-02', 'dateISO from file (fixture is a copy), forge ignored'
+    assert saved['warnings'] == [], 'warnings come from the file, not the form'
+    assert 'bogusKey' not in saved
+    page = open(os.path.join(scratch, 'public', '2026-08-09', 'index.html')).read()
+    assert 'Edited welcome <b>kept</b>' in page, 'save re-rendered the page'
+    assert 'alert(1)' not in page or '<script>alert' not in page
+
     # Re-render rebuilds index.html from guide.json.
     idx = os.path.join(scratch, 'public', '2026-08-09', 'index.html')
     before = os.path.getmtime(idx)
