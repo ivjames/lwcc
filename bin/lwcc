@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Operate CLI for the lwcc site, per lab980 conventions.
+# Symlink onto PATH on the droplet:  ln -sf /var/www/lwcc/bin/lwcc /usr/local/bin/lwcc
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+case "${1:-}" in
+  redeploy)
+    cd "$DIR"
+    git pull --ff-only
+    pm2 restart lwcc --update-env
+    pm2 save
+    ;;
+  restart) pm2 restart lwcc ;;
+  logs)    pm2 logs lwcc --lines "${2:-100}" ;;
+  status)  pm2 describe lwcc ;;
+  *)
+    echo "usage: lwcc {redeploy|restart|logs [n]|status}" >&2
+    exit 2
+    ;;
+esac
