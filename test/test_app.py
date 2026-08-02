@@ -61,7 +61,7 @@ try:
     assert status == 200 and b'Nothing published yet' in body
 
     status, body = req('/admin')
-    assert status == 200 and b'Publish a Worship Guide' in body
+    assert status == 200 and b'Publish Worship Guides' in body and b'multiple' in body
 
     with open(SAMPLE, 'rb') as fh:
         pdf = fh.read()
@@ -85,6 +85,13 @@ try:
     assert status == 200, (status, body)
     data = json.loads(body)
     assert data['ok'] and data['dateISO'] == '2026-08-02' and data['warnings'] == [], data
+    assert data['replaced'] is False, data
+
+    # Re-uploading the same Sunday overwrites in place and says so.
+    status, body = req('/api/upload', data=pdf,
+                       headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/pdf'})
+    assert status == 200, (status, body)
+    assert json.loads(body)['replaced'] is True
 
     out_dir = os.path.join(scratch, 'public', '2026-08-02')
     for f in ('index.html', 'guide.json', 'cover.jpg'):

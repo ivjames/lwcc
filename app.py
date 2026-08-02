@@ -75,6 +75,7 @@ def convert_pdf(pdf_path):
             raise ValueError('no service date found in the PDF — convert it '
                              'manually with bin/wg-convert and hand-edit guide.json')
         out_dir = os.path.join(PUBLIC, guide['dateISO'])
+        replaced = os.path.exists(os.path.join(out_dir, 'index.html'))
         os.makedirs(out_dir, exist_ok=True)
         cover_dest = None
         if extracted.cover_path:
@@ -88,7 +89,7 @@ def convert_pdf(pdf_path):
                       cover_path=cover_dest)
         with open(os.path.join(out_dir, 'index.html'), 'w', encoding='utf-8') as fh:
             fh.write(html)
-        return guide
+        return guide, replaced
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -128,55 +129,131 @@ def archive_page():
 """
 
 
-ADMIN_PAGE = f"""<!DOCTYPE html>
+ADMIN_PAGE = ("""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Publish a Worship Guide</title><style>{PAGE_STYLE}</style></head>
+<title>Publish Worship Guides</title><style>__STYLE__
+  #drop{border:2px dashed #76a2bf;border-radius:10px;padding:26px;text-align:center;
+    color:#54574a;margin:10px 0}
+  #drop.over{background:#eaf1f5;border-color:#054253}
+  table{width:100%;border-collapse:collapse;font-size:.95em}
+  td,th{padding:6px 8px;border-bottom:1px solid #d8d6c7;text-align:left;vertical-align:top}
+  .st{white-space:nowrap}
+  ul.warns{margin:4px 0 0;padding-left:18px;color:#8a6410}
+  #summary{font-weight:700;margin-top:10px}
+</style></head>
 <body>
-<h1>Publish a Worship Guide</h1>
+<h1>Publish Worship Guides</h1>
 <div class="card">
-  <p>Drop in the week's worship-guide PDF. It is converted and published
-  immediately; the newest Sunday becomes the front page.</p>
+  <p>Add one PDF or a whole backlog. Files are converted and published one at
+  a time — the newest Sunday always ends up as the front page, and every
+  Sunday gets its permanent <code>/YYYY-MM-DD/</code> URL.</p>
   <p><label>Upload token<br><input type="password" id="token" size="28"></label></p>
-  <p><input type="file" id="pdf" accept="application/pdf,.pdf"></p>
-  <p><button id="go">Convert &amp; publish</button></p>
-  <div id="result"></div>
-</div>
-<div class="card">
-  <p>Batch (backlog) from a terminal:</p>
-  <p><code>curl -X POST --data-binary @WG.pdf -H "X-Upload-Token: $TOKEN" -H "Content-Type: application/pdf" https://lwcc.lab980.com/api/upload</code></p>
+  <div id="drop">Drag PDFs here, or
+    <input type="file" id="pdf" accept="application/pdf,.pdf" multiple></div>
+  <p><button id="go" disabled>Convert &amp; publish</button>
+     <button id="clear" disabled>Clear list</button></p>
+  <table id="queue" hidden><thead>
+    <tr><th>File</th><th class="st">Status</th><th>Result</th></tr>
+  </thead><tbody></tbody></table>
+  <div id="summary"></div>
 </div>
 <p><a href="/">Current guide</a> · <a href="/archive">Archive</a></p>
 <script>
 const $ = id => document.getElementById(id);
+let queue = [];   // {file, status, data, error}
+let running = false;
+
 $('token').value = localStorage.getItem('wgToken') || '';
-$('go').addEventListener('click', async () => {{
-  const file = $('pdf').files[0], token = $('token').value.trim();
-  const out = $('result');
-  if (!file) {{ out.innerHTML = '<p class="err">Choose a PDF first.</p>'; return; }}
+
+function addFiles(list) {
+  for (const f of list) {
+    if (!/\.pdf$/i.test(f.name)) continue;
+    if (queue.some(q => q.file.name === f.name && q.status !== 'failed')) continue;
+    queue.push({file: f, status: 'queued', data: null, error: null});
+  }
+  queue.sort((a, b) => a.file.name.localeCompare(b.file.name));
+  renderQueue();
+}
+
+function statusCell(q) {
+  return {queued: '·', converting: '⏳ converting', ok: '<span class="ok">✔ published</span>',
+          warned: '<span class="warn">⚠ published</span>',
+          failed: '<span class="err">✖ failed</span>'}[q.status];
+}
+
+function resultCell(q) {
+  if (q.status === 'failed') return '<span class="err">' + q.error + '</span>';
+  if (!q.data) return '';
+  let html = '<a href="' + q.data.url + '">' + q.data.date + '</a>';
+  if (q.data.replaced) html += ' <span class="warn">(replaced existing)</span>';
+  if (q.data.warnings.length) {
+    html += '<ul class="warns">' +
+      q.data.warnings.map(w => '<li>' + w + '</li>').join('') + '</ul>';
+  }
+  return html;
+}
+
+function renderQueue() {
+  const tb = $('queue').querySelector('tbody');
+  tb.innerHTML = queue.map(q =>
+    '<tr><td>' + q.file.name + '</td><td class="st">' + statusCell(q) +
+    '</td><td>' + resultCell(q) + '</td></tr>').join('');
+  $('queue').hidden = !queue.length;
+  $('go').disabled = running || !queue.some(q => q.status === 'queued');
+  $('clear').disabled = running || !queue.length;
+  const done = queue.filter(q => ['ok', 'warned', 'failed'].includes(q.status));
+  if (done.length && !running) {
+    const ok = done.filter(q => q.status === 'ok').length;
+    const warned = done.filter(q => q.status === 'warned').length;
+    const failed = done.filter(q => q.status === 'failed').length;
+    $('summary').textContent = ok + ' clean, ' + warned + ' with warnings, ' + failed + ' failed.';
+  } else {
+    $('summary').textContent = '';
+  }
+}
+
+$('pdf').addEventListener('change', e => { addFiles(e.target.files); e.target.value = ''; });
+$('drop').addEventListener('dragover', e => { e.preventDefault(); $('drop').classList.add('over'); });
+$('drop').addEventListener('dragleave', () => $('drop').classList.remove('over'));
+$('drop').addEventListener('drop', e => {
+  e.preventDefault();
+  $('drop').classList.remove('over');
+  addFiles(e.dataTransfer.files);
+});
+$('clear').addEventListener('click', () => { queue = []; renderQueue(); });
+
+$('go').addEventListener('click', async () => {
+  const token = $('token').value.trim();
   localStorage.setItem('wgToken', token);
-  $('go').disabled = true;
-  out.innerHTML = '<p>Converting…</p>';
-  try {{
-    const res = await fetch('/api/upload', {{
-      method: 'POST',
-      headers: {{'X-Upload-Token': token, 'Content-Type': 'application/pdf'}},
-      body: file,
-    }});
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || res.statusText);
-    const warns = (data.warnings || []).map(w => `<li class="warn">⚠ ${{w}}</li>`).join('');
-    out.innerHTML = `<p class="ok">Published <a href="${{data.url}}">${{data.date}}</a>.</p>` +
-      (warns ? `<p>Check these before sharing:</p><ul>${{warns}}</ul>` : '');
-  }} catch (e) {{
-    out.innerHTML = `<p class="err">${{e.message}}</p>`;
-  }} finally {{
-    $('go').disabled = false;
-  }}
-}});
+  running = true;
+  renderQueue();
+  for (const q of queue) {
+    if (q.status !== 'queued') continue;
+    q.status = 'converting';
+    renderQueue();
+    try {
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        headers: {'X-Upload-Token': token, 'Content-Type': 'application/pdf'},
+        body: q.file,
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || res.statusText);
+      q.data = data;
+      q.status = data.warnings.length ? 'warned' : 'ok';
+    } catch (e) {
+      q.status = 'failed';
+      q.error = e.message;
+    }
+    renderQueue();
+  }
+  running = false;
+  renderQueue();
+});
 </script>
 </body></html>
-"""
+""").replace('__STYLE__', PAGE_STYLE)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -250,12 +327,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             tmp.write(body)
             tmp.close()
-            guide = convert_pdf(tmp.name)
+            guide, replaced = convert_pdf(tmp.name)
             self.send_json({
                 'ok': True,
                 'date': guide['date'],
                 'dateISO': guide['dateISO'],
                 'url': f"/{guide['dateISO']}/",
+                'replaced': replaced,
                 'warnings': guide['warnings'],
             })
         except Exception as e:                        # surface, don't 500-blank
