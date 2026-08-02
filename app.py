@@ -18,6 +18,7 @@ warnings from the parser are returned to the uploader so odd content is seen,
 not silently dropped.
 """
 import argparse
+import datetime
 import hmac
 import http.server
 import json
@@ -61,6 +62,108 @@ def published_dates():
         (d for d in os.listdir(PUBLIC)
          if DATE_DIR_RE.match(d) and os.path.exists(os.path.join(PUBLIC, d, 'index.html'))),
         reverse=True)
+
+
+MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+               'August', 'September', 'October', 'November', 'December']
+
+
+def date_label(d):
+    """'2026-07-26' -> 'July 26, 2026'"""
+    dt = datetime.date.fromisoformat(d)
+    return f'{MONTH_NAMES[dt.month - 1]} {dt.day}, {dt.year}'
+
+
+_meta_cache = {}
+
+
+def guide_meta(d):
+    """Sermon metadata + searchable text for a published Sunday, from its
+    guide.json (cached by mtime). None when the JSON is absent/unreadable."""
+    path = os.path.join(PUBLIC, d, 'guide.json')
+    if not os.path.exists(path):
+        return None
+    mtime = os.path.getmtime(path)
+    hit = _meta_cache.get(d)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        with open(path, encoding='utf-8') as fh:
+            g = json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+    def strip(s):
+        return re.sub(r'<[^>]+>', '', s or '')
+
+    series = g.get('series') or {}
+    refs, parts = [], []
+    for o in g.get('order') or []:
+        if o.get('kind') != 'item':
+            continue
+        if o.get('title'):
+            parts.append(o['title'])
+        if o.get('who'):
+            parts.append(o['who'])
+        for b in o.get('body') or []:
+            if b.get('type') == 'ref':
+                refs.append(b['text'])
+            parts.append(strip(b.get('text')))
+    if g.get('welcome'):
+        parts += [strip(b.get('text')) for b in g['welcome'].get('body') or []]
+    for a in g.get('announcements') or []:
+        parts += [a.get('heading') or '', strip(a.get('text'))]
+    for pr in g.get('prayerRequests') or []:
+        parts += [pr.get('name') or '', strip(pr.get('text'))]
+    for ev in g.get('specialEvents') or []:
+        parts += [ev.get('heading') or ''] + [strip(p) for p in ev.get('paragraphs') or []]
+    blob = ' '.join(p for p in ([series.get('title'), series.get('by'),
+                                 g.get('season')] + refs + parts) if p)
+    meta = {
+        'title': series.get('title'),
+        'by': series.get('by'),
+        'season': g.get('season'),
+        'refs': refs,
+        'blob': re.sub(r'\s+', ' ', blob),
+    }
+    _meta_cache[d] = (mtime, meta)
+    return meta
+
+
+def weeknav_html(d):
+    """Prev/next-Sunday strip injected into served guide pages. Computed at
+    request time so links stay correct as the backlog fills in."""
+    dates = published_dates()          # newest first
+    older = newer = None
+    if d in dates:
+        i = dates.index(d)
+        newer = dates[i - 1] if i > 0 else None
+        older = dates[i + 1] if i + 1 < len(dates) else None
+    parts = []
+    if older:
+        parts.append(f'<a rel="prev" href="/{older}/">&larr; {date_label(older)}</a>')
+    parts.append('<a href="/archive">All Sundays</a>')
+    parts.append('<a href="/search">Search</a>')
+    if newer:
+        parts.append(f'<a rel="next" href="/{newer}/">{date_label(newer)} &rarr;</a>')
+    return ('<div class="weeknav" style="font-family:Arial,Helvetica,sans-serif;'
+            'font-size:.9rem;display:flex;gap:8px 22px;justify-content:center;'
+            'flex-wrap:wrap;padding:10px 20px;background:#f4f2ea;'
+            'border-bottom:1px solid #d8d6c7">' + '\n  '.join(parts) + '</div>')
+
+
+def guide_with_nav(d):
+    """The published page with the week-nav strip under the sticky section nav
+    and again above the footer."""
+    with open(os.path.join(PUBLIC, d, 'index.html'), encoding='utf-8') as fh:
+        html = fh.read()
+    nav = weeknav_html(d)
+    if '</nav>' in html:
+        html = html.replace('</nav>', '</nav>\n' + nav, 1)
+    else:
+        html = html.replace('<body>', '<body>\n' + nav, 1)
+    html = html.replace('<footer>', nav + '\n<footer>', 1)
+    return html
 
 
 def convert_pdf(pdf_path):
@@ -113,18 +216,101 @@ PAGE_STYLE = """
 
 def archive_page():
     dates = published_dates()
-    items = '\n'.join(
-        f'    <li><a href="/{d}/">{d}</a></li>' for d in dates) or '    <li>Nothing published yet.</li>'
+    rows = []
+    for d in dates:
+        meta = guide_meta(d)
+        line = f'<a href="/{d}/">{date_label(d)}</a>'
+        if meta and meta['title']:
+            line += f" — <b>{meta['title']}</b>"
+            if meta['by']:
+                line += f" <span style=\"color:#54574a\">({meta['by']})</span>"
+        if meta and meta['refs']:
+            line += ('<br><span style="color:#54574a;font-size:.9em">'
+                     + ' · '.join(meta['refs']) + '</span>')
+        rows.append(f'    <li style="margin:8px 0">{line}</li>')
+    items = '\n'.join(rows) or '    <li>Nothing published yet.</li>'
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Worship Guide Archive</title><style>{PAGE_STYLE}</style></head>
 <body>
 <h1>Worship Guide Archive</h1>
-<div class="card"><ul>
+<form action="/search" style="margin:14px 0"><input type="search" name="q"
+  placeholder="Search sermons…" size="28"> <button>Search</button></form>
+<div class="card"><ul style="list-style:none;padding-left:0">
 {items}
 </ul></div>
 <p><a href="/">Current guide</a></p>
+</body></html>
+"""
+
+
+def search_page(query):
+    q = (query or '').strip()
+    words = [w for w in q.lower().split() if w]
+    results = []
+    if words:
+        for d in published_dates():
+            meta = guide_meta(d)
+            hay = (meta['blob'].lower() + ' ' + d) if meta else d
+            if not all(w in hay for w in words):
+                continue
+            title = (meta or {}).get('title')
+            by = (meta or {}).get('by')
+            refs = (meta or {}).get('refs') or []
+            snippet = ''
+            if meta:
+                low = meta['blob'].lower()
+                # center the snippet on the most meaningful (longest) word
+                pos = -1
+                for w in sorted(words, key=len, reverse=True):
+                    pos = low.find(w)
+                    if pos >= 0:
+                        break
+                if pos >= 0:
+                    start = max(0, pos - 80)
+                    end = min(len(meta['blob']), pos + 160)
+                    snippet = ('…' if start else '') + meta['blob'][start:end] + \
+                              ('…' if end < len(meta['blob']) else '')
+                    snippet = (snippet.replace('&', '&amp;').replace('<', '&lt;')
+                               .replace('>', '&gt;'))
+                    for w in words:
+                        if len(w) < 3:      # don't blanket-highlight "a"/"of"/"an"
+                            continue
+                        snippet = re.sub(f'({re.escape(w)})', r'<mark>\1</mark>',
+                                         snippet, flags=re.I)
+            head = f'<a href="/{d}/">{date_label(d)}</a>'
+            if title:
+                head += f' — <b>{title}</b>'
+            if by:
+                head += f' <span style="color:#54574a">({by})</span>'
+            if refs:
+                head += ('<br><span style="color:#54574a;font-size:.9em">'
+                         + ' · '.join(refs) + '</span>')
+            body = f'<br><span style="font-size:.92em">{snippet}</span>' if snippet else ''
+            results.append(f'    <li style="margin:12px 0">{head}{body}</li>')
+    if q and not results:
+        listing = '<p>No results for <b>' + (q.replace('&', '&amp;')
+                  .replace('<', '&lt;').replace('>', '&gt;')) + '</b>.</p>'
+    elif results:
+        joined = '\n'.join(results)
+        listing = f'<ul style="list-style:none;padding-left:0">\n{joined}\n</ul>'
+    else:
+        listing = '<p>Search sermon titles, scripture, speakers, or any text from the guides.</p>'
+    q_attr = q.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;')
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sermon Search</title><style>{PAGE_STYLE}</style></head>
+<body>
+<h1>Sermon Search</h1>
+<form action="/search" style="margin:14px 0"><input type="search" name="q"
+  value="{q_attr}" placeholder="Search sermons…" size="28" autofocus>
+  <button>Search</button></form>
+<div class="card">
+{listing}
+</div>
+<p><a href="/">Current guide</a> · <a href="/archive">Archive</a></p>
 </body></html>
 """
 
@@ -276,12 +462,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # -- routes -------------------------------------------------------------
 
     def do_GET(self):
-        path = self.path.split('?', 1)[0]
+        path, _, query = self.path.partition('?')
         if path == '/healthz':
             self.send_page('ok\n', ctype='text/plain')
             return
         if path == '/archive':
             self.send_page(archive_page())
+            return
+        if path == '/search':
+            import urllib.parse
+            q = urllib.parse.parse_qs(query).get('q', [''])[0]
+            self.send_page(search_page(q))
             return
         if path == '/admin':
             self.send_page(ADMIN_PAGE)
@@ -289,9 +480,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == '/':
             dates = published_dates()
             if dates:
-                with open(os.path.join(PUBLIC, dates[0], 'index.html'), 'rb') as fh:
-                    self.send_page(fh.read())
+                self.send_page(guide_with_nav(dates[0]))
                 return
+        m = re.fullmatch(r'/(\d{4}-\d{2}-\d{2})', path)
+        if m:
+            self.send_response(301)
+            self.send_header('Location', path + '/')
+            self.end_headers()
+            return
+        m = re.fullmatch(r'/(\d{4}-\d{2}-\d{2})/(?:index\.html)?', path)
+        if m and os.path.exists(os.path.join(PUBLIC, m.group(1), 'index.html')):
+            self.send_page(guide_with_nav(m.group(1)))
+            return
         super().do_GET()
 
     def do_POST(self):

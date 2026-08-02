@@ -102,8 +102,28 @@ try:
     assert status == 200 and b'Love Unleashed' in body
     status, body = req('/2026-08-02/')
     assert status == 200 and b'Love Unleashed' in body
+    assert b'class="weeknav"' in body and b'All Sundays' in body, 'week nav injected'
     status, body = req('/archive')
     assert status == 200 and b'/2026-08-02/' in body
+    assert b'Love Unleashed' in body, 'archive shows sermon metadata'
+
+    # A second published Sunday wires up prev/next both ways.
+    shutil.copytree(os.path.join(scratch, 'public', '2026-08-02'),
+                    os.path.join(scratch, 'public', '2026-08-09'))
+    status, body = req('/2026-08-02/')
+    assert b'href="/2026-08-09/"' in body and b'rel="next"' in body, 'next link'
+    status, body = req('/')          # front page is now Aug 9
+    assert b'href="/2026-08-02/"' in body and b'rel="prev"' in body, 'prev link'
+    status, body = req('/2026-08-02')
+    assert status == 301 or b'Love Unleashed' in body   # bare date redirects
+
+    # Sermon search: title, scripture, and no-hit cases.
+    status, body = req('/search?q=Unleashed')
+    assert status == 200 and b'/2026-08-02/' in body and b'<mark>' in body
+    status, body = req('/search?q=Matthew')
+    assert status == 200 and b'/2026-08-02/' in body
+    status, body = req('/search?q=zzzqqqxyzzy')
+    assert status == 200 and b'No results' in body
 
     print('all app tests passed')
 finally:
