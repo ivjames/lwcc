@@ -135,6 +135,46 @@ try:
     assert b'needs review' in body, 'archive badge for warned guide'
     status, body = req('/admin')
     assert b'Needs review' in body and b'untitled item' in body, 'review panel lists warnings'
+    assert b'Published Sundays' in body and b'adminAction' in body, 'management panel present'
+
+    # Mark reviewed: warnings move to reviewedWarnings, panel and badge clear.
+    def action(name, date, token=TOKEN):
+        return req(f'/api/{name}', data=json.dumps({'date': date}).encode(),
+                   headers={'X-Upload-Token': token, 'Content-Type': 'application/json'})
+    status, body = action('review', '2026-08-09', token='wrong')
+    assert status == 401
+    status, body = action('review', '2026-08-09')
+    assert status == 200 and json.loads(body)['ok'], body
+    g = json.load(open(gj))
+    assert g['warnings'] == [] and 'untitled item' in g['reviewedWarnings'][0]
+    status, body = req('/admin')
+    assert b'Needs review' not in body
+    status, body = req('/archive')
+    assert b'needs review' not in body
+
+    # Re-render rebuilds index.html from guide.json.
+    idx = os.path.join(scratch, 'public', '2026-08-09', 'index.html')
+    before = os.path.getmtime(idx)
+    status, body = action('rerender', '2026-08-09')
+    assert status == 200 and json.loads(body)['ok'], body
+    assert os.path.getmtime(idx) >= before
+    assert b'Love Unleashed' in open(idx, 'rb').read()
+
+    # Unpublish sets the folder aside (dot-prefixed, unserved) and the front
+    # page falls back to the previous newest Sunday.
+    status, body = action('unpublish', '2026-08-09')
+    assert status == 200 and json.loads(body)['ok'], body
+    aside = [f for f in os.listdir(os.path.join(scratch, 'public'))
+             if f.startswith('.unpublished-2026-08-09')]
+    assert aside, 'folder renamed aside, not deleted'
+    status, body = req('/archive')
+    assert b'/2026-08-09/' not in body
+    status, body = req('/')
+    assert b'2026-08-02' in body or b'August 2, 2026' in body
+    status, body = req(f'/{aside[0]}/index.html')
+    assert status == 404, 'unpublished folder is not served'
+    status, body = action('unpublish', '2026-08-09')
+    assert status == 404, 'acting on a gone date reports not found'
 
     # Sermon search: title, scripture, and no-hit cases.
     status, body = req('/search?q=Unleashed')

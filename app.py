@@ -186,8 +186,7 @@ def guide_with_nav(d):
 
 def convert_pdf(pdf_path):
     """Run the wgconvert pipeline and publish into public/<dateISO>/."""
-    with open(os.path.join(ROOT, 'config', 'church.json'), encoding='utf-8') as fh:
-        church = json.load(fh)
+    church = load_church()
     work_dir = tempfile.mkdtemp(prefix='wg-upload-')
     try:
         extracted = extract(pdf_path, work_dir)
@@ -213,6 +212,52 @@ def convert_pdf(pdf_path):
         return guide, replaced
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def load_church():
+    with open(os.path.join(ROOT, 'config', 'church.json'), encoding='utf-8') as fh:
+        return json.load(fh)
+
+
+def write_guide_json(path, g):
+    with open(path, 'w', encoding='utf-8') as fh:
+        json.dump(g, fh, indent=2, ensure_ascii=False)
+        fh.write('\n')
+
+
+def mark_reviewed(d):
+    """Move a Sunday's parser warnings to reviewedWarnings — the operator has
+    checked the page and accepts it. Clears the review panel and badge while
+    keeping the history in guide.json."""
+    path = os.path.join(PUBLIC, d, 'guide.json')
+    with open(path, encoding='utf-8') as fh:
+        g = json.load(fh)
+    if g.get('warnings'):
+        g['reviewedWarnings'] = (g.get('reviewedWarnings') or []) + g['warnings']
+        g['warnings'] = []
+        write_guide_json(path, g)
+
+
+def rerender_date(d):
+    """Rebuild index.html from the stored guide.json (after hand-edits)."""
+    out_dir = os.path.join(PUBLIC, d)
+    with open(os.path.join(out_dir, 'guide.json'), encoding='utf-8') as fh:
+        g = json.load(fh)
+    cover = next((f for f in os.listdir(out_dir)
+                  if re.fullmatch(r'cover\.(jpe?g|png|webp)', f)), None)
+    html = render(g, load_church(),
+                  banner_path=os.path.join(ROOT, 'assets', 'banner.png'),
+                  cover_path=os.path.join(out_dir, cover) if cover else None)
+    with open(os.path.join(out_dir, 'index.html'), 'w', encoding='utf-8') as fh:
+        fh.write(html)
+
+
+def unpublish_date(d):
+    """Take a Sunday off the site without destroying it: the folder is renamed
+    aside (restore by renaming it back and re-uploading is never needed)."""
+    ts = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+    os.rename(os.path.join(PUBLIC, d),
+              os.path.join(PUBLIC, f'.unpublished-{d}-{ts}'))
 
 
 PAGE_STYLE = """
@@ -349,6 +394,7 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   .st{white-space:nowrap}
   ul.warns{margin:4px 0 0;padding-left:18px;color:#8a6410}
   #summary{font-weight:700;margin-top:10px}
+  button.mini{padding:4px 12px;font-size:.82em;margin-left:8px;background:#3f6b82}
 </style></head>
 <body>
 <h1>Publish Worship Guides</h1>
@@ -432,6 +478,21 @@ $('drop').addEventListener('drop', e => {
 });
 $('clear').addEventListener('click', () => { queue = []; renderQueue(); });
 
+async function adminAction(action, date) {
+  const token = $('token').value.trim();
+  if (!token) { alert('Enter the upload token first.'); return; }
+  if (action === 'unpublish' && !confirm('Unpublish ' + date + '? The folder is set aside, not deleted.')) return;
+  localStorage.setItem('wgToken', token);
+  const res = await fetch('/api/' + action, {
+    method: 'POST',
+    headers: {'X-Upload-Token': token, 'Content-Type': 'application/json'},
+    body: JSON.stringify({date}),
+  });
+  const data = await res.json().catch(() => ({ok: false, error: res.statusText}));
+  if (!data.ok) { alert(data.error || 'failed'); return; }
+  location.reload();
+}
+
 $('go').addEventListener('click', async () => {
   const token = $('token').value.trim();
   localStorage.setItem('wgToken', token);
@@ -473,23 +534,49 @@ $('go').addEventListener('click', async () => {
 """).replace('__STYLE__', PAGE_STYLE)
 
 
-def review_html():
-    """Published Sundays whose stored guide.json still carries parser
-    warnings — the durable to-review list after a batch run."""
-    flagged = [(d, guide_meta(d)) for d in published_dates()]
-    flagged = [(d, m) for d, m in flagged if m and m['warnings']]
-    if not flagged:
+def manage_html():
+    """Server-rendered management panel for /admin: Sundays needing review
+    (with their warnings and a Mark-reviewed action) plus a compact list of
+    everything published with re-render/unpublish actions."""
+    dates = published_dates()
+    if not dates:
         return ''
-    items = []
-    for d, m in flagged:
-        warns = ''.join(f'<li class="warn">{w}</li>' for w in m['warnings'])
-        items.append(f'<li style="margin:10px 0"><a href="/{d}/">{date_label(d)}</a>'
-                     f'<ul style="margin:4px 0 0;padding-left:18px">{warns}</ul></li>')
-    return ('<div class="card"><p><b>Needs review</b> — published with parser '
-            'warnings (re-upload a corrected PDF, or hand-edit that Sunday\'s '
-            'guide.json and re-render, to clear):</p>'
-            '<ul style="list-style:none;padding-left:0">' + ''.join(items)
-            + '</ul></div>')
+    metas = {d: guide_meta(d) for d in dates}
+    out = []
+
+    flagged = [(d, m) for d, m in metas.items() if m and m['warnings']]
+    if flagged:
+        items = []
+        for d, m in sorted(flagged, reverse=True):
+            warns = ''.join(f'<li class="warn">{w}</li>' for w in m['warnings'])
+            items.append(
+                f'<li style="margin:10px 0"><a href="/{d}/">{date_label(d)}</a> '
+                f'<button class="mini" onclick="adminAction(\'review\', \'{d}\')">'
+                f'Mark reviewed</button>'
+                f'<ul style="margin:4px 0 0;padding-left:18px">{warns}</ul></li>')
+        out.append('<div class="card"><p><b>Needs review</b> — published with '
+                   'parser warnings. Check the page; if it reads right, mark it '
+                   'reviewed (warnings are kept in guide.json under '
+                   'reviewedWarnings). Or fix and re-upload the PDF.</p>'
+                   '<ul style="list-style:none;padding-left:0">'
+                   + ''.join(items) + '</ul></div>')
+
+    rows = []
+    for d in dates:
+        m = metas.get(d)
+        title = f' — {m["title"]}' if m and m['title'] else ''
+        rows.append(
+            f'<li style="margin:7px 0"><a href="/{d}/">{d}</a>{title} '
+            f'<button class="mini" onclick="adminAction(\'rerender\', \'{d}\')">'
+            f'Re-render</button>'
+            f'<button class="mini" onclick="adminAction(\'unpublish\', \'{d}\')">'
+            f'Unpublish</button></li>')
+    out.append('<div class="card"><p><b>Published Sundays</b> — re-render '
+               'rebuilds the page from its guide.json (after hand-edits); '
+               'unpublish sets the folder aside without deleting it.</p>'
+               '<ul style="list-style:none;padding-left:0">'
+               + ''.join(rows) + '</ul></div>')
+    return '\n'.join(out)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -529,13 +616,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_page(search_page(q))
             return
         if path == '/admin':
-            self.send_page(ADMIN_PAGE.replace('__REVIEW__', review_html()))
+            self.send_page(ADMIN_PAGE.replace('__REVIEW__', manage_html()))
             return
         if path == '/':
             dates = published_dates()
             if dates:
                 self.send_page(guide_with_nav(dates[0]))
                 return
+        if '/.' in path:
+            self.send_error(404, 'Not Found')
+            return
         m = re.fullmatch(r'/(\d{4}-\d{2}-\d{2})', path)
         if m:
             self.send_response(301)
@@ -561,7 +651,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                            status=413)
             return
         body = self.rfile.read(length)
-        if self.path.split('?', 1)[0] != '/api/upload':
+        path = self.path.split('?', 1)[0]
+        if path not in ('/api/upload', '/api/review', '/api/rerender', '/api/unpublish'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
             return
         expected = ENV.get('UPLOAD_TOKEN', '')
@@ -573,6 +664,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         got = self.headers.get('X-Upload-Token', '')
         if not hmac.compare_digest(got, expected):
             self.send_json({'ok': False, 'error': 'bad upload token'}, status=401)
+            return
+        if path != '/api/upload':
+            self.handle_action(path.rsplit('/', 1)[1], body)
             return
         if not body.startswith(b'%PDF-'):
             self.send_json({'ok': False, 'error': 'not a PDF'}, status=400)
@@ -598,6 +692,32 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({'ok': False, 'error': str(e)}, status=422)
         finally:
             os.unlink(tmp.name)
+
+    def handle_action(self, action, body):
+        try:
+            data = json.loads(body or b'{}')
+            date = data.get('date', '')
+        except ValueError:
+            self.send_json({'ok': False, 'error': 'invalid JSON body'}, status=400)
+            return
+        if not DATE_DIR_RE.match(date) or \
+                not os.path.exists(os.path.join(PUBLIC, date, 'guide.json')):
+            self.send_json({'ok': False, 'error': f'no published guide for {date!r}'},
+                           status=404)
+            return
+        try:
+            if action == 'review':
+                mark_reviewed(date)
+            elif action == 'rerender':
+                rerender_date(date)
+            elif action == 'unpublish':
+                unpublish_date(date)
+            audit_log({'action': action, 'date': date, 'ok': True})
+            self.send_json({'ok': True, 'date': date})
+        except Exception as e:
+            traceback.print_exc()
+            audit_log({'action': action, 'date': date, 'ok': False, 'error': str(e)})
+            self.send_json({'ok': False, 'error': str(e)}, status=500)
 
     # -- policy -------------------------------------------------------------
 
