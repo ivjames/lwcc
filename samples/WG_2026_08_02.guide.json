@@ -1,0 +1,355 @@
+{
+  "date": "August 2, 2026",
+  "dateISO": "2026-08-02",
+  "season": "10th Sunday After Pentecost",
+  "series": {
+    "title": "Love Unleashed",
+    "by": "Rev. Johan Dodge"
+  },
+  "coverAlt": "Message series artwork: Love Unleashed. Rev. Johan Dodge",
+  "welcome": {
+    "heading": "Opening Announcements",
+    "who": "Rev. Johan Dodge",
+    "body": [
+      {
+        "type": "para",
+        "text": "Good Morning and Welcome to Worship! Worship is often the first place that new people come into contact with this growing community of faith. And so, if you are joining us for the first time, I say to you what is said every Sunday: You are welcome here. Here is a place where all are welcome. For such is the love of God for God’s Very Good Creation."
+      }
+    ]
+  },
+  "order": [
+    {
+      "kind": "stage",
+      "text": "please stand as you are able"
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Call to Worship",
+      "title": "Doxology",
+      "titleQuoted": false,
+      "who": null,
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "Praise God from whom all blessings flow; praise God, all creatures here below; praise God above, ye Heav'nly host: praise Father, Son, and Holy Ghost. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "prayer",
+      "label": "Prayer of the Day",
+      "title": "The Prayer of Jesus",
+      "titleQuoted": true,
+      "who": "Phyllis Spencer",
+      "note": "Translated from Aramaic, the language of first-century Galilee and Judea.",
+      "body": [
+        {
+          "type": "prayer",
+          "text": "O cosmic Birther of all radiance and vibration, soften the ground of our being and carve out a space within us where your Presence can abide.\nFill us with your creativity so that we may be empowered to bear the fruit of your mission.\nLet each of our actions bear fruit in accordance with our desire.\nEndow us with the wisdom to produce and share what each being needs to grow and flourish.\nUntie the tangled threads of destiny that bind us, as we release others from the entanglement of past mistakes.\nDo not let us be seduced by that which would divert us from our true purpose, but illuminate the opportunities of the present moment.\nFor you are the ground and the fruitful vision, the birth, power, and fulfillment, as all is gathered and made whole once again.\nAnd So It Is!"
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Hymn",
+      "title": "Be Thou My Vision",
+      "titleQuoted": true,
+      "who": null,
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "stage",
+      "text": "please be seated"
+    },
+    {
+      "kind": "item",
+      "type": "litany",
+      "label": "Prayers of Intercession",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Rev. Johan Dodge",
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "Compassionate God, you are the source of all life and all love. Help us to listen to your leading and share what we have with a hungry and hurting world."
+        },
+        {
+          "type": "para",
+          "text": "We pray for the earth and all the creatures who share this planet together. May we do our part in restoring the balance of your creation and deepen our commitment to follow the way of Jesus by feeding and serving others."
+        },
+        {
+          "type": "refrain",
+          "text": "Jesus said, “they need not go away; you give them something to eat.”"
+        },
+        {
+          "type": "para",
+          "text": "We pray for all the people of the world, for their ethnic groups, nations, and leaders, that wars will cease, that the hungry will be fed, and that refugees will return home in safety and in peace."
+        },
+        {
+          "type": "refrain",
+          "text": "Jesus said, “they need not go away; you give them something to eat.”"
+        },
+        {
+          "type": "para",
+          "text": "We pray for all who suffer from physical ills and for all those who struggle for personal identity and spiritual peace. May they find their truth without money and their peace without cost."
+        },
+        {
+          "type": "refrain",
+          "text": "Jesus said, “they need not go away; you give them something to eat.”"
+        },
+        {
+          "type": "para",
+          "text": "Gracious and merciful God, abounding in steadfast love, we join our voices with all that you have created in speaking your praises and blessing your name. <b>Amen.</b>"
+        }
+      ]
+    },
+    {
+      "kind": "stage",
+      "text": "please stand as you are able"
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Hymn",
+      "title": "We Shall Overcome",
+      "titleQuoted": true,
+      "who": null,
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "stage",
+      "text": "please be seated"
+    },
+    {
+      "kind": "item",
+      "type": "prayer",
+      "label": "Prayer for Illumination",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Phyllis Spencer",
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "Ever-Present God, by your Holy Spirit open our hearts to your word, that we might be filled with the knowledge of the way of Jesus and continue to practice that way into the future. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "scripture",
+      "label": "Scripture",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Phyllis Spencer",
+      "note": null,
+      "body": [
+        {
+          "type": "ref",
+          "text": "Romans 9:1-5"
+        },
+        {
+          "type": "verse",
+          "text": "<sup>1</sup> I am speaking the truth in Christ—I am not lying; my conscience confirms it by the Holy Spirit — <sup>2</sup> I have great sorrow and unceasing anguish in my heart. <sup>3</sup> For I could wish that I myself were accursed and cut off from Christ for the sake of my own brothers and sisters, my own flesh and blood. <sup>4</sup> They are Israelites, and to them belong the adoption, the glory, the covenants, the giving of the law, the worship, and the promises; <sup>5</sup> to them belong the patriarchs, and from them, according to the flesh, comes the Christ, who is over all, God blessed forever. Amen."
+        },
+        {
+          "type": "ref",
+          "text": "Matthew 14:13-21"
+        },
+        {
+          "type": "verse",
+          "text": "<sup>13</sup> Now when Jesus heard this, he withdrew from there in a boat to a deserted place by himself. But when the crowds heard it, they followed him on foot from the towns. <sup>14</sup> When he went ashore, he saw a great crowd, and he had compassion for them and cured their sick. <sup>15</sup> When it was evening, the disciples came to him and said, “This is a deserted place, and the hour is now late; send the crowds away so that they may go into the villages and buy food for themselves.” <sup>16</sup> Jesus said to them, “They need not go away; you give them something to eat.” <sup>17</sup> They replied, “We have nothing here but five loaves and two fish.” <sup>18</sup> And he said, “Bring them here to me.” <sup>19</sup> Then he ordered the crowds to sit down on the grass. Taking the five loaves and the two fish, he looked up to heaven and blessed and broke the loaves and gave them to the disciples, and the disciples gave them to the crowds. <sup>20</sup> And all ate and were filled, and they took up what was left over of the broken pieces, twelve baskets full. <sup>21</sup> And those who ate were about five thousand men, besides women and children."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "message",
+      "label": "Message",
+      "title": "Love Unleashed",
+      "titleQuoted": true,
+      "who": "Rev. Johan Dodge",
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "item",
+      "type": "plain",
+      "label": "Questions for Reflection",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Rev. Johan Dodge",
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "Sometimes the miracle is simply an act of kindness, an openness to the other, or an opportunity share and receive together. How does this reimagining of the miracle, grounded in every day life, free you to think of God acting in the world through our hands and feet?"
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Reflection",
+      "title": "His Eye Is On the Sparrow",
+      "titleQuoted": true,
+      "who": "Hannah Yi, pianist",
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "item",
+      "type": "plain",
+      "label": "Invitation to the Offering",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Phyllis Spencer",
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "As we abide in God, we are blessed and have been blessed with a wealth unimaginable in so many part so the world where God’s people also abide in God. It is our task then, to recognize what God has shared with us and to share with those in need around us, recognizing that the answer to the question: “Who is my neighbor?” is all of creation everywhere. <b>Amen.</b>"
+        }
+      ]
+    },
+    {
+      "kind": "stage",
+      "text": "Ushers, please come forward"
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Offertory",
+      "title": "City of God",
+      "titleQuoted": true,
+      "who": "Dave Albulario, tenor",
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "item",
+      "type": "prayer",
+      "label": "Prayer of Thanksgiving",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Phyllis Spencer",
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "Loving and Generous God, you provide for us and even bless us in more ways than we will ever remember. We give these gifts as a sign of our love in you knowing that these humble gifts will be blessed and magnified as we share what we have with one another. May these gifts and our very lives as we share in life together tell of your wondrous and steadfast love. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "stage",
+      "text": "please stand as you are able"
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Hymn",
+      "title": "Let There Be Peace on Earth",
+      "titleQuoted": true,
+      "who": null,
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "item",
+      "type": "prayer",
+      "label": "Blessing",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Rev. Johan Dodge",
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "May the nourishment of the earth be yours. May the clarity of light be yours. May the fluency of the ocean be yours. May the protection of the ancestors be yours. And so may a slow wind work these words of love around you as an invisible cloak to mind your life. Go in peace. Go to be Christ’s love — to be the love of God in the world. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Sending Forth",
+      "title": "Blest Be the Tie that Binds",
+      "titleQuoted": true,
+      "who": null,
+      "note": null,
+      "body": []
+    }
+  ],
+  "musicTeam": [
+    {
+      "name": "Dave Albulario",
+      "role": "Tenor / Music Dir."
+    },
+    {
+      "name": "Jennifer Rudy",
+      "role": "Soprano"
+    },
+    {
+      "name": "Hannah Yi",
+      "role": "Pianist"
+    },
+    {
+      "name": "John Fluker",
+      "role": "Pianist"
+    }
+  ],
+  "prayerRequests": [
+    {
+      "name": "Patty Jo Schmitz",
+      "text": "Patty Jo’s son, Richard Keller, passed away on Tuesday, July 21, 2026. Unbeknownst to PattyJo, Richard had been battling cancer and was in chemo treatment. He is survived by his wife, Theresa. Please continue to pray for strength and comfort for Patty Jo and her family, and peaceful rest for Richard."
+    }
+  ],
+  "announcements": [
+    {
+      "heading": "Flowers & Fellowship",
+      "text": "Today’s flowers are provided by Steve Martinez. Fellowship refreshments are provided by Pastor Jang Yong and our siblings at LW Korean Community Church. See the sign-up charts to provide refreshments or cover the cost of altar flowers for future services. Altar flowers are $25<i>.</i> See Phyllis Spencer to coordinate arrangements.",
+      "kind": "note"
+    },
+    {
+      "heading": "Coffee with Pastor",
+      "text": "This week’s “Coffee with Pastor” is canceled while Pastor Johan is away. We will resume with Membership Meetings and “Coffee with…” next week, on Thursday, August 13, 2026.",
+      "kind": "note"
+    },
+    {
+      "heading": "August Communion Sunday",
+      "text": "<i><b>Communion Sunday</b></i> will take place next week, on <i><b>Sunday, August 9, 2026</b></i>.",
+      "kind": "note"
+    },
+    {
+      "heading": "Recent LWCC Worship Attendance",
+      "text": "July 5<sup>th</sup>: 31 | July 12<sup>th</sup>: 37 | July 19<sup>th</sup>: 34 | July 26<sup>th</sup>: 37",
+      "kind": "attendance"
+    }
+  ],
+  "specialEvents": [
+    {
+      "heading": "Duo Concert — TODAY!",
+      "paragraphs": [
+        "Join us this afternoon Sunday, August 2, 2026, at 4:00 PM, as violinist <b>Er-Gene Kahng</b> joins forces with our very own resident pianist, <b>Hannah Yi</b> in a recital featuring beautiful music by Somei Satoh, Ludwig van Beethoven, and Edvard Grieg. Flyers are in the narthex — please take some and share with friends and neighbors — <b>ALL ARE WELCOME!</b>"
+      ],
+      "note": "For those who are able, the suggested donation is $10.",
+      "sectionTitle": "This Afternoon"
+    }
+  ],
+  "journal": {
+    "subtitle": "Use this prayer in your time with God each day.",
+    "morning": "On this new day, O God, make me watchful for where I may be your love in the world; keep me grounded in your love that I may follow in your way in all things; and hold me in your grace, as I am sure to stumble. Amen.",
+    "midday": "Consider The Upper Room Daily Devotional as a resource for Midday Prayer.",
+    "evening": "Hear me at the end of this day, O God, help me to entrust my cares to you. Grant me grace for my failings and rest for my weary soul, that I may be strengthened to do your will and share your love when a new day dawns. Amen.",
+    "fromOcr": true
+  },
+  "warnings": []
+}

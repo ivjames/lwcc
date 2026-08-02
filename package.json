@@ -1,0 +1,16 @@
+{
+  "name": "lwcc-worship-guide",
+  "version": "1.0.0",
+  "description": "Convert Community Church Leisure World weekly worship-guide PDFs into self-contained web pages",
+  "license": "UNLICENSED",
+  "private": true,
+  "bin": {
+    "wg-convert": "bin/wg-convert"
+  },
+  "scripts": {
+    "test": "node test/run.js"
+  },
+  "engines": {
+    "node": ">=18.18"
+  }
+}

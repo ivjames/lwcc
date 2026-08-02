@@ -1,0 +1,102 @@
+  :root{
+    --olive:#0a5a6e; --olive-d:#054253; --maroon:#a20816; --ink:#26241d;
+    --teal:#054253; --bronze:#4d431b; --blue:#3f6b82; --bluefill:#76a2bf;
+    --purple:#6a4a8a; --green:#1f7a44;
+    --paper:#fbfaf5; --card:#ffffff; --line:#d8d6c7; --muted:#54574a; --gold:#8a6410;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth;font-size:19px}
+  @media(max-width:560px){html{font-size:18px}}
+  body{margin:0;font-family:Georgia,'Times New Roman',serif;color:var(--ink);
+    background:var(--paper);line-height:1.65;-webkit-text-size-adjust:100%}
+  a{color:var(--maroon)}
+  a:focus-visible,button:focus-visible{outline:3px solid var(--maroon);outline-offset:2px;border-radius:3px}
+  .skip{position:absolute;left:-9999px;top:0;background:var(--maroon);color:#fff;
+    padding:12px 18px;z-index:100;font-family:Arial,Helvetica,sans-serif;font-size:1rem;border-radius:0 0 8px 0}
+  .skip:focus{left:0}
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*{transition:none!important;animation:none!important}}
+  .wrap{max-width:820px;margin:0 auto;padding:0 20px}
+
+  header.hero{background:#fff;color:var(--ink);
+    padding:22px 0 24px;text-align:center;border-top:6px solid var(--teal);
+    border-bottom:3px solid var(--teal)}
+  .banner{width:100%;max-width:720px;height:auto;display:block;margin:0 auto}
+  .hero .mark{font-family:Arial,Helvetica,sans-serif;font-weight:800;letter-spacing:.5px;
+    font-size:clamp(26px,6vw,40px);line-height:1.05;text-transform:uppercase}
+  .hero .mark span{color:#f2e4b8}
+  .hero .vision{display:inline-block;margin:14px 0 4px;background:rgba(255,255,255,.15);
+    border-radius:30px;padding:6px 18px;font-style:italic;font-size:15px}
+  .pillars{display:flex;flex-wrap:wrap;justify-content:center;gap:10px 26px;margin-top:16px;font-size:.72rem;
+    font-family:Arial,Helvetica,sans-serif;font-size:12px;letter-spacing:.5px}
+  .pillars b{color:#f2e4b8;display:block;font-size:14px}
+  .contact{font-family:Arial,Helvetica,sans-serif;font-size:.85rem;color:var(--muted);
+    margin-top:18px;border-top:1px solid var(--line);padding-top:12px;line-height:1.9}
+  .contact a{color:var(--maroon)!important}
+
+  .titlecard{text-align:center;padding:30px 20px 8px}
+  .titlecard .date{font-family:Arial,Helvetica,sans-serif;font-weight:700;font-size:22px}
+  .titlecard .season{color:var(--maroon);font-style:italic;font-size:16px;margin-top:2px}
+  .cover{width:100%;max-width:520px;height:auto;display:block;margin:10px auto 0;
+    border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.2)}
+  .titlecard .series{margin:16px auto 6px;max-width:520px;
+    background:linear-gradient(135deg,#054253,#0a5a6e);color:#fff;border-radius:14px;
+    padding:26px 20px;box-shadow:0 10px 30px rgba(5,66,83,.28)}
+  .titlecard .series .kicker{font-family:Arial,Helvetica,sans-serif;letter-spacing:3px;
+    font-size:.75rem}
+  .titlecard .series h1{margin:6px 0 4px;font-size:clamp(30px,8vw,46px);letter-spacing:1px}
+  .titlecard .series .by{font-style:italic;font-size:1rem}
+
+  nav.toc{position:sticky;top:0;z-index:20;background:rgba(251,250,245,.97);
+    backdrop-filter:blur(6px);border-bottom:1px solid var(--line)}
+  nav.toc .wrap{padding:12px 20px;display:flex;flex-wrap:wrap;gap:10px;justify-content:center}
+  nav.toc a{font-family:Arial,Helvetica,sans-serif;font-size:.9rem;text-decoration:none;
+    color:var(--olive-d);background:#fff;border:2px solid var(--olive-d);border-radius:24px;
+    padding:10px 18px;min-height:44px;display:flex;align-items:center}
+  nav.toc a:hover,nav.toc a:focus-visible{background:var(--olive-d);color:#fff}
+
+  section{padding:26px 0}
+  h2.sec{font-family:Arial,Helvetica,sans-serif;font-size:.95rem;letter-spacing:2px;
+    text-transform:uppercase;color:var(--olive-d);border-bottom:3px solid var(--olive);
+    display:inline-block;padding-bottom:4px;margin:0 0 18px}
+  section{scroll-margin-top:150px}
+
+  .item{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--olive);
+    border-radius:10px;padding:16px 18px;margin:12px 0;box-shadow:0 2px 8px rgba(0,0,0,.03)}
+  .item{scroll-margin-top:150px}
+  .item .h{font-family:Arial,Helvetica,sans-serif;font-weight:700;font-size:1rem;
+    letter-spacing:.3px;color:var(--ink)}
+  .item .h .ttl{color:var(--maroon)}
+  .item .who{font-style:italic;color:var(--muted);font-size:.9rem}
+  .item p{margin:10px 0 0}
+  .stage{display:block;text-align:center;font-style:italic;color:var(--muted);
+    font-size:.9rem;margin:10px 0}
+  .prayer{white-space:pre-line;font-style:italic;margin-top:10px}
+  .amen{font-style:normal;font-weight:700}
+  .refrain{font-weight:700;color:var(--olive-d);margin:10px 0 0;padding-left:12px;
+    border-left:3px solid var(--gold)}
+  .verse sup{font-size:.7em;color:var(--maroon);font-weight:700;padding:0 2px}
+  .ref{font-family:Arial,Helvetica,sans-serif;font-weight:700;font-size:1rem;color:var(--olive-d);
+    margin-top:6px}
+
+  .callout{border-radius:12px;padding:18px 20px;margin:14px 0}
+  .callout h3{margin:0 0 8px;font-family:Arial,Helvetica,sans-serif;font-size:1.05rem;letter-spacing:.5px}
+  .co-prayer{background:#f1ecf5;border:2px solid var(--purple)}
+  .co-prayer h3{color:var(--purple)}
+  .co-note{background:#eaf1f5;border:2px solid var(--teal)}
+  .co-note h3{color:var(--teal)}
+  .co-note .blk{margin:12px 0 0}
+  .co-note .blk b{color:var(--teal);font-family:Arial,Helvetica,sans-serif;font-size:1rem}
+  .co-concert{background:#e5f6ea;border:2px solid #43b06a}
+  .co-concert h3{color:var(--green)}
+  .co-concert .sug{font-style:italic;text-align:center;margin-top:10px}
+
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  @media(max-width:560px){.grid{grid-template-columns:1fr}}
+  .music{font-size:1rem}
+  .music .role{color:var(--muted);font-style:italic}
+  .att{font-family:Arial,Helvetica,sans-serif;font-size:.95rem;text-align:center;
+    color:var(--olive-d);margin-top:6px;line-height:1.8}
+
+  footer{background:var(--teal);color:#fff;text-align:center;padding:26px 20px;
+    font-family:Arial,Helvetica,sans-serif;font-size:.9rem;margin-top:20px;line-height:1.8}
+  footer a{color:#cfe3ea}
