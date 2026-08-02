@@ -252,6 +252,17 @@ def plain_body(lines):
 
 
 def build_item_body(kind, lines, item):
+    if lines:
+        # Hymn credit blobs sometimes trail the last music items inside the
+        # order-of-worship pages (not just on the community page) — drop any
+        # paragraph carrying attribution markers, same policy as elsewhere:
+        # the site reproduces no music or lyrics, so no credits apply.
+        kept = []
+        for para in group_paragraphs(lines):
+            if any(BOX_CREDITS_RE.search(l.text) for l in para):
+                continue
+            kept.extend(para)
+        lines = kept
     if not lines:
         if kind == 'music' and item['title'] and item['title'] in KNOWN_TEXTS:
             return [{'type': 'prayer', 'text': KNOWN_TEXTS[item['title']]}]
