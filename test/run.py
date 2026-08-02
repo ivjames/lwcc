@@ -90,6 +90,33 @@ try:
     assert not re.search(r'src="(?!data:)', html), 'no external resources'
     assert ('id="journal"' in html) == bool(g['journal'])
 
+    # ---- second sample: 2025 format (Communion liturgy, text-layer GPS and
+    # Prayer Journal pages, hymn-credits block, chapel-style prayer requests)
+    g2 = parse(extract(os.path.join(ROOT, 'samples', 'WG_2025_09_07.pdf'), work_dir + '-2'))
+    assert g2['dateISO'] == '2025-09-07'
+    assert g2['series'] == {'title': 'From Where Does My Help Come?', 'by': 'Rev. Lisa Williams'}
+    labels2 = [o['label'] for o in g2['order'] if o['kind'] == 'item']
+    for expected in ('Holy Communion | The Eucharist', 'Invitation to Communion',
+                     'Blessing of Bread & Wine', 'The Sharing of the Bread',
+                     'The Sharing of the Cup', 'Unison Prayer'):
+        assert expected in labels2, f'communion label {expected!r} parsed'
+    untitled = [o for o in g2['order'] if o['kind'] == 'item' and o['label'] is None]
+    assert len(untitled) == 1 and untitled[0]['body'], 'post-stage liturgy kept, not dropped'
+    assert [m['name'] for m in g2['musicTeam']] == [
+        'Dave Albulario', 'Jennifer Rudy', 'John Fluker', 'Hannah Yi', 'Jim Orr']
+    assert g2['musicCredits'], 'hymn credits captured'
+    assert len(g2['prayerRequests']) == 1
+    assert [a['heading'] for a in g2['announcements']] == [
+        'Flowers and Fellowship', 'Visiting Pastor Lisa', 'Coffee with Pastor',
+        'LW Korean Community Church Picnic Today!', 'A Course in Miracles',
+        'Blessing of the Animals', 'Need a Bible or Devotional?',
+        'Recent LWCC Worship Attendance']
+    assert g2['journal'] and 'God of all creation' in g2['journal']['morning'], \
+        'text-layer Prayer Journal parsed without OCR'
+    assert not g2['specialEvents'], 'journal midday note not misread as an event'
+    assert len(g2['warnings']) == 1 and 'untitled item' in g2['warnings'][0], g2['warnings']
+
     print('all tests passed')
 finally:
     shutil.rmtree(work_dir, ignore_errors=True)
+    shutil.rmtree(work_dir + '-2', ignore_errors=True)

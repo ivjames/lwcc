@@ -19,7 +19,7 @@ from .known_texts import KNOWN_TEXTS
 MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
           'August', 'September', 'October', 'November', 'December']
 DATE_RE = re.compile(r'^(' + '|'.join(MONTHS) + r')\s+(\d{1,2}),\s+(\d{4})$')
-SMALL_WORDS = {'of', 'the', 'to', 'for', 'and', 'a', 'an', 'in', 'on', 'with', 'at', 'by'}
+SMALL_WORDS = {'of', 'the', 'to', 'for', 'and', 'a', 'an', 'in', 'on', 'with', 'at', 'by', 'or', 'nor', 'but'}
 
 # Order-of-worship label kinds. `music` items carry a title whose engraved
 # score we drop; `prayer` bodies render as spoken-prayer blocks; `litany`
@@ -35,6 +35,11 @@ LABEL_KINDS = [
     (re.compile(r'PRAYER OF THE DAY'), 'prayer'),
     (re.compile(r'PRAYER FOR ILLUMINATION'), 'prayer'),
     (re.compile(r'PRAYER OF THANKSGIVING'), 'prayer'),
+    (re.compile(r'^BLESSING OF'), 'plain'),
+    (re.compile(r'^(THE )?SHARING OF'), 'plain'),
+    (re.compile(r'^UNISON PRAYER'), 'prayer'),
+    (re.compile(r'GREAT THANKSGIVING'), 'litany'),
+    (re.compile(r'COMMUNION|EUCHARIST'), 'litany'),
     (re.compile(r'^BLESSING'), 'prayer'),
     (re.compile(r'^BENEDICTION'), 'prayer'),
     (re.compile(r'INTERCESSION'), 'litany'),
@@ -47,6 +52,8 @@ SCRIPTURE_REF_RE = re.compile(
 
 
 def title_case(s):
+    if '|' in s:
+        return ' | '.join(title_case(part) for part in s.split('|'))
     words = s.strip().split()
     out = []
     for idx, w in enumerate(words):
@@ -110,18 +117,27 @@ def line_is_stage(l):
 
 
 def match_label(l):
-    """A label line: starts at the left margin with a bold ALL-CAPS run."""
-    if l.left > 105 or not l.runs:
+    """A label line: a bold ALL-CAPS run at (or, for liturgy sub-labels like
+    the Communion parts, near) the left margin."""
+    if l.left > 160 or not l.runs:
         return None
     first = l.runs[0]
     if not first.b:
         return None
-    m = re.fullmatch(r"\s*([A-Z][A-Z'’&\s]{2,}?):?\s*(?:[“\"](.+?)[”\"])?\s*", first.text)
+    m = re.fullmatch(r"\s*([A-Z][A-Z'’&|\s]{2,}?):?\s*(?:[“\"](.+?)[”\"])?\s*", first.text)
     if not m:
         return None
     label = re.sub(r'\s+', ' ', m.group(1)).strip()
     if all(w.lower() in SMALL_WORDS for w in label.split(' ')):
         return None
+    if l.left > 105:
+        # Indented: only explicit sub-labels, not bold body text — need a
+        # colon, a "— Speaker" attribution, or a known liturgical label.
+        rest_text = ''.join(r.text for r in l.runs[1:])
+        if not (first.text.rstrip().endswith(':')
+                or re.search(r'[—–]', rest_text)
+                or kind_for(label) != 'plain'):
+            return None
     title = m.group(2)
     # Rest of the line: optional title (if not inside the bold run) and
     # "— Speaker[, role]" attribution.
@@ -256,6 +272,9 @@ def build_item_body(kind, lines, item):
 
 # --- community page (music team / prayer requests / announcements) ---------
 
+COMMUNITY_HEAD_RE = re.compile(r'^(PRAYER REQUESTS|NOTES AND ANNOUNCEMENTS|Music Team\b)')
+
+
 def split_boxes(lines):
     boxes = []
     cur = None
@@ -263,7 +282,7 @@ def split_boxes(lines):
     for l in lines:
         new_page = prev is not None and l.page != prev.page
         gap = l.top - prev.top if prev is not None and not new_page else float('inf')
-        if cur is None or gap > 60 or new_page:
+        if cur is None or gap > 60 or new_page or COMMUNITY_HEAD_RE.match(l.text):
             cur = []
             boxes.append(cur)
         cur.append(l)
@@ -271,7 +290,21 @@ def split_boxes(lines):
     return boxes
 
 
+CREDITS_LINE_RE = re.compile(r'©|\bMusic by\b|\bWords by\b|\barr\.|“')
+BOX_CREDITS_RE = re.compile(r'©|\bMusic by\b|\bWords by\b|\barr\.')
+
+
 def parse_music_team(lines):
+    """Names/roles, plus the hymn attribution/copyright block that often sits
+    directly under them (kept as raw small-print lines — its multi-column
+    layout does not reconstruct into clean prose)."""
+    team_lines, credits = [], []
+    for i, l in enumerate(lines):
+        if CREDITS_LINE_RE.search(l.text):
+            credits = [x.text for x in lines[i:]]
+            break
+        team_lines.append(l)
+    lines = team_lines
     team = []
     name = None
     for l in lines:
@@ -287,7 +320,7 @@ def parse_music_team(lines):
                 name = None
             elif not r.b or not re.match(r'^MUSIC', t, re.I):
                 name = re.sub(r'[,\s]+$', '', t)
-    return team
+    return team, credits
 
 
 def parse_prayer_requests(lines):
@@ -298,9 +331,14 @@ def parse_prayer_requests(lines):
         runs = [r for l in para for r in l.runs]
         name_run = next((r for r in runs if r.b), None)
         name = tidy_prose(name_run.text) if name_run else None
-        text = tidy_prose(' '.join(
-            ''.join(r.text for r in l.runs if not r.b) for l in para))
-        text = re.sub(r'^[—–-]\s*', '', text)
+        if name and len(name) <= 40:
+            text = tidy_prose(' '.join(
+                ''.join(r.text for r in l.runs if not r.b) for l in para))
+            text = re.sub(r'^[—–-]\s*', '', text)
+        else:
+            # no short bold name — keep the whole paragraph, markup intact
+            name = None
+            text = tidy_prose(' '.join(runs_to_markup(l.runs) for l in para))
         entries.append({'name': name, 'text': text})
     return entries
 
@@ -312,11 +350,14 @@ def parse_announcements(lines):
         # Sub-item heading: an ALL-CAPS bold prefix ending at a colon, e.g.
         # "<b>FLOWERS</b> &amp; <b>FELLOWSHIP:</b> Today's flowers…" (the
         # rainbow-colored letters split into several bold runs).
-        m = re.match(r'^(<b>[^:]{2,60}?):(</b>)?\s*([\s\S]*)$', text)
+        m = re.match(r'^(<b>[^:]{2,110}?):(</b>)?\s*([\s\S]*)$', text)
         plain_head = None
+        mostly_caps = False
         if m:
             plain_head = re.sub(r'<[^>]+>', '', m.group(1)).replace('&amp;', '&').strip()
-        if m and re.fullmatch(r"[A-Z0-9\s&'’…]+", plain_head):
+            alpha = [c for c in plain_head if c.isalpha()]
+            mostly_caps = bool(alpha) and sum(c.isupper() for c in alpha) / len(alpha) >= 0.6
+        if m and mostly_caps and re.fullmatch(r"[A-Za-z0-9\s&'’…!?.,-]+", plain_head):
             heading = title_case(plain_head)
             kind = 'attendance' if re.search(r'attendance', heading, re.I) else 'note'
             body = tidy_prose(re.sub(r'^</b>\s*', '', m.group(3)))
@@ -368,6 +409,36 @@ def parse_special_event(lines):
 
 # --- journal (OCR) ---------------------------------------------------------
 
+def journal_from_lines(lines):
+    """Prayer Journal page that has a real text layer (newer guides are
+    flattened images handled by OCR; older ones are plain text)."""
+    journal = {'subtitle': None, 'morning': None, 'midday': None, 'evening': None}
+    section = None
+    for l in lines:
+        t = l.text
+        if re.fullmatch(r'Prayer Journal', t, re.I):
+            continue
+        if re.match(r'^Use this prayer', t, re.I):
+            journal['subtitle'] = t
+            continue
+        hp = re.match(r'^Household Prayer:\s*(Morning|Evening)\s*(.*)$', t, re.I)
+        if hp:
+            section = hp.group(1).lower()
+            if hp.group(2):
+                journal[section] = hp.group(2).strip()
+            continue
+        if re.search(r'Upper Room|Midday Prayer', t, re.I):
+            journal['midday'] = (journal['midday'] + ' ' + t) if journal['midday'] else t
+            section = None
+            continue
+        if section:
+            journal[section] = (journal[section] + ' ' + t) if journal[section] else t
+    return journal if (journal['morning'] or journal['evening']) else None
+
+
+GPS_PAGE_RE = re.compile(r'Notes from the Service|My Prayers this week', re.I)
+
+
 def parse_journal(ocr_text):
     paras = [re.sub(r'\s+', ' ', p).strip()
              for p in re.split(r'\n\s*\n', ocr_text)]
@@ -406,7 +477,7 @@ def parse(extracted, opts=None):
         'date': None, 'dateISO': None, 'season': None,
         'series': None, 'coverAlt': None,
         'welcome': None, 'order': [],
-        'musicTeam': [], 'prayerRequests': [], 'announcements': [],
+        'musicTeam': [], 'musicCredits': [], 'prayerRequests': [], 'announcements': [],
         'specialEvents': [], 'journal': None,
         'warnings': warnings,
     }
@@ -486,24 +557,50 @@ def parse(extracted, opts=None):
             current = {'item': item, 'kind': kind, 'lines': []}
             i += 1
             continue
-        if current is not None:
-            current['lines'].append(l)
-        else:
-            warnings.append(f'page {l.page}: unattached line ignored: "{l.text[:60]}"')
+        if current is None:
+            # Liturgy flowing past a stage direction with no new label (e.g.
+            # the Great Thanksgiving continuing onto the next page): keep it
+            # as an untitled item so nothing is lost, and flag it for review.
+            item = {'kind': 'item', 'type': 'plain', 'label': None, 'title': None,
+                    'titleQuoted': False, 'who': None, 'note': None, 'body': []}
+            guide['order'].append(item)
+            current = {'item': item, 'kind': 'plain', 'lines': []}
+            warnings.append(
+                f'page {l.page}: content without a label kept as an untitled '
+                f'item (starts: "{l.text[:50]}")')
+        current['lines'].append(l)
         i += 1
     flush()
 
     # -- community boxes ----------------------------------------------------
     if community_start >= 0:
         rest = all_lines[community_start:]
-        for box in split_boxes(rest):
+        pages = {}
+        for l in rest:
+            pages.setdefault(l.page, []).append(l)
+        boxable = []
+        for page_num, page_lines in sorted(pages.items()):
+            texts = [l.text for l in page_lines]
+            if any(GPS_PAGE_RE.search(t) for t in texts) or \
+                    ('GROW' in ' '.join(texts) and 'STUDY' in ' '.join(texts)):
+                continue                     # print-only GPS notes card
+            if any(re.fullmatch(r'Prayer Journal', t, re.I) for t in texts):
+                guide['journal'] = journal_from_lines(page_lines)
+                if not guide['journal']:
+                    warnings.append(
+                        f'page {page_num}: Prayer Journal page found but not parsed')
+                continue
+            boxable.extend(page_lines)
+        for box in split_boxes(boxable):
             first = box[0]
             if re.match(r'^Music Team\b', first.text):
-                guide['musicTeam'] = parse_music_team(box)
+                guide['musicTeam'], guide['musicCredits'] = parse_music_team(box)
             elif re.match(r'^PRAYER REQUESTS', first.text):
                 guide['prayerRequests'] = parse_prayer_requests(box)
             elif re.match(r'^NOTES AND ANNOUNCEMENTS', first.text):
                 guide['announcements'] = parse_announcements(box)
+            elif any(BOX_CREDITS_RE.search(l.text) for l in box):
+                guide['musicCredits'] += [l.text for l in box]
             elif first.runs and first.runs[0].b and first.runs[0].i:
                 guide['specialEvents'].append(parse_special_event(box))
             else:

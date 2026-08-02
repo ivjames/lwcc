@@ -1,0 +1,543 @@
+{
+  "date": "September 7, 2025",
+  "dateISO": "2025-09-07",
+  "season": "Season of Creation – 2nd Sunday",
+  "series": {
+    "title": "From Where Does My Help Come?",
+    "by": "Rev. Lisa Williams"
+  },
+  "coverAlt": "Message series artwork: From Where Does My Help Come?. Rev. Lisa Williams",
+  "welcome": {
+    "heading": "Opening Announcements",
+    "who": "Rev. Lisa Williams",
+    "body": [
+      {
+        "type": "para",
+        "text": "Good Morning and Welcome to Worship! Worship is often the first place that new people come into contact with this growing community of faith. And so, if you are joining us for the first time, I say to you what is said every Sunday: You are welcome here. Here is a place where all are welcome. For such is the love of God for God’s Very Good Creation."
+      }
+    ]
+  },
+  "order": [
+    {
+      "kind": "stage",
+      "text": "please stand as you are able"
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Call to Worship",
+      "title": "Doxology",
+      "titleQuoted": false,
+      "who": null,
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "Praise God from whom all blessings flow; praise God, all creatures here below; praise God above, ye Heav'nly host: praise Father, Son, and Holy Ghost. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "prayer",
+      "label": "Prayer of the Day",
+      "title": "The Prayer of Jesus",
+      "titleQuoted": true,
+      "who": "Jeanette Williams",
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "Our Father, who art in heaven, hallowed be thy name. Thy kin-dom come, thy will be done on earth as it is in heaven. Give us this day our daily bread. And forgive us our trespasses, as we forgive those who trespass against us. And lead us not into temptation, but deliver us from evil. For thine is the kingdom, and the power, and the glory, forever. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Hymn",
+      "title": "Lift High the Cross",
+      "titleQuoted": true,
+      "who": null,
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "stage",
+      "text": "please be seated"
+    },
+    {
+      "kind": "item",
+      "type": "litany",
+      "label": "Prayers of Intercession",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Rev. Lisa Williams",
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "Today we trust Love who is God;"
+        },
+        {
+          "type": "refrain",
+          "text": "Before, and after, but above all, <i>with</i> us; Maker, Remaker of life, <i>and</i> life’s limits Striving to sustain; to make new."
+        },
+        {
+          "type": "para",
+          "text": "Today we trust:"
+        },
+        {
+          "type": "refrain",
+          "text": "God: <i>with</i> Earth working God: <i>with</i> birth emerging God: <i>with</i> justice by choice: — Giving sea, soil, skies voice! God <i>with</i> predators, <i>with</i> prey — <i>with</i> the light of each day! God <i>with</i> life’s harmonies, seen and unseen; God breathed praise by all creatures; God welcomed in shade of the trees."
+        },
+        {
+          "type": "para",
+          "text": "We trust God with us urgently now."
+        },
+        {
+          "type": "para",
+          "text": "Today we trust:"
+        },
+        {
+          "type": "refrain",
+          "text": "Jesus our Friend Incarnate in Earth; Who shares life with creatures shares <i>their</i> home with angels Who is tested, prevailing; Who knows of their frailness through flesh, blood, and birth and dependence on care."
+        },
+        {
+          "type": "para",
+          "text": "We trust God with us urgently now."
+        },
+        {
+          "type": "para",
+          "text": "We trust:"
+        },
+        {
+          "type": "refrain",
+          "text": "Jesus: who warns and heals, Jesus: repurposing Scripture; Jesus: Welcomed with branches, then nailed to the Tree."
+        },
+        {
+          "type": "para",
+          "text": "We trust God with us urgently now."
+        },
+        {
+          "type": "para",
+          "text": "We trust God, who is Spirit"
+        },
+        {
+          "type": "refrain",
+          "text": "Reshaping perceptions. Breath of life; Inspiration of healing and forgiveness: Wild Wind of beginnings beyond our control and unruled by our violence yet harnessed for justice;"
+        },
+        {
+          "type": "para",
+          "text": "We trust God with us urgently now."
+        }
+      ]
+    },
+    {
+      "kind": "stage",
+      "text": "please stand as you are able"
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Hymn",
+      "title": "Let Us Break Bread Together",
+      "titleQuoted": true,
+      "who": null,
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "stage",
+      "text": "please be seated"
+    },
+    {
+      "kind": "item",
+      "type": "prayer",
+      "label": "Prayer for Illumination",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Jeanette Williams",
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "Ever-present God, you walk with us as you have the generations before us. By your word, give us wisdom, by your Spirit, grant us restoration, and set us free to serve you in love. We ask this in the name of the one who has shown us your way — Jesus the Christ. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "scripture",
+      "label": "Scripture",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Jeanette Williams",
+      "note": null,
+      "body": [
+        {
+          "type": "ref",
+          "text": "Psalm 121"
+        },
+        {
+          "type": "verse",
+          "text": "Assurance of God’s Protection – A Song of Ascents. <sup>1</sup> I lift up my eyes to the hills— from where will my help come? <sup>2</sup> My help comes from the Lord, who made heaven and earth. <sup>3</sup> He will not let your foot be moved; he who keeps you will not slumber. <sup>4</sup> He who keeps Israel will neither slumber nor sleep. <sup>5</sup> The Lord is your keeper; the Lord is your shade at your right hand. <sup>6</sup> The sun shall not strike you by day nor the moon by night. <sup>7</sup> The Lord will keep you from all evil; he will keep your life. <sup>8</sup> The Lord will keep your going out and your coming in from this time on and forevermore."
+        },
+        {
+          "type": "ref",
+          "text": "Luke 14:25-33"
+        },
+        {
+          "type": "verse",
+          "text": "The Cost of Discipleship <sup>25</sup> Now large crowds were traveling with him, and he turned and said to them, <sup>26</sup> “Whoever comes to me and does not hate father and mother, wife and children, brothers and sisters, yes, and even life itself, cannot be my disciple. <sup>27</sup> Whoever does not carry the cross and follow me cannot be my disciple. <sup>28</sup> For which of you, intending to build a tower, does not first sit down and estimate the cost, to see whether he has enough to complete it? <sup>29</sup> Otherwise, when he has laid a foundation and is not able to finish, all who see it will begin to ridicule him, <sup>30</sup> saying, ‘This fellow began to build and was not able to finish.’ <sup>31</sup> Or what king, going out to wage war against another king, will not sit down first and consider whether he is able with ten thousand to oppose the one who comes against him with twenty thousand? <sup>32</sup> If he cannot, then while the other is still far away, he sends a delegation and asks for the terms of peace. <sup>33</sup> So therefore, none of you can become my disciple if you do not give up all your possessions."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "message",
+      "label": "Message",
+      "title": "From Where Does My Help Come?",
+      "titleQuoted": true,
+      "who": "Rev. Lisa Williams",
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "item",
+      "type": "plain",
+      "label": "Questions for Reflection",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Rev. Lisa Williams",
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "Is there someone in your life who has modeled what a strong relationship with God can look like? What fears do you have that you can turn over to God?"
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Reflection",
+      "title": "Our Comforter",
+      "titleQuoted": true,
+      "who": "John Fluker, pianist (playing his own composition)",
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "item",
+      "type": "litany",
+      "label": "Holy Communion | The Eucharist",
+      "title": null,
+      "titleQuoted": false,
+      "who": null,
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "<i>We offer both white and red grape juice. If you are afraid of spilling red</i> <i>grape juice, a limited number of cups with white grape juice are provided.</i>"
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "litany",
+      "label": "Invitation to Communion",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Rev. Lisa Williams",
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "We gather round this table now as fellow creatures, at God’s calling flock, huddle, shoal or swarm … Drawn together to receive identity: more than our communities, or even our churches, can be alone. Like the Earth, we do not own Christ’s table which feeds and sustains us like our common home, it is ‘ours’ only when we share. Yet here, we’re welcome: like those friends Christ first gathered. Welcome for justice, fulfillment and love. Welcome, with prophets, publicans with eco-warriors and dodgy characters with those you’d expect and those you’d rather weren’t here. Called to re-celebrate; to be a work of God repurposed as friends of Jesus refreshed by bread and wine through human hands, from Earth’s own self <i>on</i> whom, <i>and</i> whom, and <i>as</i> whom we feed."
+        },
+        {
+          "type": "para",
+          "text": "God be with you and in you"
+        },
+        {
+          "type": "refrain",
+          "text": "And also with you"
+        },
+        {
+          "type": "para",
+          "text": "Lift up your hearts"
+        },
+        {
+          "type": "refrain",
+          "text": "We lift them up to God"
+        },
+        {
+          "type": "para",
+          "text": "Give thanks to the Lord our God"
+        },
+        {
+          "type": "refrain",
+          "text": "It is right to give our thanks and praise"
+        }
+      ]
+    },
+    {
+      "kind": "stage",
+      "text": "Ushers, please come forward and distribute the elements"
+    },
+    {
+      "kind": "item",
+      "type": "plain",
+      "label": null,
+      "title": null,
+      "titleQuoted": false,
+      "who": null,
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "Throughout all ages, as mountains dance and trees applaud the cries of birth are also loud for all to hear and tend. Your Sabbath and Jubilee insist: “Refreshment and rest for all Creation”. But we made exceptions. Your People sought milk and honey, yet injustice laid lands waste. Your prophets: priests and farmers call us to account. Yet your loving signs of warning fall often by the wayside. And greed and pride insist on harmful choices knowingly embraced. Yet still comes Christ Jesus, friend of wildlife, beloved of the poor scolding the seas teaching with trees, and God’s wildness in Wind. When with Christ we shoulder the cross of healing; we shudder at the disaster of truth denied by power; and yet … risen and present through food and faith Christ calls us afresh to care for a damaged world. And so, as God’s people on earth and all the company of heaven, we praise your name and join their unending hymn:"
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "plain",
+      "label": "Blessing of Bread & Wine",
+      "title": null,
+      "titleQuoted": false,
+      "who": null,
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "God, Sustainer, gusting and fluttering life with the good things of the Earth: food and drink we <i>offer</i>; flesh and blood we <i>are.</i> As Jesus did, so do we: We break this bread <i>[bread is broken]</i>. We share this cup <i>[cup is raised]</i>. We trust that Jesus revealed your way of living in this world — a commonwealth of shared living as the body of Christ empowered by the Holy Spirit."
+        },
+        {
+          "type": "para",
+          "text": "And now, in remembrance of your mighty acts in Jesus Christ, we offer ourselves in praise and thanksgiving as a holy and living sacrifice, in union with Christ’s offering for us, as we proclaim the mystery of faith:"
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "plain",
+      "label": "The Sharing of the Bread",
+      "title": null,
+      "titleQuoted": false,
+      "who": null,
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "Because there is one loaf, we, who are many, are one body, for we all partake of the one loaf."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "plain",
+      "label": "The Sharing of the Cup",
+      "title": null,
+      "titleQuoted": false,
+      "who": null,
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "The bread which we have eaten is a sharing in the bread of Christ. The cup over which we give thanks is the sharing in the cup of Christ."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "prayer",
+      "label": "Unison Prayer",
+      "title": null,
+      "titleQuoted": false,
+      "who": null,
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "God-with-Earth, invited and fed at your table we are remade, repurposed. May this food empower us to cherish your Creation who we also are. And whether our cares be light or heavy, our song be strong or weak, keep our hearts warm, our hands open, our lives ever embracing and embraced by your love. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "plain",
+      "label": "Invitation to the Offering",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Jeanette Williams",
+      "note": null,
+      "body": [
+        {
+          "type": "para",
+          "text": "We continue our worship in the giving of our offering: As, with gratitude, and generosity we pass on what has come into our hands, give us joy in our giving, wisdom in our spending, and your peace in our hearts for the Good of the Earth in God’s cycles of glory. Blessed be God forever. <b>Amen.</b>"
+        }
+      ]
+    },
+    {
+      "kind": "stage",
+      "text": "Ushers, please come forward"
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Offertory",
+      "title": "I Lift Up Mine Eyes",
+      "titleQuoted": true,
+      "who": "Dave Albulario, tenor",
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "item",
+      "type": "prayer",
+      "label": "Prayer of Thanksgiving",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Jeanette Williams",
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "God of all creation, your desire for us is complete. We cannot follow the way of Jesus from a distance. And so, we come together today and ask that you use what we bring for your creation. In the presence of the Holy Spirit. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "stage",
+      "text": "please stand as you are able"
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Hymn",
+      "title": "Let There Be Peace on Earth",
+      "titleQuoted": true,
+      "who": null,
+      "note": null,
+      "body": []
+    },
+    {
+      "kind": "item",
+      "type": "prayer",
+      "label": "Blessing",
+      "title": null,
+      "titleQuoted": false,
+      "who": "Rev. Lisa Williams",
+      "note": null,
+      "body": [
+        {
+          "type": "prayer",
+          "text": "May the Artist who crafted creation, continue to shape your heart, may the Christ who commissioned you charge you with purpose, may the Spirit that stirs you, help you to find ways for you to be the light of God in the world, that you may honor our creator with every breath you take. Amen."
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "music",
+      "label": "Sending Forth",
+      "title": "Blest Be the Tie that Binds",
+      "titleQuoted": true,
+      "who": null,
+      "note": null,
+      "body": []
+    }
+  ],
+  "musicTeam": [
+    {
+      "name": "Dave Albulario",
+      "role": "Tenor / Music Dir."
+    },
+    {
+      "name": "Jennifer Rudy",
+      "role": "Soprano"
+    },
+    {
+      "name": "John Fluker",
+      "role": "Pianist"
+    },
+    {
+      "name": "Hannah Yi",
+      "role": "Pianist"
+    },
+    {
+      "name": "Jim Orr",
+      "role": "Technology"
+    }
+  ],
+  "musicCredits": [
+    "Doxology(Old Hundredth LM) “Our Comforter” “Blest Be the Tie That Binds” (Dennis SM)",
+    "Music by Louis Bourgeois, 1551 Original music by John Fluker Music by Johann G. Nägeli, 1768-1836",
+    "Words by Thomas Ken, 1674 Words by John Fawcett, 1740-1817",
+    "“Lift High the Cross”Music by Sydney Hugo Nicholson; Words by George William Kitchin & Michael Robert Newbolt; © 1974 Hope Publishing Co. “I Lift Up Mine Eyes” Music by Allen Pote; Words based on Psalm 121, adapted; © 1987 by Hope Publishing Company Arr. by Lowell Mason, 1792-1872 All music herein transcribed & adapted by D. Albulario for Leisure World Community Church, Seal Beach. California.",
+    "“Let Us Break Bread Together” “Let There Be Peace on Earth”",
+    "Traditional African-American Spiritual, arr. by Music & Words by Sy Miller & Jill Jackson LEISUREWORLDCOMMUNITYCHURCH",
+    "William Farley Smith; Words based on Acts of © 1955, 1983; Arr. Copyright © 1991 by Jan 14000 Church Pl, Seal Beach, CA 90740",
+    "the Apostles 2:42; Adapt. & arr. © 1989 The Lee Music, Beverly Hills, California 562-431-2503 /// CCLI License No. 187225",
+    "United Methodist Publishing House"
+  ],
+  "prayerRequests": [
+    {
+      "name": "Our LWCC Prayer Chapel",
+      "text": "is a quiet place to pray that is always open. These anonymous prayer requests were recently left in the chapel: • “Please pray for José Camino, in Jesus’ name.” • “Thank you, God, for providing us a Prayer Chapel.” • For Carolyn Quaranta • For Jeishyel, Jean, Helle, Aurora, Takako, Mila"
+    }
+  ],
+  "announcements": [
+    {
+      "heading": "Flowers and Fellowship",
+      "text": "Today’s flowers are provided by Jay &amp; Connie Young. Fellowship refreshments are provided by Jenny Chang. See the sign-up charts to provide refreshments or cover the cost of altar flowers for future services. Altar flowers are $35. Phyllis, Jeanette, &amp; Virginia coordinate arrangements.",
+      "kind": "note"
+    },
+    {
+      "heading": "Visiting Pastor Lisa",
+      "text": "A hearty welcome to Pastor Lisa Williams who leads us in Worship today! Much love &amp; gratitude for her presence, service, and leadership.",
+      "kind": "note"
+    },
+    {
+      "heading": "Coffee with Pastor",
+      "text": "“Coffee with Pastor,” is on hiatus this week while Pastor Johan is away for Reading Week, and will resume on Thursday, September 18<sup>th</sup>.",
+      "kind": "note"
+    },
+    {
+      "heading": "LW Korean Community Church Picnic Today!",
+      "text": "Our wonderful friends at LW Korean Community Church invite us all to their annual barbecue picnic at Clubhouse 1 at 11:30 AM, immediately following our Worship service today!",
+      "kind": "note"
+    },
+    {
+      "heading": "A Course in Miracles",
+      "text": "Friend of LWCC, <b>Abby Stevens</b>, will facilitate <b>“A Course in Miracles”</b> — a FREE discussion of the book of the same name every Tuesday, at 1:00 PM, starting <i><b>Tuesday, September 16</b></i><sup>th</sup> in the Music Room. Focused on the teachings of Dr. Kenneth Wapnick, the course is summed up: <i><b>“Nothing real can be threatened. Nothing unreal exists. Herein lies the</b></i> <i><b>peace of God.\"</b></i> The book may be purchased online but is also accessible for FREE at www.miraclecenter.org. More information at www.acim.org.",
+      "kind": "note"
+    },
+    {
+      "heading": "Blessing of the Animals",
+      "text": "Sunday Worship on October 5, 2025, will be <i><b>outside</b></i> on our front patio. Observing the Feast of St. Francis, and his love for animals, the service will include “The Blessing of the Animals.” <i><b>Leisure World</b></i> <i><b>residents may bring well-behaved pets for a blessing.</b></i> Dogs must be leashed, according to LW rules. Use good judgment regarding kennels and cages, and be responsible for your pet’s behavior.",
+      "kind": "note"
+    },
+    {
+      "heading": "Need a Bible or Devotional?",
+      "text": "FREE Bibles on the small bookshelf in the narthex, and FREE Devotional Books just outside the Library, across from the Women’s restroom. <i>Help yourself!</i> Two “new” devotional titles: <i><b>Too Blessed to Be Stressed</b></i> and <i><b>The Guiding Light</b></i>",
+      "kind": "note"
+    },
+    {
+      "heading": "Recent LWCC Worship Attendance",
+      "text": "August 10<sup>th</sup>: 37 | August 17<sup>th</sup>: 40 | August 24<sup>th</sup>: 34 | August 31<sup>st</sup>: 39",
+      "kind": "attendance"
+    }
+  ],
+  "specialEvents": [],
+  "journal": {
+    "subtitle": "Use this prayer in your time with God each day.",
+    "morning": "God of all creation, you made the hands that stirred unthinking at the start of this day. As the hours slip by, help me to be more mindful of the good they might do: in the greetings they might oﬀer, in the burdens they might bear, in the worry they might soothe. Prompt me to keep them open — not clinging to what you have entrusted but freely oﬀering, freely receiving, in response to the needs I encounter this day. May each small motion be a sign of trust, a reminder that my life is in your hands. Amen.",
+    "midday": "Consider The Upper Room Daily Devotional as a resource for Midday Prayer.",
+    "evening": "God of every beginning, every ending, as I remember the lives I met this day, in moments ordinary and extraordinary — as I recall reports of hardship far away, and around the corner — help me to recognize family forgotten by my heart, siblings entrusted to me. As I rest this night in your care, mend my courage and fire my imagination, that I might be truly useful to you. Plant me where you need me, in the name of the Christ. Amen."
+  },
+  "warnings": [
+    "page 7: content without a label kept as an untitled item (starts: \"Throughout all ages, as mountains dance and trees \")"
+  ]
+}

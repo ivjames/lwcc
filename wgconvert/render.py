@@ -62,6 +62,8 @@ def announcement_emoji(heading):
         return '📖 '
     if re.search(r'birthday', heading, re.I):
         return '🎂 '
+    if re.search(r'animal|\bpet\b', heading, re.I):
+        return '🐾 '
     return ''
 
 
@@ -136,9 +138,9 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None):
                 rows.append(f'    <span class="stage">[{esc(o["text"])}]</span>')
                 continue
             sid = ' id="scripture"' if o.get('type') == 'scripture' else ''
+            hdr = f'<div class="h">{item_header(o)}</div>\n      ' if o.get('label') else ''
             rows.append(f'''    <div{sid} class="item">
-      <div class="h">{item_header(o)}</div>
-      {body_html(o)}
+      {hdr}{body_html(o)}
     </div>''')
         joined = '\n\n'.join(rows)
         sections.append(f'''
@@ -156,13 +158,19 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None):
             + (f' <span class="role">— {esc(m["role"])}</span>' if m.get('role') else '')
             + '</div>'
             for m in guide['musicTeam'])
+        credits = ''
+        if guide.get('musicCredits'):
+            joined = '<br>'.join(esc(t) for t in guide['musicCredits'])
+            credits = ('\n      <div style="font-family:Arial,Helvetica,sans-serif;'
+                       'font-size:.72rem;color:#54574a;margin-top:14px;line-height:1.7">'
+                       + joined + '</div>')
         sections.append(f'''
   <section id="music">
     <h2 class="sec">Music Team</h2>
     <div class="item">
       <div class="grid music">
 {cells}
-      </div>
+      </div>{credits}
     </div>
   </section>''')
 
