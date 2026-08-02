@@ -2,7 +2,9 @@
 # Operate CLI for the lwcc site, per lab980 conventions.
 # Symlink onto PATH on the droplet:  ln -sf /var/www/lwcc/bin/lwcc /usr/local/bin/lwcc
 set -euo pipefail
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve the symlink (/usr/local/bin/lwcc -> repo) before locating the repo.
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
 
 case "${1:-}" in
   redeploy)
