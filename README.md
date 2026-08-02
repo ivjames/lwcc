@@ -9,7 +9,7 @@ becomes the front page.
 - `GET /` — the current (newest) Sunday's guide
 - `GET /<YYYY-MM-DD>/` — any published Sunday (permanent URLs)
 - `GET /archive` — every published Sunday
-- `GET /admin` — upload page (browser); the POST is token-protected, not the page
+- `GET /admin` — batch upload page: drop in one PDF or a whole backlog, with per-file results (published link, warnings, replaced-existing, failures); the POST is token-protected, not the page
 - `POST /api/upload` — raw PDF body + `X-Upload-Token` header; converts via
   `wgconvert` and publishes to `public/<date>/`. Parser warnings come back in
   the response so odd content is reviewed, not silently dropped. Fails closed
