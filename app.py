@@ -430,7 +430,15 @@ $('go').addEventListener('click', async () => {
         headers: {'X-Upload-Token': token, 'Content-Type': 'application/pdf'},
         body: q.file,
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); }
+      catch {
+        throw new Error('HTTP ' + res.status + ' ' + res.statusText +
+          ' — reply was not from the app (nginx limit? needs client_max_body_size/'+
+          'proxy_read_timeout in the vhost — see README): ' +
+          text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100));
+      }
       if (!data.ok) throw new Error(data.error || res.statusText);
       q.data = data;
       q.status = data.warnings.length ? 'warned' : 'ok';

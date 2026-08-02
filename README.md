@@ -44,6 +44,17 @@ health-check --site lwcc
 The droplet needs `poppler-utils` and `tesseract-ocr` installed (`apt-get
 install -y poppler-utils tesseract-ocr`) for uploads to convert.
 
+**nginx one-time tweak** (the provisioned vhost defaults reject PDF-sized
+uploads with a 413 and can time out slow OCR): add inside the `server {`
+block with `listen 443` in `/etc/nginx/sites-available/lwcc.lab980.com`:
+
+```
+    client_max_body_size 50m;
+    proxy_read_timeout 300s;
+```
+
+then `nginx -t && systemctl reload nginx`.
+
 The app listens on **8069** (`--port` in `ecosystem.config.cjs`); make sure it
 matches the `proxy_pass` port in `/etc/nginx/sites-available/lwcc.lab980.com`
 — edit whichever side disagrees. Subsequent deploys: `lwcc redeploy`.
