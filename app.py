@@ -38,6 +38,17 @@ sys.path.insert(0, ROOT)
 from wgconvert import extract, parse, render  # noqa: E402
 
 
+def audit_log(entry):
+    """Append one JSON line per upload to uploads.log — the durable record of
+    every conversion, including failures that publish nothing."""
+    entry = {'at': datetime.datetime.now().isoformat(timespec='seconds'), **entry}
+    try:
+        with open(os.path.join(ROOT, 'uploads.log'), 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    except OSError:
+        pass
+
+
 def missing_deps():
     """Converter binaries the app shells out to; empty list = all present."""
     return [b for b in ('pdftohtml', 'pdfimages', 'pdftoppm', 'tesseract')
@@ -130,6 +141,7 @@ def guide_meta(d):
         'by': series.get('by'),
         'season': g.get('season'),
         'refs': refs,
+        'warnings': g.get('warnings') or [],
         'blob': re.sub(r'\s+', ' ', blob),
     }
     _meta_cache[d] = (mtime, meta)
@@ -233,6 +245,10 @@ def archive_page():
         if meta and meta['refs']:
             line += ('<br><span style="color:#54574a;font-size:.9em">'
                      + ' · '.join(meta['refs']) + '</span>')
+        if meta and meta['warnings']:
+            n = len(meta['warnings'])
+            line += (f'<br><span class="warn" style="font-size:.9em">⚠ needs review '
+                     f'({n} parser warning{"s" if n > 1 else ""})</span>')
         rows.append(f'    <li style="margin:8px 0">{line}</li>')
     items = '\n'.join(rows) or '    <li>Nothing published yet.</li>'
     return f"""<!DOCTYPE html>
@@ -350,6 +366,7 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   </thead><tbody></tbody></table>
   <div id="summary"></div>
 </div>
+__REVIEW__
 <p><a href="/">Current guide</a> · <a href="/archive">Archive</a></p>
 <script>
 const $ = id => document.getElementById(id);
@@ -456,6 +473,25 @@ $('go').addEventListener('click', async () => {
 """).replace('__STYLE__', PAGE_STYLE)
 
 
+def review_html():
+    """Published Sundays whose stored guide.json still carries parser
+    warnings — the durable to-review list after a batch run."""
+    flagged = [(d, guide_meta(d)) for d in published_dates()]
+    flagged = [(d, m) for d, m in flagged if m and m['warnings']]
+    if not flagged:
+        return ''
+    items = []
+    for d, m in flagged:
+        warns = ''.join(f'<li class="warn">{w}</li>' for w in m['warnings'])
+        items.append(f'<li style="margin:10px 0"><a href="/{d}/">{date_label(d)}</a>'
+                     f'<ul style="margin:4px 0 0;padding-left:18px">{warns}</ul></li>')
+    return ('<div class="card"><p><b>Needs review</b> — published with parser '
+            'warnings (re-upload a corrected PDF, or hand-edit that Sunday\'s '
+            'guide.json and re-render, to clear):</p>'
+            '<ul style="list-style:none;padding-left:0">' + ''.join(items)
+            + '</ul></div>')
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=PUBLIC, **kwargs)
@@ -493,7 +529,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_page(search_page(q))
             return
         if path == '/admin':
-            self.send_page(ADMIN_PAGE)
+            self.send_page(ADMIN_PAGE.replace('__REVIEW__', review_html()))
             return
         if path == '/':
             dates = published_dates()
@@ -546,6 +582,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             tmp.write(body)
             tmp.close()
             guide, replaced = convert_pdf(tmp.name)
+            audit_log({'ok': True, 'dateISO': guide['dateISO'],
+                       'replaced': replaced, 'warnings': guide['warnings']})
             self.send_json({
                 'ok': True,
                 'date': guide['date'],
@@ -556,6 +594,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             })
         except Exception as e:                        # surface, don't 500-blank
             traceback.print_exc()
+            audit_log({'ok': False, 'error': str(e)})
             self.send_json({'ok': False, 'error': str(e)}, status=422)
         finally:
             os.unlink(tmp.name)

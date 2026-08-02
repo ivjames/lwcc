@@ -117,6 +117,25 @@ try:
     status, body = req('/2026-08-02')
     assert status == 301 or b'Love Unleashed' in body   # bare date redirects
 
+    # Warnings persist and surface: uploads.log audit line, no review panel
+    # while everything is clean, then badge + panel once a guide has warnings.
+    log_path = os.path.join(scratch, 'uploads.log')
+    assert os.path.exists(log_path)
+    entries = [json.loads(l) for l in open(log_path)]
+    assert any(e.get('ok') and e.get('dateISO') == '2026-08-02' for e in entries)
+    assert any(not e.get('ok') for e in entries), 'failed attempts audited too'
+    status, body = req('/admin')
+    assert b'Needs review' not in body
+
+    gj = os.path.join(scratch, 'public', '2026-08-09', 'guide.json')
+    g = json.load(open(gj))
+    g['warnings'] = ['page 7: content without a label kept as an untitled item']
+    json.dump(g, open(gj, 'w'))
+    status, body = req('/archive')
+    assert b'needs review' in body, 'archive badge for warned guide'
+    status, body = req('/admin')
+    assert b'Needs review' in body and b'untitled item' in body, 'review panel lists warnings'
+
     # Sermon search: title, scripture, and no-hit cases.
     status, body = req('/search?q=Unleashed')
     assert status == 200 and b'/2026-08-02/' in body and b'<mark>' in body
