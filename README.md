@@ -14,7 +14,7 @@ wg-convert convert backlog/*.pdf -o site/       # batch a whole folder
 
 Three stages, each usable on its own:
 
-1. **extract** (`src/extract.js`) — `pdftohtml -xml` gives every text run with
+1. **extract** (`wgconvert/extract.py`) — `pdftohtml -xml` gives every text run with
    font, color, position, and bold/italic flags. Sheet-music engraving noise
    (Finale exports: note glyphs, lyric syllables, composer credits) is dropped
    by fontspec — engraving text uses the Maestro music fonts and prints in
@@ -24,7 +24,7 @@ Three stages, each usable on its own:
    — the GPS notes card and the Prayer Journal are flattened screenshots — are
    OCR'd with tesseract at 300 dpi.
 
-2. **parse** (`src/parse.js`) — classifies the extracted lines into a
+2. **parse** (`wgconvert/parse.py`) — classifies the extracted lines into a
    structured `guide.json`: date/season, message series, welcome, the order of
    worship (labels, titles, speakers, prayers with their line structure,
    scripture with verse-number superscripts, congregation refrains, stage
@@ -33,7 +33,7 @@ Three stages, each usable on its own:
    reported as warnings — nothing is silently dropped, so drift in older
    guides surfaces immediately (exit code 1 when any file warns).
 
-3. **render** (`src/render.js`) — `guide.json` + `config/church.json` +
+3. **render** (`wgconvert/render.py`) — `guide.json` + `config/church.json` +
    `template/guide.css` → `index.html` in the approved design: sticky section
    nav, large-type serif body, skip link, reduced-motion support, banner and
    cover embedded as data URIs.
@@ -52,7 +52,7 @@ else is plain text.
 
 ## Requirements
 
-- Node 18.18+ (no npm dependencies)
+- Python 3.10+ (stdlib only, no pip dependencies)
 - `poppler-utils` (`pdftohtml`, `pdfimages`, `pdftoppm`, `pdfinfo`)
 - `tesseract-ocr` — only for the Prayer Journal page; without it the page is
   skipped with a warning
@@ -61,12 +61,12 @@ else is plain text.
 
 ```
 bin/wg-convert       CLI (convert | parse | render)
-src/                 extract / parse / render / cli / known-texts
+wgconvert/           extract / parse / render / cli / known_texts (Python package)
 template/guide.css   the approved page styles
 assets/banner.png    church masthead (shared by every issue)
 config/church.json   name, address, phone, service time, vision line
 samples/             sample PDF + its parsed guide.json (regression reference)
-test/run.js          npm test — converts the sample and asserts the structure
+test/run.py          python3 test/run.py — converts the sample, asserts the structure
 ```
 
 ## Conventions & judgment calls
@@ -75,10 +75,10 @@ test/run.js          npm test — converts the sample and asserts the structure
   Fix them in `guide.json` and re-render if desired.
 - Hymn/offertory/reflection items keep title + performer only; engraved music
   is web-hostile and is deliberately not reproduced. Fixed liturgy that exists
-  *only* as engraving (the Doxology) is filled in from `src/known-texts.js`.
+  *only* as engraving (the Doxology) is filled in from `wgconvert/known_texts.py`.
 - The GPS "Notes from the Service" page is intentionally skipped — it's a
   print-only fill-in card.
-- Announcement emoji are assigned by heading keyword in `src/render.js`
+- Announcement emoji are assigned by heading keyword in `wgconvert/render.py`
   (`announcementEmoji` / `eventEmoji`); extend the maps as new headings appear.
 - En dashes between words become em dashes (house style); curly quotes are
   kept in prose, straightened in titles.
