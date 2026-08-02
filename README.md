@@ -1,4 +1,28 @@
-# lwcc — worship-guide converter
+# lwcc — worship guides for lwcc.lab980.com
+
+The site (`public/`, served by `app.py`) and the converter that produces its
+pages from the church's weekly worship-guide PDFs.
+
+## Site: deploy on the droplet
+
+`lwcc.lab980.com` is provisioned per lab980 conventions (nginx vhost →
+local port, pm2, certbot). First deploy:
+
+```
+cd /var/www/lwcc                      # provision-site cloned the repo here
+pm2 start ecosystem.config.cjs && pm2 save
+ln -sf /var/www/lwcc/bin/lwcc /usr/local/bin/lwcc
+health-check --site lwcc
+```
+
+The app listens on **8061** (`--port` in `ecosystem.config.cjs`); make sure it
+matches the `proxy_pass` port in `/etc/nginx/sites-available/lwcc.lab980.com`
+— edit whichever side disagrees. Subsequent deploys: `lwcc redeploy`.
+
+`public/index.html` is the current week's guide; converted backlog issues
+will live alongside it as `public/<YYYY-MM-DD>/`.
+
+# Worship-guide converter
 
 Converts Community Church Leisure World's weekly worship-guide PDFs into
 self-contained, accessible web pages (one HTML file per Sunday, images
