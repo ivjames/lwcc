@@ -281,7 +281,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--port', type=int, default=int(os.environ.get('PORT', 8061)))
+    ap.add_argument('--port', type=int, default=int(os.environ.get('PORT', 8069)))
     ap.add_argument('--host', default='127.0.0.1')
     args = ap.parse_args()
     os.makedirs(PUBLIC, exist_ok=True)

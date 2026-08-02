@@ -44,7 +44,7 @@ health-check --site lwcc
 The droplet needs `poppler-utils` and `tesseract-ocr` installed (`apt-get
 install -y poppler-utils tesseract-ocr`) for uploads to convert.
 
-The app listens on **8061** (`--port` in `ecosystem.config.cjs`); make sure it
+The app listens on **8069** (`--port` in `ecosystem.config.cjs`); make sure it
 matches the `proxy_pass` port in `/etc/nginx/sites-available/lwcc.lab980.com`
 — edit whichever side disagrees. Subsequent deploys: `lwcc redeploy`.
 

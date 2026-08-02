@@ -6,7 +6,7 @@ module.exports = {
       name: 'lwcc',
       script: 'app.py',
       interpreter: 'python3',
-      args: '--port 8061',
+      args: '--port 8069',
       exec_mode: 'fork',
       cwd: __dirname,
       max_memory_restart: '200M',
