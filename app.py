@@ -38,6 +38,12 @@ sys.path.insert(0, ROOT)
 from wgconvert import extract, parse, render  # noqa: E402
 
 
+def missing_deps():
+    """Converter binaries the app shells out to; empty list = all present."""
+    return [b for b in ('pdftohtml', 'pdfimages', 'pdftoppm', 'tesseract')
+            if shutil.which(b) is None]
+
+
 def load_env():
     """KEY=VALUE pairs from .env in the app dir, per platform convention."""
     env = {}
@@ -464,7 +470,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         path, _, query = self.path.partition('?')
         if path == '/healthz':
-            self.send_page('ok\n', ctype='text/plain')
+            missing = missing_deps()
+            body = 'ok\n' if not missing else \
+                'degraded: missing ' + ', '.join(missing) + \
+                ' — apt-get install -y poppler-utils tesseract-ocr\n'
+            self.send_page(body, ctype='text/plain')
             return
         if path == '/archive':
             self.send_page(archive_page())
@@ -567,6 +577,11 @@ def main():
     token = 'set' if ENV.get('UPLOAD_TOKEN') else 'NOT SET (uploads disabled)'
     print(f'lwcc serving {PUBLIC} on http://{args.host}:{args.port} — upload token {token}',
           flush=True)
+    missing = missing_deps()
+    if missing:
+        print(f"WARNING: missing converter deps: {', '.join(missing)} — "
+              'uploads will fail until: apt-get install -y poppler-utils tesseract-ocr',
+              flush=True)
     server.serve_forever()
 
 

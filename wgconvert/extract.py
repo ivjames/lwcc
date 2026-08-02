@@ -58,7 +58,16 @@ class Page:
 
 
 def _run(cmd):
-    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    try:
+        return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    except FileNotFoundError:
+        pkg = 'tesseract-ocr' if cmd[0] == 'tesseract' else 'poppler-utils'
+        raise RuntimeError(
+            f"'{cmd[0]}' is not installed on this server — "
+            f"run: apt-get install -y {pkg}") from None
+    except subprocess.CalledProcessError as e:
+        tail = (e.stderr or '').strip().splitlines()[-1:] or ['(no stderr)']
+        raise RuntimeError(f"{cmd[0]} failed on this PDF: {tail[0]}") from None
 
 
 def _decode_entities(s):
@@ -230,8 +239,7 @@ def _ocr_page(pdf_path, page_num, work_dir):
                 if f.startswith(f'ocr-{page_num}-') and f.endswith('.png')), None)
     if not png:
         return None
-    subprocess.run(['tesseract', os.path.join(work_dir, png), prefix],
-                   check=True, capture_output=True)
+    _run(['tesseract', os.path.join(work_dir, png), prefix])
     with open(prefix + '.txt', encoding='utf-8') as fh:
         text = fh.read()
     # Common OCR slip on this material: standalone "I" read as a pipe.
@@ -250,8 +258,7 @@ def extract(pdf_path, work_dir, ocr=True):
     xml_path = os.path.join(work_dir, 'wg.xml')
     warnings = []
     # -i: ignore images; -q: quiet
-    subprocess.run(['pdftohtml', '-xml', '-i', '-q', pdf_path, xml_path],
-                   check=True, capture_output=True)
+    _run(['pdftohtml', '-xml', '-i', '-q', pdf_path, xml_path])
     with open(xml_path, encoding='utf-8') as fh:
         xml = fh.read()
     pages = [Page(number=p['number'], width=p['width'], height=p['height'],
