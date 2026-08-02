@@ -104,7 +104,7 @@ try:
     assert len(untitled) == 1 and untitled[0]['body'], 'post-stage liturgy kept, not dropped'
     assert [m['name'] for m in g2['musicTeam']] == [
         'Dave Albulario', 'Jennifer Rudy', 'John Fluker', 'Hannah Yi', 'Jim Orr']
-    assert g2['musicCredits'], 'hymn credits captured'
+    assert 'musicCredits' not in g2, 'credits are discarded, not stored'
     assert len(g2['prayerRequests']) == 1
     assert [a['heading'] for a in g2['announcements']] == [
         'Flowers and Fellowship', 'Visiting Pastor Lisa', 'Coffee with Pastor',

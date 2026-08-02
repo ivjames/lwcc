@@ -351,8 +351,6 @@ def sanitize_guide(sub, existing):
         if isinstance(m, dict) and clean_plain(m.get('name')):
             g['musicTeam'].append({'name': clean_plain(m.get('name')),
                                    'role': clean_plain(m.get('role')) or None})
-    g['musicCredits'] = [clean_plain(l) for l in sub.get('musicCredits') or []
-                         if clean_plain(l)]
     g['prayerRequests'] = []
     for pr in sub.get('prayerRequests') or []:
         if isinstance(pr, dict) and clean_rich(pr.get('text')):
@@ -871,14 +869,6 @@ function buildForm() {
   f.append(listSection('Music Team', G.musicTeam,
     (row, m) => row.append(txt(m, 'name', 'Name'), txt(m, 'role', 'Role')),
     () => ({name: '', role: ''})));
-
-  G.musicCredits = G.musicCredits || [];
-  const cfs = el('fieldset', {}, el('legend', {}, 'Music credits (small print)'));
-  const carea = el('textarea', {oninput: e =>
-    G.musicCredits = e.target.value.split('\n').filter(l => l.trim())},
-    (G.musicCredits || []).join('\n'));
-  cfs.append(el('label', {class: 'f'}, 'One line each', carea));
-  f.append(cfs);
 
   G.prayerRequests = G.prayerRequests || [];
   f.append(listSection('Prayer Requests', G.prayerRequests,

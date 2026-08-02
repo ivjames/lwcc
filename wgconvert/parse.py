@@ -295,13 +295,13 @@ BOX_CREDITS_RE = re.compile(r'©|\bMusic by\b|\bWords by\b|\barr\.')
 
 
 def parse_music_team(lines):
-    """Names/roles, plus the hymn attribution/copyright block that often sits
-    directly under them (kept as raw small-print lines — its multi-column
-    layout does not reconstruct into clean prose)."""
-    team_lines, credits = [], []
-    for i, l in enumerate(lines):
+    """Names/roles. The hymn attribution/copyright block that often sits
+    directly under them is detected and discarded — the site reproduces
+    neither the engraved music nor the lyrics, so their licensing credits
+    don't apply (and the multi-column block extracts as scrambled text)."""
+    team_lines = []
+    for l in lines:
         if CREDITS_LINE_RE.search(l.text):
-            credits = [x.text for x in lines[i:]]
             break
         team_lines.append(l)
     lines = team_lines
@@ -320,7 +320,7 @@ def parse_music_team(lines):
                 name = None
             elif not r.b or not re.match(r'^MUSIC', t, re.I):
                 name = re.sub(r'[,\s]+$', '', t)
-    return team, credits
+    return team
 
 
 def parse_prayer_requests(lines):
@@ -364,6 +364,8 @@ def parse_announcements(lines):
             if kind == 'attendance':
                 body = re.sub(r'</?[bi]>', '', body)  # keep only <sup>
             items.append({'heading': heading, 'text': body, 'kind': kind})
+        elif any(BOX_CREDITS_RE.search(l.text) for l in para):
+            continue          # stray hymn-credits lines — not announcements
         elif items:
             items[-1]['text'] += ' ' + text
         else:
@@ -477,7 +479,7 @@ def parse(extracted, opts=None):
         'date': None, 'dateISO': None, 'season': None,
         'series': None, 'coverAlt': None,
         'welcome': None, 'order': [],
-        'musicTeam': [], 'musicCredits': [], 'prayerRequests': [], 'announcements': [],
+        'musicTeam': [], 'prayerRequests': [], 'announcements': [],
         'specialEvents': [], 'journal': None,
         'warnings': warnings,
     }
@@ -594,13 +596,13 @@ def parse(extracted, opts=None):
         for box in split_boxes(boxable):
             first = box[0]
             if re.match(r'^Music Team\b', first.text):
-                guide['musicTeam'], guide['musicCredits'] = parse_music_team(box)
+                guide['musicTeam'] = parse_music_team(box)
             elif re.match(r'^PRAYER REQUESTS', first.text):
                 guide['prayerRequests'] = parse_prayer_requests(box)
             elif re.match(r'^NOTES AND ANNOUNCEMENTS', first.text):
                 guide['announcements'] = parse_announcements(box)
             elif any(BOX_CREDITS_RE.search(l.text) for l in box):
-                guide['musicCredits'] += [l.text for l in box]
+                pass          # hymn copyright block — discarded (see above)
             elif first.runs and first.runs[0].b and first.runs[0].i:
                 guide['specialEvents'].append(parse_special_event(box))
             else:

@@ -158,19 +158,13 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None):
             + (f' <span class="role">— {esc(m["role"])}</span>' if m.get('role') else '')
             + '</div>'
             for m in guide['musicTeam'])
-        credits = ''
-        if guide.get('musicCredits'):
-            joined = '<br>'.join(esc(t) for t in guide['musicCredits'])
-            credits = ('\n      <div style="font-family:Arial,Helvetica,sans-serif;'
-                       'font-size:.72rem;color:#54574a;margin-top:14px;line-height:1.7">'
-                       + joined + '</div>')
         sections.append(f'''
   <section id="music">
     <h2 class="sec">Music Team</h2>
     <div class="item">
       <div class="grid music">
 {cells}
-      </div>{credits}
+      </div>
     </div>
   </section>''')
 
