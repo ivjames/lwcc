@@ -296,6 +296,8 @@ try:
     status, body = req('/admin', headers=COOKIE)
     assert b'Needs review' in body and b'untitled item' in body, 'review panel lists warnings'
     assert b'Published Sundays' in body and b'adminAction' in body, 'management panel present'
+    assert b'id="reconvertall"' in body and b'2026-08-09' in body, \
+        'bulk re-convert offered for flagged Sundays with stored sources'
 
     # Mark reviewed: warnings move to reviewedWarnings, panel and badge clear.
     def action(name, date, token=TOKEN):

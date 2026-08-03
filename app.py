@@ -803,6 +803,29 @@ $('queue').addEventListener('change', e => {
   if (e.target.classList.contains('qdate')) queue[+e.target.dataset.i].override = e.target.value;
 });
 
+const _ra = document.getElementById('reconvertall');
+if (_ra) _ra.addEventListener('click', async () => {
+  const dates = _ra.dataset.dates.split(' ').filter(Boolean);
+  if (!confirm('Re-convert ' + dates.length + ' Sundays from their stored PDFs? ' +
+               'Hand-edits to them will be overwritten.')) return;
+  _ra.disabled = true;
+  let failed = 0;
+  for (const d of dates) {
+    _ra.textContent = 'Re-converting ' + d + '…';
+    try {
+      const res = await fetch('/api/reconvert', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({date: d}),
+      });
+      const data = await res.json().catch(() => ({ok: false}));
+      if (!data.ok) failed++;
+    } catch (e) { failed++; }
+  }
+  if (failed) alert(failed + ' re-conversion(s) failed — see the upload history.');
+  location.reload();
+});
+
 async function retryFailed(btn, name) {
   const date = btn.parentElement.querySelector('.retrydate').value;
   btn.disabled = true;
@@ -926,10 +949,21 @@ def manage_html():
                 f'<button class="mini" onclick="adminAction(\'review\', \'{d}\')">'
                 f'Mark reviewed</button>'
                 f'<ul style="margin:4px 0 0;padding-left:18px">{warns}</ul></li>')
+        bulk = sorted((d for d, _ in flagged
+                       if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf'))),
+                      reverse=True)
+        bulk_html = ''
+        if bulk:
+            bulk_html = (
+                f'<p><button class="mini" id="reconvertall" '
+                f'data-dates="{" ".join(bulk)}">Re-convert all listed '
+                f'({len(bulk)})</button> — after a parser upgrade, re-runs the '
+                f'converter on each flagged Sunday&#8217;s stored PDF.</p>')
         out.append('<div class="card"><p><b>Needs review</b> — published with '
                    'parser warnings. Check the page; if it reads right, mark it '
                    'reviewed (warnings are kept in guide.json under '
                    'reviewedWarnings). Or fix and re-upload the PDF.</p>'
+                   + bulk_html +
                    '<ul style="list-style:none;padding-left:0">'
                    + ''.join(items) + '</ul></div>')
 

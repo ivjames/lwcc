@@ -80,6 +80,15 @@ LABEL_KINDS = [
     (re.compile(r'INTERCESSION'), 'litany'),
     (re.compile(r'^SCRIPTURE'), 'scripture'),
     (re.compile(r'^MESSAGE'), 'message'),
+    (re.compile(r'^PRELUDE'), 'music'),
+    (re.compile(r'^HOMILY'), 'message'),
+    (re.compile(r'CANDLE LIGHTING|PASCHAL CANDLE'), 'plain'),
+    (re.compile(r'^(PASTOR|LITURGIST|CONGREGATION)\b'), 'litany'),
+    (re.compile(r'^PRESENTATION OF'), 'plain'),
+    (re.compile(r'^STEWARDSHIP'), 'plain'),
+    (re.compile(r'^FLOWERING'), 'plain'),
+    (re.compile(r'^EASTER PROCLAMATION'), 'plain'),
+    (re.compile(r'THANKSGIVING FOR WATER'), 'litany'),
 ]
 
 SEASON_RE = re.compile(
@@ -359,6 +368,17 @@ CALENDAR_BLOCK_RE = re.compile(r'^(' + '|'.join(MONTHS) + r')\s+\d{1,2}:\s')
 # Giant display words from poster art bleeding onto content pages
 # ("PEACE LOVE", "JOY KINDNESS") — no lowercase, no digits, no colon.
 DISPLAY_CAPS_RE = re.compile(r"^[A-Z][A-Z\s&'!,-]{2,40}$")
+
+
+# Recurring page furniture on community/back pages — hymn-quote art, the
+# masthead vision/mission block, the squished church-name graphic, and
+# stray display fragments. Matched against a box's first line; discarded
+# silently (it recurs weekly and is design, not news).
+FIXTURE_BLOCK_RE = re.compile(
+    r'^(Let us build a house where hands will reach beyond\b.*|'
+    r'Our (Vision|Mission):.*|'
+    r'LEISURE\s?WORLD\s?COMMUNITY\s?CHURCH$|'
+    r'continues!$)')
 
 
 def poster_residue(line_texts):
@@ -841,6 +861,10 @@ def parse(extracted, opts=None):
                 guide['flyers'].append({'page': page_num, 'image': None})
             else:
                 for box in pending:
+                    if not re.search(r'\w', ' '.join(l.text for l in box)):
+                        continue    # stray punctuation fragments ("”")
+                    if FIXTURE_BLOCK_RE.match(box[0].text.strip()):
+                        continue    # recurring page furniture
                     if poster_seen and poster_residue(l.text for l in box):
                         continue    # residue between poster display blocks
                     first = box[0]

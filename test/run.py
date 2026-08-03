@@ -61,6 +61,22 @@ assert match_label(_line('THANKS BE TO GOD')) is None, 'unknown caps prose is no
 assert kind_for('CLOSING HYMN') == 'music' and known_label('CLOSING HYMN')
 assert known_label('OPENING WORDS') and known_label('DECLARATION OF FORGIVENESS')
 
+# 2024 festival/stewardship vocabulary and recurring page furniture
+from wgconvert.parse import FIXTURE_BLOCK_RE  # noqa: E402
+assert kind_for('PRELUDE') == 'music' and kind_for('HOMILY') == 'message'
+assert kind_for('PASTOR') == 'litany' and kind_for('CONGREGATION') == 'litany'
+assert known_label('LITURGIST') and known_label('STEWARDSHIP MOMENT')
+assert known_label('THE CEREMONY OF CANDLE LIGHTING')
+assert known_label('LIGHTING OF THE PASCHAL CANDLE')
+assert known_label('FLOWERING THE EASTER CROSS') and known_label('EASTER PROCLAMATION')
+assert known_label('PRESENTATION OF CERTIFICATES') and known_label('THANKSGIVING FOR WATER')
+assert FIXTURE_BLOCK_RE.match('Let us build a house where hands will reach beyond wood and stone')
+assert FIXTURE_BLOCK_RE.match('LEISUREWORLDCOMMUNITYCHURCH')
+assert FIXTURE_BLOCK_RE.match('Our Vision: To Be the Lantern to Leisure World')
+assert FIXTURE_BLOCK_RE.match('continues!')
+assert not FIXTURE_BLOCK_RE.match('Our church picnic continues this week')
+assert not FIXTURE_BLOCK_RE.match('Let us pray for the needs of the world.')
+
 # Scanned guides (no text layer anywhere): the date comes from page-image
 # OCR and every page publishes as an image. Memorial lifespan dates
 # ("July 21, 1944 – November 29, 2025") never become the service date.
