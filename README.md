@@ -30,9 +30,13 @@ Batch the backlog from a terminal:
 ```
 for f in backlog/*.pdf; do
   curl -X POST --data-binary @"$f" -H "X-Upload-Token: $TOKEN" \
-       -H "Content-Type: application/pdf" https://lwcc.lab980.com/api/upload
+       -H "Content-Type: application/pdf" \
+       -H "X-Filename: $(basename "$f")" https://lwcc.lab980.com/api/upload
 done
 ```
+
+(`X-Filename` is optional but makes `/admin/history` show which PDF produced
+each result.)
 
 (or convert locally with `bin/wg-convert convert backlog/*.pdf -o public/`
 and commit/rsync the output — same result.)
