@@ -18,7 +18,12 @@ from .known_texts import KNOWN_TEXTS
 
 MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
           'August', 'September', 'October', 'November', 'December']
-DATE_RE = re.compile(r'^(' + '|'.join(MONTHS) + r')\s+(\d{1,2}),\s+(\d{4})$')
+# Accepts the plain form ("August 2, 2026") plus festival variants seen in the
+# backlog: "May the 4th, 2025" and "April 20, 2025 – EASTER SUNDAY" (season on
+# the same line after a dash).
+DATE_RE = re.compile(
+    r'^(' + '|'.join(MONTHS) + r')\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?,\s+(\d{4})'
+    r'(?:\s*[–—-]\s*(.+))?$')
 SMALL_WORDS = {'of', 'the', 'to', 'for', 'and', 'a', 'an', 'in', 'on', 'with', 'at', 'by', 'or', 'nor', 'but'}
 
 # Order-of-worship label kinds. `music` items carry a title whose engraved
@@ -31,7 +36,10 @@ LABEL_KINDS = [
     (re.compile(r'^SENDING FORTH'), 'music'),
     (re.compile(r'^REFLECTION'), 'music'),
     (re.compile(r'^SPECIAL MUSIC'), 'music'),
-    (re.compile(r'PROCESSIONAL'), 'music'),
+    (re.compile(r'PROCESSION'), 'music'),
+    (re.compile(r'^OPENING PRAYER'), 'prayer'),
+    (re.compile(r'^INTRODUCTION'), 'plain'),
+    (re.compile(r'BAPTISM'), 'plain'),
     (re.compile(r'^ANTHEM'), 'music'),
     (re.compile(r'PRAYER OF THE DAY'), 'prayer'),
     (re.compile(r'PRAYER FOR ILLUMINATION'), 'prayer'),
@@ -425,9 +433,12 @@ def parse_special_event(lines):
 
 def journal_from_lines(lines):
     """Prayer Journal page that has a real text layer (newer guides are
-    flattened images handled by OCR; older ones are plain text)."""
-    journal = {'subtitle': None, 'morning': None, 'midday': None, 'evening': None}
-    section = None
+    flattened images handled by OCR; older ones are plain text). Knows the
+    Household Morning/Evening shape and generic titled prayers such as
+    "A Prayer Before Reading the News:" with a "— written by …" attribution."""
+    journal = {'subtitle': None, 'morning': None, 'midday': None, 'evening': None,
+               'sections': []}
+    section = None            # 'morning' | 'evening' | dict in sections
     for l in lines:
         t = l.text
         if re.fullmatch(r'Prayer Journal', t, re.I):
@@ -445,9 +456,22 @@ def journal_from_lines(lines):
             journal['midday'] = (journal['midday'] + ' ' + t) if journal['midday'] else t
             section = None
             continue
-        if section:
+        if len(t) < 70 and t.endswith(':'):
+            section = {'heading': t.rstrip(':').strip(), 'text': None, 'attribution': None}
+            journal['sections'].append(section)
+            continue
+        if isinstance(section, dict) and re.match(r'^[—–-]\s*\S', t) \
+                and all(r.i or not r.text.strip() for r in l.runs):
+            section['attribution'] = re.sub(r'^[—–-]\s*', '', t)
+            continue
+        if isinstance(section, dict):
+            section['text'] = (section['text'] + ' ' + t) if section['text'] else t
+        elif section:
             journal[section] = (journal[section] + ' ' + t) if journal[section] else t
-    return journal if (journal['morning'] or journal['evening']) else None
+    journal['sections'] = [s for s in journal['sections'] if s['text']]
+    if journal['morning'] or journal['evening'] or journal['sections']:
+        return journal
+    return None
 
 
 GPS_PAGE_RE = re.compile(r'Notes from the Service|My Prayers this week', re.I)
@@ -457,7 +481,8 @@ def parse_journal(ocr_text):
     paras = [re.sub(r'\s+', ' ', p).strip()
              for p in re.split(r'\n\s*\n', ocr_text)]
     paras = [p for p in paras if p]
-    journal = {'subtitle': None, 'morning': None, 'midday': None, 'evening': None}
+    journal = {'subtitle': None, 'morning': None, 'midday': None, 'evening': None,
+               'sections': []}
     section = None
     for p in paras:
         if re.fullmatch(r'Prayer Journal', p, re.I):
@@ -475,12 +500,29 @@ def parse_journal(ocr_text):
             journal['midday'] = p
             section = None
             continue
-        if section and not journal[section]:
+        gm = re.match(r'^([^:]{2,60}):\s*([\s\S]*)$', p) if p.rstrip().endswith(':') or ':' in p[:60] else None
+        if gm and not section and gm.group(1).strip() and len(gm.group(1)) < 60:
+            journal.setdefault('sections', []).append(
+                {'heading': gm.group(1).strip(), 'text': gm.group(2).strip() or None,
+                 'attribution': None})
+            section = 'generic'
+            continue
+        if section == 'generic' and journal.get('sections'):
+            cur = journal['sections'][-1]
+            if re.match(r'^[—–-]\s*\S', p):
+                cur['attribution'] = re.sub(r'^[—–-]\s*', '', p)
+            else:
+                cur['text'] = (cur['text'] + ' ' + p) if cur['text'] else p
+            continue
+        if section and section != 'generic' and not journal[section]:
             journal[section] = p
             continue
-        if section:
+        if section and section != 'generic':
             journal[section] += ' ' + p
-    return journal if (journal['morning'] or journal['evening']) else None
+    journal['sections'] = [s for s in journal.get('sections') or [] if s['text']]
+    if journal['morning'] or journal['evening'] or journal['sections']:
+        return journal
+    return None
 
 
 # --- main ------------------------------------------------------------------
@@ -505,11 +547,18 @@ def parse(extracted, opts=None):
         l = all_lines[i]
         dm = DATE_RE.match(l.text)
         if dm:
-            guide['date'] = l.text
+            tail = dm.group(4)
+            if tail:
+                # "April 20, 2025 – EASTER SUNDAY": season rides the date line
+                guide['date'] = l.text[:dm.start(4)].rstrip(' –—-')
+                guide['season'] = title_case(tail) if tail == tail.upper() else tail
+            else:
+                guide['date'] = l.text
             month = str(MONTHS.index(dm.group(1)) + 1).zfill(2)
             guide['dateISO'] = f"{dm.group(3)}-{month}-{dm.group(2).zfill(2)}"
             nxt = all_lines[i + 1] if i + 1 < len(all_lines) else None
-            if nxt is not None and any(r.i for r in nxt.runs) and not match_label(nxt):
+            if guide['season'] is None and nxt is not None \
+                    and any(r.i for r in nxt.runs) and not match_label(nxt):
                 guide['season'] = nxt.text
                 i += 1
             i += 1
@@ -546,7 +595,7 @@ def parse(extracted, opts=None):
         label = match_label(l)
         if label:
             flush()
-            if re.match(r'^OPENING ANNOUNCEMENTS|^WELCOME', label['label']):
+            if re.match(r'^OPENING ANNOUNCEMENTS|^WELCOME|^GREETING', label['label']):
                 guide['welcome'] = {'heading': title_case(label['label']),
                                     'who': label['who'], 'body': []}
                 current = {'item': guide['welcome'], 'kind': 'plain', 'lines': []}

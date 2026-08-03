@@ -255,6 +255,11 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None, flye
         if j.get('evening'):
             blks.append(f'''      <div class="blk"><b>Household Prayer: Evening</b>
         <p class="prayer">{prayer_html(esc(j['evening']))}</p></div>''')
+        for s in j.get('sections') or []:
+            attr = (f'\n        <div class="who" style="text-align:right">— {esc(s["attribution"])}</div>'
+                    if s.get('attribution') else '')
+            blks.append(f'''      <div class="blk"><b>{esc(s['heading'])}</b>
+        <p class="prayer">{prayer_html(esc(s['text']))}</p>{attr}</div>''')
         subtitle = (f'<p style="margin-top:-6px;color:var(--muted);font-style:italic">'
                     f'{esc(j["subtitle"])}</p>') if j.get('subtitle') else ''
         joined = '\n'.join(blks)

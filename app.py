@@ -390,11 +390,19 @@ def sanitize_guide(sub, existing):
 
     j = sub.get('journal') if isinstance(sub.get('journal'), dict) else None
     g['journal'] = None
-    if j and (clean_plain(j.get('morning')) or clean_plain(j.get('evening'))):
+    has_sections = any(isinstance(s, dict) and clean_plain(s.get('text'))
+                       for s in (j.get('sections') or [])) if j else False
+    if j and (clean_plain(j.get('morning')) or clean_plain(j.get('evening')) or has_sections):
         g['journal'] = {'subtitle': clean_plain(j.get('subtitle')) or None,
                         'morning': clean_plain(j.get('morning')) or None,
                         'midday': clean_plain(j.get('midday')) or None,
-                        'evening': clean_plain(j.get('evening')) or None}
+                        'evening': clean_plain(j.get('evening')) or None,
+                        'sections': [
+                            {'heading': clean_plain(s.get('heading')),
+                             'text': clean_plain(s.get('text')),
+                             'attribution': clean_plain(s.get('attribution')) or None}
+                            for s in j.get('sections') or []
+                            if isinstance(s, dict) and clean_plain(s.get('text'))]}
         if (existing.get('journal') or {}).get('fromOcr'):
             g['journal']['fromOcr'] = True
 

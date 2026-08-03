@@ -18,6 +18,14 @@ from wgconvert import extract, parse, render  # noqa: E402
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 SAMPLE = os.path.join(ROOT, 'samples', 'WG_2026_08_02.pdf')
 
+# date-line variants seen in festival editions (no fixture needed)
+from wgconvert.parse import DATE_RE  # noqa: E402
+assert DATE_RE.match('August 2, 2026')
+assert DATE_RE.match('May the 4th, 2025')
+_m = DATE_RE.match('April 20, 2025 – EASTER SUNDAY')
+assert _m and _m.group(4) == 'EASTER SUNDAY'
+assert not DATE_RE.match('Sunday Service: 9:30 AM')
+
 work_dir = tempfile.mkdtemp(prefix='wg-test-')
 try:
     extracted = extract(SAMPLE, work_dir)
