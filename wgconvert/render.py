@@ -50,6 +50,8 @@ def data_uri(file):
 def announcement_emoji(heading):
     if not heading:
         return ''
+    if re.search(r'this week|calendar', heading, re.I):
+        return '📅 '
     if re.search(r'flower', heading, re.I):
         return '🌷 '
     if re.search(r'coffee', heading, re.I):

@@ -56,6 +56,10 @@ LABEL_KINDS = [
     (re.compile(r'^MESSAGE'), 'message'),
 ]
 
+SEASON_RE = re.compile(
+    r'Sunday|Pentecost|Advent|Lent|Easter|Christmas|Epiphany|Ascension|Trinity|Creation',
+    re.I)
+
 SCRIPTURE_REF_RE = re.compile(
     r'^(?:[1-3]\s)?[A-Z][a-z]+(?:\s[A-Za-z]+)?\s\d+(?::\d+(?:[-–]\d+)?)?$')
 
@@ -291,6 +295,8 @@ def build_item_body(kind, lines, item):
 
 
 # --- community page (music team / prayer requests / announcements) ---------
+
+CALENDAR_BLOCK_RE = re.compile(r'^(' + '|'.join(MONTHS) + r')\s+\d{1,2}:\s')
 
 COMMUNITY_HEAD_RE = re.compile(r'^(PRAYER REQUESTS|NOTES AND ANNOUNCEMENTS|Music Team\b)')
 
@@ -557,8 +563,9 @@ def parse(extracted, opts=None):
             month = str(MONTHS.index(dm.group(1)) + 1).zfill(2)
             guide['dateISO'] = f"{dm.group(3)}-{month}-{dm.group(2).zfill(2)}"
             nxt = all_lines[i + 1] if i + 1 < len(all_lines) else None
-            if guide['season'] is None and nxt is not None \
-                    and any(r.i for r in nxt.runs) and not match_label(nxt):
+            if guide['season'] is None and nxt is not None and not match_label(nxt) \
+                    and len(nxt.text) < 45 \
+                    and (any(r.i for r in nxt.runs) or SEASON_RE.search(nxt.text)):
                 guide['season'] = nxt.text
                 i += 1
             i += 1
@@ -621,6 +628,13 @@ def parse(extracted, opts=None):
             i += 1
             continue
         if current is None:
+            if not any(o['kind'] == 'item' for o in guide['order']) \
+                    and all(r.i or not r.text.strip() for r in l.runs):
+                # Italic instructions before any item (e.g. Easter's "Please
+                # gather in the narthex") read as stage directions.
+                guide['order'].append({'kind': 'stage', 'text': l.text})
+                i += 1
+                continue
             # Body text after a stage direction with no new label. The 2025
             # format puts a stage direction between a label (typically
             # PRAYERS OF INTERCESSION) and its text: if the last labeled item
@@ -680,6 +694,11 @@ def parse(extracted, opts=None):
                     pass      # hymn copyright block — discarded (see above)
                 elif first.runs and first.runs[0].b and first.runs[0].i:
                     guide['specialEvents'].append(parse_special_event(box))
+                    classified = True
+                elif CALENDAR_BLOCK_RE.match(first.text):
+                    guide['announcements'].append({
+                        'heading': 'This Week', 'kind': 'note',
+                        'text': tidy_prose(' '.join(runs_to_markup(l.runs) for l in box))})
                     classified = True
                 else:
                     pending.append(box)
