@@ -803,7 +803,7 @@ def upload_history(limit=None, status=None):
 def history_rows(entries):
     rows = []
     for e in entries:
-        when = esc((e.get('at') or '').replace('T', '&nbsp;'))
+        when = esc(e.get('at') or '').replace('T', '&nbsp;')
         d = e.get('dateISO')
         sunday = f'<a href="/{esc(d)}/">{esc(d)}</a>' if d else '—'
         st = upload_status(e)

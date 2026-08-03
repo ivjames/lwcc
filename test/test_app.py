@@ -182,6 +182,7 @@ try:
     status, body = req('/admin/history', headers=COOKIE)
     assert status == 200 and b'Upload History' in body
     assert 'no-store' in (LAST['headers'].get('Cache-Control') or '')
+    assert b'&amp;nbsp;' not in body, 'timestamp nbsp must not be double-escaped'
     assert b'WG 2026 08 02.pdf' in body, 'filename recorded from X-Filename'
     assert b'/2026-08-02/' in body and '✔ published'.encode() in body
     assert '✖ failed'.encode() in body, 'failed conversions are in the history too'
