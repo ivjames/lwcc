@@ -104,7 +104,7 @@ def body_html(item):
     return '\n      '.join(parts)
 
 
-def render(guide, church, banner_path=None, cover_path=None, css_path=None):
+def render(guide, church, banner_path=None, cover_path=None, css_path=None, flyer_dir=None):
     with open(css_path or TEMPLATE_CSS, encoding='utf-8') as fh:
         css = fh.read()
     banner = data_uri(banner_path) if banner_path and os.path.exists(banner_path) else None
@@ -219,6 +219,26 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None):
 {paras}
       {note}
     </div>
+  </section>''')
+
+    # -- flyers / inserts ---------------------------------------------------
+    flyer_imgs = []
+    for fl in guide.get('flyers') or []:
+        if not fl.get('image') or not flyer_dir:
+            continue
+        path = os.path.join(flyer_dir, fl['image'])
+        if os.path.exists(path):
+            flyer_imgs.append(
+                f'    <img class="cover" style="max-width:640px;margin:14px auto" '
+                f'src="{data_uri(path)}" '
+                f'alt="Insert from the printed guide (page {fl["page"]})">')
+    if flyer_imgs:
+        toc.append(('#flyers', 'Flyers'))
+        joined = '\n'.join(flyer_imgs)
+        sections.append(f'''
+  <section id="flyers">
+    <h2 class="sec">Flyers &amp; Inserts</h2>
+{joined}
   </section>''')
 
     # -- prayer journal -----------------------------------------------------

@@ -9,7 +9,7 @@ import shutil
 import sys
 import tempfile
 
-from .extract import extract
+from .extract import extract, render_page_image
 from .parse import parse
 from .render import render
 
@@ -42,6 +42,12 @@ def write_guide(guide, out_dir):
         fh.write('\n')
 
 
+def materialize_flyers(pdf, guide, out_dir):
+    for fl in guide.get('flyers') or []:
+        fl['image'] = f"flyer-{fl['page']}.jpg"
+        render_page_image(pdf, fl['page'], os.path.join(out_dir, fl['image']))
+
+
 def convert_one(pdf, args, church, render_html=True):
     work_dir = tempfile.mkdtemp(prefix='wg-')
     try:
@@ -56,12 +62,13 @@ def convert_one(pdf, args, church, render_html=True):
             cover_dest = os.path.join(
                 out_dir, 'cover' + os.path.splitext(extracted.cover_path)[1])
             shutil.copyfile(extracted.cover_path, cover_dest)
+        materialize_flyers(pdf, guide, out_dir)
         write_guide(guide, out_dir)
 
         if render_html:
             html = render(guide, church,
                           banner_path=os.path.join(ROOT, 'assets', 'banner.png'),
-                          cover_path=cover_dest)
+                          cover_path=cover_dest, flyer_dir=out_dir)
             with open(os.path.join(out_dir, 'index.html'), 'w', encoding='utf-8') as fh:
                 fh.write(html)
 
@@ -109,7 +116,8 @@ def main(argv=None):
                   if re.fullmatch(r'cover\.(jpe?g|png|webp)', f)), None)
     html = render(guide, church,
                   banner_path=os.path.join(ROOT, 'assets', 'banner.png'),
-                  cover_path=os.path.join(out_dir, cover) if cover else None)
+                  cover_path=os.path.join(out_dir, cover) if cover else None,
+                  flyer_dir=out_dir)
     html_path = os.path.join(out_dir, 'index.html')
     with open(html_path, 'w', encoding='utf-8') as fh:
         fh.write(html)

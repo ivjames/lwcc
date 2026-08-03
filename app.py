@@ -46,6 +46,7 @@ ADMIN_NEXT_RE = re.compile(r'/admin(/edit/\d{4}-\d{2}-\d{2})?')
 
 sys.path.insert(0, ROOT)
 from wgconvert import extract, parse, render  # noqa: E402
+from wgconvert.extract import render_page_image  # noqa: E402
 
 
 def audit_log(entry):
@@ -211,12 +212,15 @@ def convert_pdf(pdf_path):
         if extracted.cover_path:
             cover_dest = os.path.join(out_dir, 'cover' + os.path.splitext(extracted.cover_path)[1])
             shutil.copyfile(extracted.cover_path, cover_dest)
+        for fl in guide.get('flyers') or []:
+            fl['image'] = f"flyer-{fl['page']}.jpg"
+            render_page_image(pdf_path, fl['page'], os.path.join(out_dir, fl['image']))
         with open(os.path.join(out_dir, 'guide.json'), 'w', encoding='utf-8') as fh:
             json.dump(guide, fh, indent=2, ensure_ascii=False)
             fh.write('\n')
         html = render(guide, church,
                       banner_path=os.path.join(ROOT, 'assets', 'banner.png'),
-                      cover_path=cover_dest)
+                      cover_path=cover_dest, flyer_dir=out_dir)
         with open(os.path.join(out_dir, 'index.html'), 'w', encoding='utf-8') as fh:
             fh.write(html)
         return guide, replaced
@@ -257,7 +261,8 @@ def rerender_date(d):
                   if re.fullmatch(r'cover\.(jpe?g|png|webp)', f)), None)
     html = render(g, load_church(),
                   banner_path=os.path.join(ROOT, 'assets', 'banner.png'),
-                  cover_path=os.path.join(out_dir, cover) if cover else None)
+                  cover_path=os.path.join(out_dir, cover) if cover else None,
+                  flyer_dir=out_dir)
     with open(os.path.join(out_dir, 'index.html'), 'w', encoding='utf-8') as fh:
         fh.write(html)
 
@@ -393,6 +398,7 @@ def sanitize_guide(sub, existing):
         if (existing.get('journal') or {}).get('fromOcr'):
             g['journal']['fromOcr'] = True
 
+    g['flyers'] = existing.get('flyers') or []
     g['warnings'] = existing.get('warnings') or []
     if existing.get('reviewedWarnings'):
         g['reviewedWarnings'] = existing['reviewedWarnings']

@@ -31,6 +31,7 @@ LABEL_KINDS = [
     (re.compile(r'^SENDING FORTH'), 'music'),
     (re.compile(r'^REFLECTION'), 'music'),
     (re.compile(r'^SPECIAL MUSIC'), 'music'),
+    (re.compile(r'PROCESSIONAL'), 'music'),
     (re.compile(r'^ANTHEM'), 'music'),
     (re.compile(r'PRAYER OF THE DAY'), 'prayer'),
     (re.compile(r'PRAYER FOR ILLUMINATION'), 'prayer'),
@@ -491,7 +492,7 @@ def parse(extracted, opts=None):
         'series': None, 'coverAlt': None,
         'welcome': None, 'order': [],
         'musicTeam': [], 'prayerRequests': [], 'announcements': [],
-        'specialEvents': [], 'journal': None,
+        'specialEvents': [], 'flyers': [], 'journal': None,
         'warnings': warnings,
     }
 
@@ -562,7 +563,7 @@ def parse(extracted, opts=None):
                 guide['series'] = {'title': label['title'], 'by': label['who']}
             if kind == 'plain' and not any(rx.search(label['label']) for rx, _ in LABEL_KINDS):
                 # generic fallback — fine, but let the operator know
-                if not re.search(r'QUESTIONS FOR REFLECTION|INVITATION TO THE OFFERING',
+                if not re.search(r'QUESTIONS? FOR REFLECTION|INVITATION TO THE OFFERING',
                                  label['label']):
                     warnings.append(
                         f'unrecognized order-of-worship label "{label["label"]}" (parsed generically)')
@@ -571,16 +572,24 @@ def parse(extracted, opts=None):
             i += 1
             continue
         if current is None:
-            # Liturgy flowing past a stage direction with no new label (e.g.
-            # the Great Thanksgiving continuing onto the next page): keep it
-            # as an untitled item so nothing is lost, and flag it for review.
-            item = {'kind': 'item', 'type': 'plain', 'label': None, 'title': None,
-                    'titleQuoted': False, 'who': None, 'note': None, 'body': []}
-            guide['order'].append(item)
-            current = {'item': item, 'kind': 'plain', 'lines': []}
-            warnings.append(
-                f'page {l.page}: content without a label kept as an untitled '
-                f'item (starts: "{l.text[:50]}")')
+            # Body text after a stage direction with no new label. The 2025
+            # format puts a stage direction between a label (typically
+            # PRAYERS OF INTERCESSION) and its text: if the last labeled item
+            # is still bodyless and isn't a music item, this is its body —
+            # reattach silently. Otherwise (e.g. the Great Thanksgiving
+            # flowing on after Communion versicles) keep an untitled item so
+            # nothing is lost, and flag it for review.
+            prev = next((o for o in reversed(guide['order']) if o['kind'] == 'item'), None)
+            if prev is not None and not prev['body'] and prev['type'] != 'music':
+                current = {'item': prev, 'kind': prev['type'], 'lines': []}
+            else:
+                item = {'kind': 'item', 'type': 'plain', 'label': None, 'title': None,
+                        'titleQuoted': False, 'who': None, 'note': None, 'body': []}
+                guide['order'].append(item)
+                current = {'item': item, 'kind': 'plain', 'lines': []}
+                warnings.append(
+                    f'page {l.page}: content without a label kept as an untitled '
+                    f'item (starts: "{l.text[:50]}")')
         current['lines'].append(l)
         i += 1
     flush()
@@ -603,26 +612,41 @@ def parse(extracted, opts=None):
                     warnings.append(
                         f'page {page_num}: Prayer Journal page found but not parsed')
                 continue
-            boxable.extend(page_lines)
-        for box in split_boxes(boxable):
-            first = box[0]
-            if re.match(r'^Music Team\b', first.text):
-                guide['musicTeam'] = parse_music_team(box)
-            elif re.match(r'^PRAYER REQUESTS', first.text):
-                guide['prayerRequests'] = parse_prayer_requests(box)
-            elif re.match(r'^NOTES AND ANNOUNCEMENTS', first.text):
-                guide['announcements'] = parse_announcements(box)
-            elif any(BOX_CREDITS_RE.search(l.text) for l in box):
-                pass          # hymn copyright block — discarded (see above)
-            elif first.runs and first.runs[0].b and first.runs[0].i:
-                guide['specialEvents'].append(parse_special_event(box))
+            boxable.append((page_num, page_lines))
+        for page_num, page_lines in boxable:
+            classified = False
+            pending = []
+            for box in split_boxes(page_lines):
+                first = box[0]
+                if re.match(r'^Music Team\b', first.text):
+                    guide['musicTeam'] = parse_music_team(box)
+                    classified = True
+                elif re.match(r'^PRAYER REQUESTS', first.text):
+                    guide['prayerRequests'] = parse_prayer_requests(box)
+                    classified = True
+                elif re.match(r'^NOTES AND ANNOUNCEMENTS', first.text):
+                    guide['announcements'] = parse_announcements(box)
+                    classified = True
+                elif any(BOX_CREDITS_RE.search(l.text) for l in box):
+                    pass      # hymn copyright block — discarded (see above)
+                elif first.runs and first.runs[0].b and first.runs[0].i:
+                    guide['specialEvents'].append(parse_special_event(box))
+                    classified = True
+                else:
+                    pending.append(box)
+            if pending and not classified:
+                # A page of nothing but display blocks is a designed insert
+                # (concert flyer, seasonal page): publish it as an image.
+                guide['flyers'].append({'page': page_num, 'image': None})
             else:
-                warnings.append(
-                    f'page {first.page}: unclassified block starting "{first.text[:50]}" '
-                    '(added as announcement)')
-                guide['announcements'].append({
-                    'heading': None, 'kind': 'note',
-                    'text': tidy_prose(' '.join(runs_to_markup(l.runs) for l in box))})
+                for box in pending:
+                    first = box[0]
+                    warnings.append(
+                        f'page {first.page}: unclassified block starting '
+                        f'"{first.text[:50]}" (added as announcement)')
+                    guide['announcements'].append({
+                        'heading': None, 'kind': 'note',
+                        'text': tidy_prose(' '.join(runs_to_markup(l.runs) for l in box))})
     else:
         warnings.append('no community section (Music Team / Prayer Requests / Announcements) found')
 
@@ -638,8 +662,7 @@ def parse(extracted, opts=None):
                 warnings.append(
                     f'page {p.number}: Prayer Journal page found but could not be parsed from OCR')
         elif not re.search(r'GROW|PRAY|STUDY|Notes from the Service', p.ocr_text, re.I):
-            warnings.append(
-                f'page {p.number}: image-only page with unrecognized content (skipped)')
+            guide['flyers'].append({'page': p.number, 'image': None})
 
     if guide['series']:
         by = guide['series']['by'] or ''
@@ -648,6 +671,7 @@ def parse(extracted, opts=None):
     # sanity checks the operator will want to hear about
     if not guide['order']:
         warnings.append('no order-of-worship items found')
+    guide['flyers'].sort(key=lambda f: f['page'])
     if not guide['journal']:
         warnings.append('no Prayer Journal parsed')
     return guide

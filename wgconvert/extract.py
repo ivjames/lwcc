@@ -224,6 +224,20 @@ def _find_cover_image(pdf_path, out_dir):
     return dest
 
 
+def render_page_image(pdf_path, page_num, dest):
+    """Render one PDF page to a JPEG (used for flyer/insert pages that are
+    designed as posters — their text never reconstructs into clean prose)."""
+    out_dir = os.path.dirname(dest) or '.'
+    prefix = os.path.join(out_dir, f'.flyer-tmp-{page_num}')
+    _run(['pdftoppm', '-jpeg', '-r', '110', '-f', str(page_num), '-l', str(page_num),
+          pdf_path, prefix])
+    produced = next((f for f in os.listdir(out_dir)
+                     if f.startswith(f'.flyer-tmp-{page_num}-') and f.endswith('.jpg')), None)
+    if not produced:
+        raise RuntimeError(f'pdftoppm produced no image for page {page_num}')
+    os.replace(os.path.join(out_dir, produced), dest)
+
+
 def _has_tesseract():
     return shutil.which('tesseract') is not None
 
