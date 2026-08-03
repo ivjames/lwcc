@@ -26,6 +26,15 @@ _m = DATE_RE.match('April 20, 2025 – EASTER SUNDAY')
 assert _m and _m.group(4) == 'EASTER SUNDAY'
 assert not DATE_RE.match('Sunday Service: 9:30 AM')
 
+# 2022-23 backlog header: season first, date after the dash
+from wgconvert.parse import SEASON_DATE_RE  # noqa: E402
+_m = SEASON_DATE_RE.match('Second Sunday of Easter — April 16, 2023')
+assert _m and _m.group('season') == 'Second Sunday of Easter'
+assert _m.group('month') == 'April' and _m.group('day') == '16' and _m.group('year') == '2023'
+assert SEASON_DATE_RE.match('Palm Sunday - April 2, 2023')
+assert not SEASON_DATE_RE.match('Sunday Service: 9:30 AM')
+assert not SEASON_DATE_RE.match('April 20, 2025 – EASTER SUNDAY')
+
 # poster residue on mixed pages: the lowercase/date fragments between the
 # all-caps display blocks ("LEISURE WORLD ... presents ... SUNDAY 3:00 PM")
 from wgconvert.parse import poster_residue  # noqa: E402

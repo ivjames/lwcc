@@ -24,6 +24,11 @@ MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
 DATE_RE = re.compile(
     r'^(' + '|'.join(MONTHS) + r')\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?,\s+(\d{4})'
     r'(?:\s*[–—-]\s*(.+))?$')
+# The 2022-23 backlog flips the header: season first, date after the dash
+# ("Second Sunday of Easter — April 16, 2023").
+SEASON_DATE_RE = re.compile(
+    r'^(?P<season>[^.!?:]{3,60}?)\s*[–—-]\s*(?P<month>' + '|'.join(MONTHS) + r')'
+    r'\s+(?:the\s+)?(?P<day>\d{1,2})(?:st|nd|rd|th)?,\s+(?P<year>\d{4})$')
 SMALL_WORDS = {'of', 'the', 'to', 'for', 'and', 'a', 'an', 'in', 'on', 'with', 'at', 'by', 'or', 'nor', 'but'}
 
 # Order-of-worship label kinds. `music` items carry a title whose engraved
@@ -574,6 +579,16 @@ def parse(extracted, opts=None):
     while i < len(all_lines):
         l = all_lines[i]
         dm = DATE_RE.match(l.text)
+        sm = None if dm else SEASON_DATE_RE.match(l.text)
+        if sm:
+            # season leads the date line in the 2022-23 backlog format
+            season = sm.group('season')
+            guide['season'] = title_case(season) if season == season.upper() else season
+            guide['date'] = l.text[sm.start('month'):]
+            month = str(MONTHS.index(sm.group('month')) + 1).zfill(2)
+            guide['dateISO'] = f"{sm.group('year')}-{month}-{sm.group('day').zfill(2)}"
+            i += 1
+            break
         if dm:
             tail = dm.group(4)
             if tail:
