@@ -108,8 +108,9 @@ try:
                      'Blessing of Bread & Wine', 'The Sharing of the Bread',
                      'The Sharing of the Cup', 'Unison Prayer'):
         assert expected in labels2, f'communion label {expected!r} parsed'
-    untitled = [o for o in g2['order'] if o['kind'] == 'item' and o['label'] is None]
-    assert len(untitled) == 1 and untitled[0]['body'], 'post-stage liturgy kept, not dropped'
+    gt = [o for o in g2['order'] if o.get('label') == 'The Great Thanksgiving']
+    assert len(gt) == 1 and gt[0]['body'], 'eucharistic prayer labeled, not flagged'
+    assert not any(o['kind'] == 'item' and o['label'] is None for o in g2['order'])
     assert [m['name'] for m in g2['musicTeam']] == [
         'Dave Albulario', 'Jennifer Rudy', 'John Fluker', 'Hannah Yi', 'Jim Orr']
     assert 'musicCredits' not in g2, 'credits are discarded, not stored'
@@ -122,7 +123,7 @@ try:
     assert g2['journal'] and 'God of all creation' in g2['journal']['morning'], \
         'text-layer Prayer Journal parsed without OCR'
     assert not g2['specialEvents'], 'journal midday note not misread as an event'
-    assert len(g2['warnings']) == 1 and 'untitled item' in g2['warnings'][0], g2['warnings']
+    assert g2['warnings'] == [], g2['warnings']
 
     print('all tests passed')
 finally:

@@ -650,6 +650,15 @@ def parse(extracted, opts=None):
             prev = next((o for o in reversed(guide['order']) if o['kind'] == 'item'), None)
             if prev is not None and not prev['body'] and prev['type'] != 'music':
                 current = {'item': prev, 'kind': prev['type'], 'lines': []}
+            elif (prev is not None and re.search(r'COMMUNION|EUCHARIST', prev['label'] or '', re.I)) \
+                    or re.match(r'^It is right, and a good and joyful thing', l.text):
+                # The eucharistic prayer continuing after the Communion
+                # versicles — a known fixture, labeled rather than flagged.
+                item = {'kind': 'item', 'type': 'litany', 'label': 'The Great Thanksgiving',
+                        'title': None, 'titleQuoted': False, 'who': None, 'note': None,
+                        'body': []}
+                guide['order'].append(item)
+                current = {'item': item, 'kind': 'litany', 'lines': []}
             else:
                 item = {'kind': 'item', 'type': 'plain', 'label': None, 'title': None,
                         'titleQuoted': False, 'who': None, 'note': None, 'body': []}
