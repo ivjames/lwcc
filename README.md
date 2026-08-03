@@ -13,6 +13,11 @@ becomes the front page.
   panel, guide editor). Every admin page is behind a sign-in: enter the upload
   token once at `/admin/login` and a long-lived HttpOnly cookie (~6 months)
   keeps that browser signed in; `/admin/logout` ends it.
+- `GET /admin/history` — the per-file upload results (filename, status,
+  warnings, errors), browsable long after the upload page is closed:
+  every conversion ever run, newest first, filterable by outcome
+  (`?status=ok|warned|failed`). Backed by `uploads.log`; the last few also
+  appear on `/admin` as a Recent-uploads card.
 - `POST /api/upload` — raw PDF body, authenticated by the admin cookie or an
   `X-Upload-Token` header (for curl); converts via `wgconvert` and publishes
   to `public/<date>/`. Parser warnings come back in the response so odd

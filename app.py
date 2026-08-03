@@ -600,6 +600,7 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   </thead><tbody></tbody></table>
   <div id="summary"></div>
 </div>
+__HISTORY__
 __REVIEW__
 <p><a href="/">Current guide</a> · <a href="/archive">Archive</a> ·
    <a href="/admin/logout">Sign out</a></p>
@@ -690,7 +691,8 @@ $('go').addEventListener('click', async () => {
     try {
       const res = await fetch('/api/upload', {
         method: 'POST',
-        headers: {'Content-Type': 'application/pdf'},
+        headers: {'Content-Type': 'application/pdf',
+                  'X-Filename': encodeURIComponent(q.file.name)},
         body: q.file,
       });
       if (res.status === 401) throw new Error('signed out — reload this page to sign in again');
@@ -764,6 +766,147 @@ def manage_html():
                '<ul style="list-style:none;padding-left:0">'
                + ''.join(rows) + '</ul></div>')
     return '\n'.join(out)
+
+
+def esc(s):
+    return (str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
+
+
+def upload_status(e):
+    """Outcome bucket for an uploads.log entry: ok | warned | failed."""
+    if not e.get('ok'):
+        return 'failed'
+    return 'warned' if e.get('warnings') else 'ok'
+
+
+def upload_history(limit=None, status=None):
+    """Upload entries from uploads.log (admin actions and logins excluded),
+    newest first — the durable record behind the admin results table."""
+    entries = []
+    try:
+        with open(os.path.join(ROOT, 'uploads.log'), encoding='utf-8') as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if 'action' not in e:
+                    entries.append(e)
+    except OSError:
+        return []
+    entries.reverse()
+    if status:
+        entries = [e for e in entries if upload_status(e) == status]
+    return entries[:limit] if limit else entries
+
+
+def history_rows(entries):
+    rows = []
+    for e in entries:
+        when = esc((e.get('at') or '').replace('T', '&nbsp;'))
+        d = e.get('dateISO')
+        sunday = f'<a href="/{esc(d)}/">{esc(d)}</a>' if d else '—'
+        st = upload_status(e)
+        if st == 'failed':
+            status_html = '<span class="err">✖ failed</span>'
+            detail = f'<span class="err">{esc(e.get("error") or "")}</span>'
+        elif st == 'warned':
+            n = len(e['warnings'])
+            status_html = (f'<span class="warn">⚠ published, {n} '
+                           f'warning{"s" if n > 1 else ""}</span>')
+            detail = ('<ul class="warns">'
+                      + ''.join(f'<li>{esc(w)}</li>' for w in e['warnings'])
+                      + '</ul>')
+        else:
+            status_html = '<span class="ok">✔ published</span>'
+            detail = ''
+        if e.get('replaced'):
+            status_html += ' <span class="warn">(replaced existing)</span>'
+        rows.append(f'<tr><td class="st">{when}</td><td>{esc(e.get("file") or "—")}</td>'
+                    f'<td class="st">{sunday}</td><td class="st">{status_html}</td>'
+                    f'<td>{detail}</td></tr>')
+    return '\n'.join(rows)
+
+
+HISTORY_TABLE_HEAD = ('<table><thead><tr><th>When</th><th>File</th>'
+                      '<th>Sunday</th><th>Status</th><th>Details</th></tr>'
+                      '</thead><tbody>')
+
+
+def recent_uploads_html():
+    """Compact last-few-uploads card for /admin — the batch results table
+    above is per-visit, this one survives leaving the page."""
+    entries = upload_history(limit=8)
+    if not entries:
+        return ''
+    return ('<div class="card"><p><b>Recent uploads</b> — results are kept, '
+            'so closing this page loses nothing. '
+            '<a href="/admin/history">Browse the full upload history</a>.</p>'
+            + HISTORY_TABLE_HEAD + history_rows(entries) + '</tbody></table></div>')
+
+
+def history_page(query):
+    """/admin/history — every upload ever recorded, newest first, filterable
+    by outcome. Reads uploads.log so it includes failures that published
+    nothing."""
+    params = urllib.parse.parse_qs(query or '')
+    status = (params.get('status') or [''])[0]
+    if status not in ('ok', 'warned', 'failed'):
+        status = ''
+    try:
+        limit = max(1, min(int((params.get('limit') or ['200'])[0]), 5000))
+    except ValueError:
+        limit = 200
+    everything = upload_history()
+    counts = {'ok': 0, 'warned': 0, 'failed': 0}
+    for e in everything:
+        counts[upload_status(e)] += 1
+    matched = [e for e in everything if not status or upload_status(e) == status]
+    entries = matched[:limit]
+
+    def flink(label, st):
+        href = '/admin/history' + (f'?status={st}' if st else '')
+        cur = ' style="font-weight:700"' if st == status else ''
+        return f'<a href="{href}"{cur}>{label}</a>'
+
+    filters = ' · '.join([
+        flink(f'All ({len(everything)})', ''),
+        flink(f'Clean ({counts["ok"]})', 'ok'),
+        flink(f'With warnings ({counts["warned"]})', 'warned'),
+        flink(f'Failed ({counts["failed"]})', 'failed')])
+    truncated = ''
+    if len(matched) > limit:
+        truncated = (f'<p><small style="color:#54574a">Showing the newest '
+                     f'{limit} of {len(matched)} — '
+                     f'<a href="/admin/history?status={status}&amp;limit={len(matched)}">'
+                     f'show all</a>.</small></p>')
+    rows = history_rows(entries) or ('<tr><td colspan="5">No uploads '
+                                     + ('with this outcome ' if status else '')
+                                     + 'recorded yet.</td></tr>')
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Upload History</title><style>{PAGE_STYLE}
+  table{{width:100%;border-collapse:collapse;font-size:.95em}}
+  td,th{{padding:6px 8px;border-bottom:1px solid #d8d6c7;text-align:left;vertical-align:top}}
+  .st{{white-space:nowrap}}
+  ul.warns{{margin:4px 0 0;padding-left:18px;color:#8a6410}}
+</style></head>
+<body>
+<h1>Upload History</h1>
+<div class="card">
+  <p>Every conversion this app has run — the per-file results from batch
+  uploads, kept for review long after the upload page is closed. Failures that
+  published nothing are here too.</p>
+  <p>{filters}</p>
+  {HISTORY_TABLE_HEAD}
+{rows}
+</tbody></table>
+{truncated}
+</div>
+<p><a href="/admin">Back to admin</a> · <a href="/archive">Archive</a></p>
+</body></html>
+"""
 
 
 EDIT_PAGE = (r"""<!DOCTYPE html>
@@ -1085,8 +1228,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         if path == '/admin':
             if self.require_admin():
-                self.send_page(ADMIN_PAGE.replace('__REVIEW__', manage_html()),
+                self.send_page(ADMIN_PAGE
+                               .replace('__HISTORY__', recent_uploads_html())
+                               .replace('__REVIEW__', manage_html()),
                                cache='no-store')
+            return
+        if path == '/admin/history':
+            if self.require_admin():
+                self.send_page(history_page(query), cache='no-store')
             return
         if path == '/admin/logout':
             self.redirect_303('/', cookie=self.session_cookie('', 0))
@@ -1156,12 +1305,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not body.startswith(b'%PDF-'):
             self.send_json({'ok': False, 'error': 'not a PDF'}, status=400)
             return
+        fname = self.upload_filename()
         tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
         try:
             tmp.write(body)
             tmp.close()
             guide, replaced = convert_pdf(tmp.name)
-            audit_log({'ok': True, 'dateISO': guide['dateISO'],
+            audit_log({'ok': True, **({'file': fname} if fname else {}),
+                       'dateISO': guide['dateISO'],
                        'replaced': replaced, 'warnings': guide['warnings']})
             self.send_json({
                 'ok': True,
@@ -1173,10 +1324,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             })
         except Exception as e:                        # surface, don't 500-blank
             traceback.print_exc()
-            audit_log({'ok': False, 'error': str(e)})
+            audit_log({'ok': False, **({'file': fname} if fname else {}),
+                       'error': str(e)})
             self.send_json({'ok': False, 'error': str(e)}, status=422)
         finally:
             os.unlink(tmp.name)
+
+    def upload_filename(self):
+        """Original filename when the uploader sends X-Filename (the admin
+        page does): percent-decoded, basename only, length-capped. None from
+        plain curl uploads."""
+        raw = (self.headers.get('X-Filename') or '').strip()
+        if not raw:
+            return None
+        name = os.path.basename(urllib.parse.unquote(raw).strip())
+        return name[:120] or None
 
     def handle_action(self, action, body):
         try:

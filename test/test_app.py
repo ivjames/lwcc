@@ -169,6 +169,33 @@ try:
     status, body = req('/admin', headers=COOKIE)
     assert b'Needs review' not in body
 
+    # Upload history: per-file batch results survive leaving the page —
+    # browsable at /admin/history (gated), filterable by outcome, with the
+    # original filename when the uploader sends X-Filename (the admin JS does,
+    # percent-encoded).
+    status, body = req('/api/upload', data=pdf,
+                       headers={**COOKIE, 'Content-Type': 'application/pdf',
+                                'X-Filename': 'WG%202026%2008%2002.pdf'})
+    assert status == 200 and json.loads(body)['ok'], (status, body)
+    status, body = req('/admin/history')
+    assert status == 401 and b'Admin Sign-in' in body, 'history gated like admin'
+    status, body = req('/admin/history', headers=COOKIE)
+    assert status == 200 and b'Upload History' in body
+    assert 'no-store' in (LAST['headers'].get('Cache-Control') or '')
+    assert b'WG 2026 08 02.pdf' in body, 'filename recorded from X-Filename'
+    assert b'/2026-08-02/' in body and '✔ published'.encode() in body
+    assert '✖ failed'.encode() in body, 'failed conversions are in the history too'
+    page = body.decode()
+    assert page.index('WG 2026 08 02.pdf') < page.index('✖ failed'), 'newest first'
+    status, body = req('/admin/history?status=failed', headers=COOKIE)
+    assert status == 200 and '✖ failed'.encode() in body
+    assert b'WG 2026 08 02.pdf' not in body, 'outcome filter hides published uploads'
+    status, body = req('/admin/history?status=ok&limit=1', headers=COOKIE)
+    assert status == 200 and b'show all' in body, 'limit paginates with a show-all link'
+    status, body = req('/admin', headers=COOKIE)
+    assert b'Recent uploads' in body and b'/admin/history' in body, \
+        'admin page shows the recent-history card'
+
     gj = os.path.join(scratch, 'public', '2026-08-09', 'guide.json')
     g = json.load(open(gj))
     g['warnings'] = ['page 7: content without a label kept as an untitled item']
