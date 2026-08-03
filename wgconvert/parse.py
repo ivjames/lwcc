@@ -301,6 +301,23 @@ CALENDAR_BLOCK_RE = re.compile(r'^(' + '|'.join(MONTHS) + r')\s+\d{1,2}:\s')
 # ("PEACE LOVE", "JOY KINDNESS") — no lowercase, no digits, no colon.
 DISPLAY_CAPS_RE = re.compile(r"^[A-Z][A-Z\s&'!,-]{2,40}$")
 
+
+def poster_residue(line_texts):
+    """Small display fragments interleaved with poster art on a mixed page —
+    the connective and date/time lines an all-caps rule can't catch
+    ("presents", "SUNDAY / APRIL 27 AT 3:00 PM"): a handful of short lines
+    with no sentence prose. Only consulted after the page has already shed an
+    all-caps poster block, so ordinary announcements never reach it."""
+    texts = [t.strip() for t in line_texts if t.strip()]
+    if not texts or len(texts) > 3:
+        return False
+    for t in texts:
+        if len(t) > 40 or len(t.split()) > 6:
+            return False
+        if re.search(r'[.!?;]|:(?!\d)', t):
+            return False          # sentence punctuation — real prose
+    return True
+
 COMMUNITY_HEAD_RE = re.compile(r'^(PRAYER REQUESTS|NOTES AND ANNOUNCEMENTS|Music Team\b)')
 
 
@@ -692,6 +709,7 @@ def parse(extracted, opts=None):
             boxable.append((page_num, page_lines))
         for page_num, page_lines in boxable:
             classified = False
+            poster_seen = False
             pending = []
             for box in split_boxes(page_lines):
                 first = box[0]
@@ -711,7 +729,7 @@ def parse(extracted, opts=None):
                     guide['specialEvents'].append(parse_special_event(box))
                     classified = True
                 elif all(DISPLAY_CAPS_RE.fullmatch(l.text) for l in box):
-                    pass      # poster display-text fragments — not content
+                    poster_seen = True   # poster display text — not content
                 elif CALENDAR_BLOCK_RE.match(first.text):
                     guide['announcements'].append({
                         'heading': 'This Week', 'kind': 'note',
@@ -725,6 +743,8 @@ def parse(extracted, opts=None):
                 guide['flyers'].append({'page': page_num, 'image': None})
             else:
                 for box in pending:
+                    if poster_seen and poster_residue(l.text for l in box):
+                        continue    # residue between poster display blocks
                     first = box[0]
                     warnings.append(
                         f'page {first.page}: unclassified block starting '

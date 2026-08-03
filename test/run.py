@@ -26,6 +26,18 @@ _m = DATE_RE.match('April 20, 2025 – EASTER SUNDAY')
 assert _m and _m.group(4) == 'EASTER SUNDAY'
 assert not DATE_RE.match('Sunday Service: 9:30 AM')
 
+# poster residue on mixed pages: the lowercase/date fragments between the
+# all-caps display blocks ("LEISURE WORLD ... presents ... SUNDAY 3:00 PM")
+from wgconvert.parse import poster_residue  # noqa: E402
+assert poster_residue(['presents'])
+assert poster_residue(['SUNDAY', 'APRIL 27 AT 3:00 PM'])
+assert poster_residue(['Ken Aiso Valeria Morgovskaya'])
+assert not poster_residue(['Bring a friend to the concert next Sunday.'])
+assert not poster_residue(['Special music: John Fluker'])
+assert not poster_residue(['If you wish to attend, but are unable to pay '
+                           'for a ticket, contact the church office.'])
+assert not poster_residue(['presents'] * 4)
+
 work_dir = tempfile.mkdtemp(prefix='wg-test-')
 try:
     extracted = extract(SAMPLE, work_dir)
