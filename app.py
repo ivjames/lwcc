@@ -302,6 +302,16 @@ def convert_worker():
                 pass
 
 
+def queue_snapshot():
+    """Live queue state for the admin page and /api/status: how many jobs
+    wait, and which file is converting right now."""
+    with JOBS_LOCK:
+        waiting = sum(1 for j in JOBS.values() if j.get('status') == 'queued')
+        conv = next(({k: v for k, v in j.items() if k != 'path'}
+                     for j in JOBS.values() if j.get('status') == 'converting'), None)
+    return {'waiting': waiting, 'converting': conv}
+
+
 def rescan_spool():
     """Re-enqueue spool files found at startup (uploads that a restart
     interrupted). Ids come from the filenames, so a still-open admin page
@@ -735,11 +745,18 @@ function renderQueue() {
   $('go').disabled = running || !queue.some(q => q.status === 'queued');
   $('clear').disabled = running || !queue.length;
   const done = queue.filter(q => ['ok', 'warned', 'failed'].includes(q.status));
-  if (done.length && !running) {
-    const ok = done.filter(q => q.status === 'ok').length;
-    const warned = done.filter(q => q.status === 'warned').length;
-    const failed = done.filter(q => q.status === 'failed').length;
-    $('summary').textContent = ok + ' clean, ' + warned + ' with warnings, ' + failed + ' failed.';
+  const ok = done.filter(q => q.status === 'ok').length;
+  const warned = done.filter(q => q.status === 'warned').length;
+  const failed = done.filter(q => q.status === 'failed').length;
+  const tally = ok + ' clean, ' + warned + ' with warnings, ' + failed + ' failed';
+  if (running && queue.length) {
+    const up = queue.filter(q => q.status === 'uploading').length;
+    const waiting = queue.filter(q => q.status === 'waiting').length;
+    const conv = queue.filter(q => q.status === 'converting').length;
+    $('summary').textContent = done.length + ' of ' + queue.length + ' done (' + tally + ') — '
+      + (up ? 'uploading… ' : '') + waiting + ' in queue, ' + conv + ' converting.';
+  } else if (done.length) {
+    $('summary').textContent = tally + '.';
   } else {
     $('summary').textContent = '';
   }
@@ -964,14 +981,26 @@ HISTORY_TABLE_HEAD = ('<table><thead><tr><th>When</th><th>File</th>'
 
 def recent_uploads_html():
     """Compact last-few-uploads card for /admin — the batch results table
-    above is per-visit, this one survives leaving the page."""
+    above is per-visit, this one survives leaving the page. When the server
+    queue is still working, say so up top (this page reloads fresh)."""
     entries = upload_history(limit=8)
-    if not entries:
+    snap = queue_snapshot()
+    active = ''
+    if snap['waiting'] or snap['converting']:
+        conv = snap['converting']
+        now = f", converting <b>{esc(conv.get('file') or '…')}</b>" if conv else ''
+        active = (f'<p class="warn"><b>Server queue active:</b> '
+                  f'{snap["waiting"]} file{"s" if snap["waiting"] != 1 else ""} '
+                  f'waiting{now} — refresh this page to update; finished results '
+                  f'appear below and in the history.</p>')
+    if not entries and not active:
         return ''
-    return ('<div class="card"><p><b>Recent uploads</b> — results are kept, '
+    table = (HISTORY_TABLE_HEAD + history_rows(entries) + '</tbody></table>') if entries else ''
+    return ('<div class="card">' + active +
+            '<p><b>Recent uploads</b> — results are kept, '
             'so closing this page loses nothing. '
             '<a href="/admin/history">Browse the full upload history</a>.</p>'
-            + HISTORY_TABLE_HEAD + history_rows(entries) + '</tbody></table></div>')
+            + table + '</div>')
 
 
 def history_page(query):
@@ -1359,7 +1388,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with JOBS_LOCK:
                 jobs = {i: {k: v for k, v in JOBS.get(i, {'status': 'unknown'}).items()
                             if k != 'path'} for i in ids}
-            self.send_json({'ok': True, 'jobs': jobs})
+            self.send_json({'ok': True, 'jobs': jobs, 'queue': queue_snapshot()})
             return
         if path == '/archive':
             self.send_page(archive_page())

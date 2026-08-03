@@ -156,6 +156,9 @@ try:
     assert js and js['status'] == 'ok' and js['dateISO'] == '2026-08-02', js
     assert js['replaced'] is True and js['warnings'] == [], js
     assert not os.listdir(os.path.join(scratch, 'queue')), 'spool emptied after success'
+    snap = json.loads(body)['queue']
+    assert snap['waiting'] == 0 and snap['converting'] is None, \
+        'status responses carry a live queue snapshot'
 
     out_dir = os.path.join(scratch, 'public', '2026-08-02')
     for f in ('index.html', 'guide.json', 'cover.jpg'):
