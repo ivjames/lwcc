@@ -25,6 +25,12 @@ becomes the front page.
   configured.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
+Every published Sunday keeps its uploaded PDF as `public/<date>/source.pdf`,
+so after a parser upgrade the admin panel's **Re-convert** action re-runs the
+converter server-side — no re-upload needed. Sundays uploaded before
+retention existed have no stored source; re-upload those once. Re-convert
+discards hand-edits to that Sunday (it re-parses the PDF from scratch).
+
 Batch the backlog from a terminal:
 
 ```

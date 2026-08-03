@@ -218,6 +218,11 @@ def convert_pdf(pdf_path):
         with open(os.path.join(out_dir, 'guide.json'), 'w', encoding='utf-8') as fh:
             json.dump(guide, fh, indent=2, ensure_ascii=False)
             fh.write('\n')
+        # Retain the uploaded PDF so parser upgrades can re-convert
+        # server-side (the Re-convert admin action) without a re-upload.
+        source_dest = os.path.join(out_dir, 'source.pdf')
+        if os.path.abspath(pdf_path) != os.path.abspath(source_dest):
+            shutil.copyfile(pdf_path, source_dest)
         html = render(guide, church,
                       banner_path=os.path.join(ROOT, 'assets', 'banner.png'),
                       cover_path=cover_dest, flyer_dir=out_dir)
@@ -670,6 +675,7 @@ $('clear').addEventListener('click', () => { queue = []; renderQueue(); });
 
 async function adminAction(action, date) {
   if (action === 'unpublish' && !confirm('Unpublish ' + date + '? The folder is set aside, not deleted.')) return;
+  if (action === 'reconvert' && !confirm('Re-convert ' + date + ' from its stored PDF? Hand-edits to this Sunday will be overwritten.')) return;
   const res = await fetch('/api/' + action, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -753,15 +759,22 @@ def manage_html():
     for d in dates:
         m = metas.get(d)
         title = f' — {m["title"]}' if m and m['title'] else ''
+        reconvert = ''
+        if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf')):
+            reconvert = (f'<button class="mini" onclick="adminAction(\'reconvert\', '
+                         f'\'{d}\')">Re-convert</button>')
         rows.append(
             f'<li style="margin:7px 0"><a href="/{d}/">{d}</a>{title} '
             f'<a class="minilink" href="/admin/edit/{d}">Edit</a>'
             f'<button class="mini" onclick="adminAction(\'rerender\', \'{d}\')">'
             f'Re-render</button>'
+            f'{reconvert}'
             f'<button class="mini" onclick="adminAction(\'unpublish\', \'{d}\')">'
             f'Unpublish</button></li>')
     out.append('<div class="card"><p><b>Published Sundays</b> — re-render '
                'rebuilds the page from its guide.json (after hand-edits); '
+               're-convert re-runs the converter on the stored source PDF '
+               '(picks up parser upgrades, discards hand-edits); '
                'unpublish sets the folder aside without deleting it.</p>'
                '<ul style="list-style:none;padding-left:0">'
                + ''.join(rows) + '</ul></div>')
@@ -1286,7 +1299,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == '/admin/login':
             self.handle_login(body)
             return
-        if path not in ('/api/upload', '/api/review', '/api/rerender', '/api/unpublish', '/api/save'):
+        if path not in ('/api/upload', '/api/review', '/api/rerender',
+                        '/api/reconvert', '/api/unpublish', '/api/save'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
             return
         expected = ENV.get('UPLOAD_TOKEN', '')
@@ -1353,6 +1367,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                            status=404)
             return
         try:
+            if action == 'reconvert':
+                src = os.path.join(PUBLIC, date, 'source.pdf')
+                if not os.path.exists(src):
+                    self.send_json({'ok': False, 'error':
+                                    'no stored source PDF for this Sunday — it was '
+                                    'uploaded before retention; re-upload it once'},
+                                   status=404)
+                    return
+                guide, replaced = convert_pdf(src)
+                # No 'action' key: reconversions are conversions, so they
+                # belong in the /admin/history record.
+                audit_log({'ok': True, 'file': f'{date}/source.pdf',
+                           'reconvert': True, 'dateISO': guide['dateISO'],
+                           'replaced': replaced, 'warnings': guide['warnings']})
+                self.send_json({'ok': True, 'date': guide['dateISO'],
+                                'warnings': guide['warnings']})
+                return
             if action == 'review':
                 mark_reviewed(date)
             elif action == 'rerender':

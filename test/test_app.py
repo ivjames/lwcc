@@ -137,6 +137,12 @@ try:
     for f in ('index.html', 'guide.json', 'cover.jpg'):
         assert os.path.exists(os.path.join(out_dir, f)), f
 
+    # The uploaded PDF is retained next to its output, and served.
+    src = os.path.join(out_dir, 'source.pdf')
+    assert os.path.exists(src) and open(src, 'rb').read() == pdf, 'source retained'
+    status, body = req('/2026-08-02/source.pdf')
+    assert status == 200 and body.startswith(b'%PDF-')
+
     # The newest Sunday is now the front page, and stays reachable by date.
     status, body = req('/')
     assert status == 200 and b'Love Unleashed' in body
@@ -221,6 +227,25 @@ try:
     assert b'Needs review' not in body
     status, body = req('/archive')
     assert b'needs review' not in body
+
+    # Re-convert rebuilds a Sunday from its stored source.pdf — server-side
+    # parser passes without a re-upload — and lands in the history record.
+    status, body = req('/admin', headers=COOKIE)
+    assert b'Re-convert' in body, 'admin lists the re-convert action'
+    with open(os.path.join(out_dir, 'index.html'), 'w') as fh:
+        fh.write('stale')
+    status, body = action('reconvert', '2026-08-02')
+    assert status == 200 and json.loads(body)['ok'], body
+    assert b'Love Unleashed' in open(os.path.join(out_dir, 'index.html'), 'rb').read(), \
+        're-convert regenerated the page from the stored PDF'
+    entries = [json.loads(l) for l in open(log_path)]
+    assert any(e.get('reconvert') and e.get('ok') for e in entries), \
+        're-conversion audited as a conversion'
+    status, body = req('/admin/history', headers=COOKIE)
+    assert b'source.pdf' in body, 're-conversions appear in upload history'
+    os.remove(os.path.join(scratch, 'public', '2026-08-09', 'source.pdf'))
+    status, body = action('reconvert', '2026-08-09')
+    assert status == 404, 'no stored source -> not found, with guidance'
 
     # Form editor: gated like the rest of admin; page loads with embedded
     # data; save sanitizes server-side, preserves protected fields, re-renders.
