@@ -19,10 +19,14 @@ becomes the front page.
   (`?status=ok|warned|failed`). Backed by `uploads.log`; the last few also
   appear on `/admin` as a Recent-uploads card.
 - `POST /api/upload` — raw PDF body, authenticated by the admin cookie or an
-  `X-Upload-Token` header (for curl); converts via `wgconvert` and publishes
-  to `public/<date>/`. Parser warnings come back in the response so odd
-  content is reviewed, not silently dropped. Fails closed when no token is
-  configured.
+  `X-Upload-Token` header (for curl). The bytes are spooled and accepted
+  immediately; a server-side queue converts one file at a time and publishes
+  to `public/<date>/`, so batch uploads are bounded by bandwidth, not OCR —
+  the admin page polls `GET /api/status?ids=…` for per-file progress, and
+  every outcome (with parser warnings) lands in `/admin/history`. Add
+  `?sync=1` to convert before the reply and get the result inline (the old
+  behavior). Failed conversions keep their PDF in `queue/failed/` for a retry
+  after a parser fix. Fails closed when no token is configured.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
 Every published Sunday keeps its uploaded PDF as `public/<date>/source.pdf`,

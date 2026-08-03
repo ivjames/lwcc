@@ -27,15 +27,19 @@ import http.cookies
 import http.server
 import json
 import os
+import queue
 import re
 import shutil
 import sys
 import tempfile
+import threading
 import traceback
 import urllib.parse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, 'public')
+QUEUE_DIR = os.path.join(ROOT, 'queue')          # spooled uploads awaiting conversion
+FAILED_DIR = os.path.join(QUEUE_DIR, 'failed')   # spooled uploads whose conversion failed
 DATE_DIR_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 MAX_UPLOAD = 40 * 1024 * 1024
 COOKIE_NAME = 'wg_token'
@@ -236,6 +240,81 @@ def convert_pdf(pdf_path):
 def load_church():
     with open(os.path.join(ROOT, 'config', 'church.json'), encoding='utf-8') as fh:
         return json.load(fh)
+
+
+# --- conversion queue -------------------------------------------------------
+# Uploads are spooled to QUEUE_DIR and converted one at a time by a worker
+# thread, so a batch upload is bounded by bandwidth, not OCR. Job state lives
+# in memory for the admin page's polling; the durable record is uploads.log.
+# Spool files survive a restart and are re-enqueued (same ids) on startup.
+
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+CONVERT_Q = queue.Queue()
+
+
+def job_update(jid, **kw):
+    with JOBS_LOCK:
+        JOBS.setdefault(jid, {}).update(kw)
+
+
+def spool_upload(body, fname):
+    os.makedirs(QUEUE_DIR, exist_ok=True)
+    jid = (datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+           + '-' + os.urandom(4).hex())
+    safe = re.sub(r'[^A-Za-z0-9._-]+', '_', fname or 'upload.pdf')[:80]
+    path = os.path.join(QUEUE_DIR, f'{jid}__{safe}')
+    with open(path, 'wb') as fh:
+        fh.write(body)
+    job_update(jid, status='queued', file=fname or None, path=path)
+    CONVERT_Q.put(jid)
+    return jid
+
+
+def convert_worker():
+    while True:
+        jid = CONVERT_Q.get()
+        with JOBS_LOCK:
+            job = dict(JOBS.get(jid) or {})
+        if not job.get('path'):
+            continue
+        path, fname = job['path'], job.get('file')
+        job_update(jid, status='converting')
+        try:
+            guide, replaced = convert_pdf(path)
+            audit_log({'ok': True, **({'file': fname} if fname else {}),
+                       'dateISO': guide['dateISO'],
+                       'replaced': replaced, 'warnings': guide['warnings']})
+            job_update(jid, status='warned' if guide['warnings'] else 'ok',
+                       date=guide['date'], dateISO=guide['dateISO'],
+                       url=f"/{guide['dateISO']}/", replaced=replaced,
+                       warnings=guide['warnings'])
+            os.unlink(path)
+        except Exception as e:
+            traceback.print_exc()
+            audit_log({'ok': False, **({'file': fname} if fname else {}),
+                       'error': str(e)})
+            job_update(jid, status='failed', error=str(e))
+            try:        # keep the PDF for a retry after the parser learns it
+                os.makedirs(FAILED_DIR, exist_ok=True)
+                shutil.move(path, os.path.join(FAILED_DIR, os.path.basename(path)))
+            except OSError:
+                pass
+
+
+def rescan_spool():
+    """Re-enqueue spool files found at startup (uploads that a restart
+    interrupted). Ids come from the filenames, so a still-open admin page
+    keeps polling the same jobs seamlessly."""
+    if not os.path.isdir(QUEUE_DIR):
+        return
+    for name in sorted(os.listdir(QUEUE_DIR)):
+        path = os.path.join(QUEUE_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        jid, _, safe = name.partition('__')
+        job_update(jid or name, status='queued', file=safe or None, path=path)
+        CONVERT_Q.put(jid or name)
 
 
 def write_guide_json(path, g):
@@ -593,8 +672,10 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
 <body>
 <h1>Publish Worship Guides</h1>
 <div class="card">
-  <p>Add one PDF or a whole backlog. Files are converted and published one at
-  a time — the newest Sunday always ends up as the front page, and every
+  <p>Add one PDF or a whole backlog. Files upload first (quick), then convert
+  and publish from a server-side queue — once the last upload finishes you can
+  close this page and the queue keeps working; results are kept in the upload
+  history. The newest Sunday always ends up as the front page, and every
   Sunday gets its permanent <code>/YYYY-MM-DD/</code> URL.</p>
   <div id="drop">Drag PDFs here, or
     <input type="file" id="pdf" accept="application/pdf,.pdf" multiple></div>
@@ -627,7 +708,8 @@ function addFiles(list) {
 }
 
 function statusCell(q) {
-  return {queued: '·', converting: '⏳ converting', ok: '<span class="ok">✔ published</span>',
+  return {queued: '·', uploading: '⏫ uploading', waiting: '🕓 in queue',
+          converting: '⏳ converting', ok: '<span class="ok">✔ published</span>',
           warned: '<span class="warn">⚠ published</span>',
           failed: '<span class="err">✖ failed</span>'}[q.status];
 }
@@ -690,9 +772,10 @@ async function adminAction(action, date) {
 $('go').addEventListener('click', async () => {
   running = true;
   renderQueue();
+  // Phase 1: ship the bytes — fast, sequential, no conversion yet.
   for (const q of queue) {
     if (q.status !== 'queued') continue;
-    q.status = 'converting';
+    q.status = 'uploading';
     renderQueue();
     try {
       const res = await fetch('/api/upload', {
@@ -712,11 +795,44 @@ $('go').addEventListener('click', async () => {
           text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100));
       }
       if (!data.ok) throw new Error(data.error || res.statusText);
-      q.data = data;
-      q.status = data.warnings.length ? 'warned' : 'ok';
+      q.id = data.id;
+      q.status = 'waiting';
     } catch (e) {
       q.status = 'failed';
       q.error = e.message;
+    }
+    renderQueue();
+  }
+  // Phase 2: follow the server-side queue until every job settles. Closing
+  // the page is safe — conversion continues; results land in the history.
+  while (queue.some(q => ['waiting', 'converting'].includes(q.status))) {
+    await new Promise(r => setTimeout(r, 2000));
+    const ids = queue.filter(q => q.id && ['waiting', 'converting'].includes(q.status))
+                     .map(q => q.id);
+    if (!ids.length) break;
+    try {
+      const res = await fetch('/api/status?ids=' + ids.join(','));
+      if (res.status === 401) throw new Error('signed out — reload this page to sign in again');
+      const data = await res.json();
+      if (!data.ok) continue;
+      for (const q of queue) {
+        const j = q.id && data.jobs[q.id];
+        if (!j) continue;
+        if (j.status === 'converting') q.status = 'converting';
+        else if (j.status === 'ok' || j.status === 'warned') { q.data = j; q.status = j.status; }
+        else if (j.status === 'failed') { q.status = 'failed'; q.error = j.error || 'failed'; }
+        else if (j.status === 'unknown') {
+          q.status = 'failed';
+          q.error = 'finished while the app restarted — see the upload history below';
+        }
+      }
+    } catch (e) {
+      if (/signed out/.test(e.message)) {
+        for (const q of queue) {
+          if (['waiting', 'converting'].includes(q.status)) { q.status = 'failed'; q.error = e.message; }
+        }
+      }
+      // other poll errors are transient — keep polling
     }
     renderQueue();
   }
@@ -1157,7 +1273,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def send_json(self, obj, status=200):
-        self.send_page(json.dumps(obj), status=status, ctype='application/json')
+        self.send_page(json.dumps(obj), status=status, ctype='application/json',
+                       cache='no-store')
 
     # -- admin session ------------------------------------------------------
 
@@ -1232,6 +1349,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 ' — apt-get install -y poppler-utils tesseract-ocr\n'
             self.send_page(body, ctype='text/plain')
             return
+        if path == '/api/status':
+            expected = ENV.get('UPLOAD_TOKEN', '')
+            got = self.headers.get('X-Upload-Token') or self.cookie_token()
+            if not expected or not hmac.compare_digest(got, expected):
+                self.send_json({'ok': False, 'error': 'bad upload token'}, status=401)
+                return
+            ids = [i for i in urllib.parse.parse_qs(query).get('ids', [''])[0].split(',') if i]
+            with JOBS_LOCK:
+                jobs = {i: {k: v for k, v in JOBS.get(i, {'status': 'unknown'}).items()
+                            if k != 'path'} for i in ids}
+            self.send_json({'ok': True, 'jobs': jobs})
+            return
         if path == '/archive':
             self.send_page(archive_page())
             return
@@ -1295,7 +1424,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                            status=413)
             return
         body = self.rfile.read(length)
-        path = self.path.split('?', 1)[0]
+        path, _, query = self.path.partition('?')
         if path == '/admin/login':
             self.handle_login(body)
             return
@@ -1320,6 +1449,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({'ok': False, 'error': 'not a PDF'}, status=400)
             return
         fname = self.upload_filename()
+        if urllib.parse.parse_qs(query).get('sync', ['0'])[0] not in ('1', 'true'):
+            # Default: accept the bytes, convert from the queue. ?sync=1 keeps
+            # the old convert-before-replying behavior for scripts that want
+            # the result inline.
+            jid = spool_upload(body, fname)
+            self.send_json({'ok': True, 'queued': True, 'id': jid,
+                            **({'file': fname} if fname else {})})
+            return
         tmp = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
         try:
             tmp.write(body)
@@ -1423,6 +1560,8 @@ def main():
     ap.add_argument('--host', default='127.0.0.1')
     args = ap.parse_args()
     os.makedirs(PUBLIC, exist_ok=True)
+    rescan_spool()
+    threading.Thread(target=convert_worker, daemon=True, name='convert-worker').start()
     server = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     token = 'set' if ENV.get('UPLOAD_TOKEN') else 'NOT SET (uploads disabled)'
     print(f'lwcc serving {PUBLIC} on http://{args.host}:{args.port} — upload token {token}',

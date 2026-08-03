@@ -110,7 +110,7 @@ try:
                        headers={'X-Upload-Token': 'wrong', 'Content-Type': 'application/pdf'})
     assert status == 401, (status, body)
 
-    status, body = req('/api/upload', data=b'%PDF-not really',
+    status, body = req('/api/upload?sync=1', data=b'%PDF-not really',
                        headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/pdf'})
     assert status == 422, (status, body)
 
@@ -118,8 +118,8 @@ try:
                        headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/pdf'})
     assert status == 400, (status, body)
 
-    # The real upload converts and publishes.
-    status, body = req('/api/upload', data=pdf,
+    # The real upload converts and publishes (?sync=1: result inline).
+    status, body = req('/api/upload?sync=1', data=pdf,
                        headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/pdf'})
     assert status == 200, (status, body)
     data = json.loads(body)
@@ -128,10 +128,34 @@ try:
 
     # Re-uploading the same Sunday overwrites in place and says so. The
     # session cookie authenticates API calls just like the header does.
-    status, body = req('/api/upload', data=pdf,
+    status, body = req('/api/upload?sync=1', data=pdf,
                        headers={**COOKIE, 'Content-Type': 'application/pdf'})
     assert status == 200, (status, body)
     assert json.loads(body)['replaced'] is True
+
+    # Default (no ?sync=1): the bytes are accepted immediately, conversion
+    # runs from the server-side queue, progress is pollable, and the result
+    # still reaches uploads.log. The status endpoint is gated like uploads.
+    status, body = req('/api/upload', data=pdf,
+                       headers={**COOKIE, 'Content-Type': 'application/pdf',
+                                'X-Filename': 'WG_async.pdf'})
+    assert status == 200, (status, body)
+    j = json.loads(body)
+    assert j['ok'] and j.get('queued') and j.get('id'), j
+    jid = j['id']
+    status, body = req('/api/status?ids=' + jid)
+    assert status == 401, 'status endpoint gated'
+    js = None
+    for _ in range(240):
+        status, body = req('/api/status?ids=' + jid, headers=COOKIE)
+        assert status == 200, (status, body)
+        js = json.loads(body)['jobs'][jid]
+        if js['status'] in ('ok', 'warned', 'failed'):
+            break
+        time.sleep(0.5)
+    assert js and js['status'] == 'ok' and js['dateISO'] == '2026-08-02', js
+    assert js['replaced'] is True and js['warnings'] == [], js
+    assert not os.listdir(os.path.join(scratch, 'queue')), 'spool emptied after success'
 
     out_dir = os.path.join(scratch, 'public', '2026-08-02')
     for f in ('index.html', 'guide.json', 'cover.jpg'):
@@ -170,6 +194,8 @@ try:
     entries = [json.loads(l) for l in open(log_path)]
     assert any(e.get('ok') and e.get('dateISO') == '2026-08-02' for e in entries)
     assert any(not e.get('ok') for e in entries), 'failed attempts audited too'
+    assert any(e.get('ok') and e.get('file') == 'WG_async.pdf' for e in entries), \
+        'queued conversions audited like sync ones'
     assert any(e.get('action') == 'login' and not e.get('ok') for e in entries), \
         'failed sign-ins audited'
     status, body = req('/admin', headers=COOKIE)
@@ -179,7 +205,7 @@ try:
     # browsable at /admin/history (gated), filterable by outcome, with the
     # original filename when the uploader sends X-Filename (the admin JS does,
     # percent-encoded).
-    status, body = req('/api/upload', data=pdf,
+    status, body = req('/api/upload?sync=1', data=pdf,
                        headers={**COOKIE, 'Content-Type': 'application/pdf',
                                 'X-Filename': 'WG%202026%2008%2002.pdf'})
     assert status == 200 and json.loads(body)['ok'], (status, body)
