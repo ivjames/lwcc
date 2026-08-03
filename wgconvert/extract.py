@@ -215,6 +215,16 @@ def _find_cover_image(pdf_path, out_dir):
     file = next((f for f in os.listdir(out_dir) if f.startswith(f'img-{suffix}.')), None)
     if not file:
         return None
+    if os.path.splitext(file)[1].lower() not in ('.png', '.jpg', '.jpeg', '.webp'):
+        # Scanned guides embed CCITT-fax/JBIG2 streams pdfimages can't hand
+        # us as web images — render the whole page instead; on a scan, page 1
+        # *is* the cover.
+        for f in os.listdir(out_dir):
+            if f.startswith('img-'):
+                os.unlink(os.path.join(out_dir, f))
+        dest = os.path.join(out_dir, 'cover.jpg')
+        render_page_image(pdf_path, 1, dest)
+        return dest
     dest = os.path.join(out_dir, 'cover' + os.path.splitext(file)[1])
     os.rename(os.path.join(out_dir, file), dest)
     # Clean up the other page-1 extractions (banner + mask copies).

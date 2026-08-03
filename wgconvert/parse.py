@@ -21,14 +21,31 @@ MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
 # Accepts the plain form ("August 2, 2026") plus festival variants seen in the
 # backlog: "May the 4th, 2025" and "April 20, 2025 – EASTER SUNDAY" (season on
 # the same line after a dash).
+_WEEKDAY = r'(?:(?:Sun|Mon|Tues|Wednes|Thurs|Fri|Satur)day,?\s+)?'
 DATE_RE = re.compile(
-    r'^(' + '|'.join(MONTHS) + r')\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?,\s+(\d{4})'
+    r'^' + _WEEKDAY + r'(' + '|'.join(MONTHS) + r')\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?,\s+(\d{4})'
     r'(?:\s*[–—-]\s*(.+))?$')
 # The 2022-23 backlog flips the header: season first, date after the dash
 # ("Second Sunday of Easter — April 16, 2023").
 SEASON_DATE_RE = re.compile(
-    r'^(?P<season>[^.!?:]{3,60}?)\s*[–—-]\s*(?P<month>' + '|'.join(MONTHS) + r')'
+    r'^(?P<season>[^.!?:]{3,60}?)\s*[–—-]\s*' + _WEEKDAY
+    + r'(?P<month>' + '|'.join(MONTHS) + r')'
     r'\s+(?:the\s+)?(?P<day>\d{1,2})(?:st|nd|rd|th)?,\s+(?P<year>\d{4})$')
+# A date appearing anywhere in a run of OCR text (comma optional — OCR drops
+# it sometimes), and a lifespan pair ("July 21, 1944 – November 29, 2025")
+# as printed on Celebration of Life covers.
+_DATE_INLINE = (r'(?:' + '|'.join(MONTHS) + r')\s+(?:the\s+)?\d{1,2}'
+                r'(?:st|nd|rd|th)?,?\s+\d{4}')
+DATE_INLINE_RE = re.compile(
+    r'\b(' + '|'.join(MONTHS) + r')\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b')
+LIFESPAN_RE = re.compile(_DATE_INLINE + r'\s*[–—-]\s*' + _DATE_INLINE)
+
+
+def plausible_service_year(year):
+    """This church's guides exist from the 2020s on; memorial covers carry
+    lifespan dates ("July 21, 1944 – …") that must never become the service
+    date."""
+    return 2015 <= year <= 2100
 SMALL_WORDS = {'of', 'the', 'to', 'for', 'and', 'a', 'an', 'in', 'on', 'with', 'at', 'by', 'or', 'nor', 'but'}
 
 # Order-of-worship label kinds. `music` items carry a title whose engraved
@@ -579,7 +596,12 @@ def parse(extracted, opts=None):
     while i < len(all_lines):
         l = all_lines[i]
         dm = DATE_RE.match(l.text)
+        if dm and (not plausible_service_year(int(dm.group(3)))
+                   or (dm.group(4) and DATE_INLINE_RE.match(dm.group(4)))):
+            dm = None    # lifespan line on a memorial cover — not a service date
         sm = None if dm else SEASON_DATE_RE.match(l.text)
+        if sm and not plausible_service_year(int(sm.group('year'))):
+            sm = None
         if sm:
             # season leads the date line in the 2022-23 backlog format
             season = sm.group('season')
@@ -610,6 +632,29 @@ def parse(extracted, opts=None):
         if match_label(l):
             break  # no date found before content
         i += 1
+    if not guide['date']:
+        # Scanned/flattened guides have no text layer at all — the date only
+        # exists inside the page images. Fall back to OCR, skipping lifespan
+        # pairs and implausible years (memorial covers).
+        for p in extracted.pages:
+            if not p.ocr_text:
+                continue
+            lifespans = [m.span() for m in LIFESPAN_RE.finditer(p.ocr_text)]
+            for m in DATE_INLINE_RE.finditer(p.ocr_text):
+                if any(s <= m.start() < e for s, e in lifespans):
+                    continue
+                year = int(m.group(3))
+                if not plausible_service_year(year):
+                    continue
+                month = str(MONTHS.index(m.group(1)) + 1).zfill(2)
+                day = str(int(m.group(2))).zfill(2)
+                guide['date'] = f'{m.group(1)} {int(m.group(2))}, {year}'
+                guide['dateISO'] = f'{year}-{month}-{day}'
+                warnings.append(f'page {p.number}: service date read from '
+                                f'page-image OCR: {guide["date"]} — verify')
+                break
+            if guide['date']:
+                break
     if not guide['date']:
         warnings.append('no service date found on page 1')
 
@@ -781,8 +826,13 @@ def parse(extracted, opts=None):
             else:
                 warnings.append(
                     f'page {p.number}: Prayer Journal page found but could not be parsed from OCR')
-        elif not re.search(r'GROW|PRAY|STUDY|Notes from the Service', p.ocr_text, re.I):
-            guide['flyers'].append({'page': p.number, 'image': None})
+        elif not (re.search(r'\bGROW\b[\s\S]*\bPRAY\b[\s\S]*\bSTUDY\b', p.ocr_text)
+                  or GPS_PAGE_RE.search(p.ocr_text)):
+            # GPS notes card: the three caps headings (case-sensitive — any
+            # worship page mentions "pray") or its printed phrases.
+            # Page 1 of an all-image guide is already shown as the cover.
+            if p.number != 1 or not extracted.cover_path:
+                guide['flyers'].append({'page': p.number, 'image': None})
 
     if guide['series']:
         by = guide['series']['by'] or ''

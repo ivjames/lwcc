@@ -35,6 +35,32 @@ assert SEASON_DATE_RE.match('Palm Sunday - April 2, 2023')
 assert not SEASON_DATE_RE.match('Sunday Service: 9:30 AM')
 assert not SEASON_DATE_RE.match('April 20, 2025 – EASTER SUNDAY')
 
+# Scanned guides (no text layer anywhere): the date comes from page-image
+# OCR and every page publishes as an image. Memorial lifespan dates
+# ("July 21, 1944 – November 29, 2025") never become the service date.
+from wgconvert.extract import Extracted, Page  # noqa: E402
+from wgconvert.parse import plausible_service_year  # noqa: E402
+assert not plausible_service_year(1944) and plausible_service_year(2025)
+_m = DATE_RE.match('Saturday, December 13, 2025')
+assert _m and _m.group(2) == '13', 'weekday-prefixed service dates accepted'
+_scan = Extracted(pages=[
+    Page(number=1, width=612, height=792, lines=[],
+         ocr_text='Leisure World Community Church\nin Worship January 22, 2023'),
+    Page(number=2, width=612, height=792, lines=[],
+         ocr_text='PRAYERS OF INTERCESSION\nhear us as we pray'),
+], cover_path=None, warnings=[])
+_g = parse(_scan)
+assert _g['dateISO'] == '2023-01-22', _g['dateISO']
+assert any('page-image OCR' in w for w in _g['warnings'])
+assert [f['page'] for f in _g['flyers']] == [1, 2], _g['flyers']
+_mem = Extracted(pages=[
+    Page(number=1, width=612, height=792, lines=[],
+         ocr_text='Taylor White\nJuly 21, 1944 – November 29, 2025\n'
+                  'Celebration of Life\nSaturday, December 13, 2025'),
+], cover_path=None, warnings=[])
+_g = parse(_mem)
+assert _g['dateISO'] == '2025-12-13', _g['dateISO']
+
 # poster residue on mixed pages: the lowercase/date fragments between the
 # all-caps display blocks ("LEISURE WORLD ... presents ... SUNDAY 3:00 PM")
 from wgconvert.parse import poster_residue  # noqa: E402
