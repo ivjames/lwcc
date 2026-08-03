@@ -9,11 +9,15 @@ becomes the front page.
 - `GET /` — the current (newest) Sunday's guide
 - `GET /<YYYY-MM-DD>/` — any published Sunday (permanent URLs)
 - `GET /archive` — every published Sunday
-- `GET /admin` — batch upload page: drop in one PDF or a whole backlog, with per-file results (published link, warnings, replaced-existing, failures); the POST is token-protected, not the page
-- `POST /api/upload` — raw PDF body + `X-Upload-Token` header; converts via
-  `wgconvert` and publishes to `public/<date>/`. Parser warnings come back in
-  the response so odd content is reviewed, not silently dropped. Fails closed
-  when no token is configured.
+- `GET /admin` — the admin area (batch upload with per-file results, review
+  panel, guide editor). Every admin page is behind a sign-in: enter the upload
+  token once at `/admin/login` and a long-lived HttpOnly cookie (~6 months)
+  keeps that browser signed in; `/admin/logout` ends it.
+- `POST /api/upload` — raw PDF body, authenticated by the admin cookie or an
+  `X-Upload-Token` header (for curl); converts via `wgconvert` and publishes
+  to `public/<date>/`. Parser warnings come back in the response so odd
+  content is reviewed, not silently dropped. Fails closed when no token is
+  configured.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
 Batch the backlog from a terminal:
