@@ -35,6 +35,32 @@ assert SEASON_DATE_RE.match('Palm Sunday - April 2, 2023')
 assert not SEASON_DATE_RE.match('Sunday Service: 9:30 AM')
 assert not SEASON_DATE_RE.match('April 20, 2025 – EASTER SUNDAY')
 
+# 2023-24 label styles: single-run caps labels with inline attribution, and
+# title-case music labels — recognized without the modern bold-run structure.
+from wgconvert.extract import Run, Line  # noqa: E402
+from wgconvert.parse import match_label, kind_for, known_label  # noqa: E402
+
+
+def _line(text, bold=False, left=50):
+    return Line(page=1, top=0, bottom=10, left=left, height=12,
+                runs=[Run(text=text, b=bold)], text=text)
+
+
+_lab = match_label(_line('PRAYER OF CONFESSION – Taylor White'))
+assert _lab and _lab['label'] == 'PRAYER OF CONFESSION' and _lab['who'] == 'Taylor White'
+assert kind_for(_lab['label']) == 'prayer'
+_lab = match_label(_line('ENTRANCE PROCESSIONAL – “All Glory, Laud, and Honor”'))
+assert _lab and _lab['label'] == 'ENTRANCE PROCESSIONAL'
+assert _lab['title'] == 'All Glory, Laud, and Honor' and kind_for(_lab['label']) == 'music'
+_lab = match_label(_line('Hymn: “Let There Be Peace on Earth”'))
+assert _lab and _lab['label'] == 'HYMN' and _lab['title'] == 'Let There Be Peace on Earth'
+_lab = match_label(_line('Offertory: “Alleluia! Give the Glory” David Albulario'))
+assert _lab and _lab['label'] == 'OFFERTORY' and _lab['who'] == 'David Albulario'
+assert match_label(_line('You are welcome here.')) is None
+assert match_label(_line('THANKS BE TO GOD')) is None, 'unknown caps prose is not a label'
+assert kind_for('CLOSING HYMN') == 'music' and known_label('CLOSING HYMN')
+assert known_label('OPENING WORDS') and known_label('DECLARATION OF FORGIVENESS')
+
 # Scanned guides (no text layer anywhere): the date comes from page-image
 # OCR and every page publishes as an image. Memorial lifespan dates
 # ("July 21, 1944 – November 29, 2025") never become the service date.

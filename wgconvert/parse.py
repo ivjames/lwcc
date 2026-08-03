@@ -54,12 +54,16 @@ SMALL_WORDS = {'of', 'the', 'to', 'for', 'and', 'a', 'an', 'in', 'on', 'with', '
 LABEL_KINDS = [
     (re.compile(r'^CALL TO WORSHIP'), 'music'),
     (re.compile(r'^HYMN\b'), 'music'),
+    (re.compile(r'^CLOSING HYMN'), 'music'),
     (re.compile(r'^OFFERTORY'), 'music'),
     (re.compile(r'^SENDING FORTH'), 'music'),
     (re.compile(r'^REFLECTION'), 'music'),
     (re.compile(r'^SPECIAL MUSIC'), 'music'),
     (re.compile(r'PROCESSION'), 'music'),
     (re.compile(r'^OPENING PRAYER'), 'prayer'),
+    (re.compile(r'^OPENING WORDS'), 'plain'),
+    (re.compile(r'CONFESSION'), 'prayer'),
+    (re.compile(r'FORGIVENESS'), 'plain'),
     (re.compile(r'^INTRODUCTION'), 'plain'),
     (re.compile(r'BAPTISM'), 'plain'),
     (re.compile(r'^ANTHEM'), 'music'),
@@ -153,30 +157,50 @@ def line_is_stage(l):
 
 def match_label(l):
     """A label line: a bold ALL-CAPS run at (or, for liturgy sub-labels like
-    the Communion parts, near) the left margin."""
+    the Communion parts, near) the left margin. The 2023-24 backlog also
+    prints labels as plain single-run text — caps with the title/attribution
+    in the same run ("PRAYER OF CONFESSION – Taylor White"), or title-case
+    music labels ("Hymn:", "Offertory:") — accepted when the vocabulary
+    knows them."""
     if l.left > 160 or not l.runs:
         return None
     first = l.runs[0]
-    if not first.b:
-        return None
-    m = re.fullmatch(r"\s*([A-Z][A-Z'’&|\s]{2,}?):?\s*(?:[“\"](.+?)[”\"])?\s*", first.text)
-    if not m:
-        return None
-    label = re.sub(r'\s+', ' ', m.group(1)).strip()
-    if all(w.lower() in SMALL_WORDS for w in label.split(' ')):
-        return None
-    if l.left > 105:
-        # Indented: only explicit sub-labels, not bold body text — need a
-        # colon, a "— Speaker" attribution, or a known liturgical label.
-        rest_text = ''.join(r.text for r in l.runs[1:])
-        if not (first.text.rstrip().endswith(':')
-                or re.search(r'[—–]', rest_text)
-                or kind_for(label) != 'plain'):
+    label = title = None
+    rest = ''
+    m = re.fullmatch(r"\s*([A-Z][A-Z'’&|\s]{2,}?):?\s*(?:[“\"](.+?)[”\"])?\s*",
+                     first.text) if first.b else None
+    if m:
+        label = re.sub(r'\s+', ' ', m.group(1)).strip()
+        if all(w.lower() in SMALL_WORDS for w in label.split(' ')):
             return None
-    title = m.group(2)
-    # Rest of the line: optional title (if not inside the bold run) and
-    # "— Speaker[, role]" attribution.
-    rest = ''.join(r.text for r in l.runs[1:])
+        if l.left > 105:
+            # Indented: only explicit sub-labels, not bold body text — need a
+            # colon, a "— Speaker" attribution, or a known liturgical label.
+            rest_text = ''.join(r.text for r in l.runs[1:])
+            if not (first.text.rstrip().endswith(':')
+                    or re.search(r'[—–]', rest_text)
+                    or kind_for(label) != 'plain'):
+                return None
+        title = m.group(2)
+        # Rest of the line: optional title (if not inside the bold run) and
+        # "— Speaker[, role]" attribution.
+        rest = ''.join(r.text for r in l.runs[1:])
+    else:
+        if l.left > 105:
+            return None
+        lm = re.match(r"\s*([A-Z][A-Z'’&|\s]{2,}?)\s*(?=:|[–—]|[“\"]|$)", l.text)
+        cand = re.sub(r'\s+', ' ', lm.group(1)).strip() if lm else ''
+        if cand and known_label(cand) \
+                and not all(w.lower() in SMALL_WORDS for w in cand.split(' ')):
+            label = cand
+            rest = l.text[lm.end():].lstrip(': ').strip()
+        else:
+            tm = re.match(r"\s*(Hymn|Closing Hymn|Offertory|Anthem|Special Music)"
+                          r"\s*:\s*(.*)$", l.text)
+            if not tm:
+                return None
+            label = tm.group(1).upper()
+            rest = tm.group(2)
     if not title:
         tm = re.search(r'[“"](.+?)[”"]', rest)
         if tm:
@@ -188,10 +212,17 @@ def match_label(l):
     if wm:
         who = tidy_prose(wm.group(1))
         rest = rest[:wm.start()]
+    if who is not None and not re.search(r'\w', who):
+        who = None                       # dash residue, not an attribution
     # Unquoted title after the colon, e.g. "CALL TO WORSHIP: Doxology"
-    if not title and rest.strip():
-        title = rest.strip()
+    leftover = rest.strip().lstrip(':').strip()
+    if not title and leftover:
+        title = leftover
         quoted = False
+    elif title and who is None and re.search(r'\w', leftover):
+        # Performer follows the quoted title without a dash, 2023 style:
+        # 'Offertory: "Alleluia! Give the Glory" David Albulario'
+        who = tidy_prose(leftover)
     return {
         'label': label,
         'title': straight_quotes(title) if title else None,
@@ -205,6 +236,12 @@ def kind_for(label):
         if regex.search(label):
             return kind
     return 'plain'
+
+
+def known_label(label):
+    """True when the vocabulary recognizes the label (kind_for falls back to
+    'plain' either way, but unknown labels warn)."""
+    return any(regex.search(label) for regex, _ in LABEL_KINDS)
 
 
 # --- body assembly ---------------------------------------------------------
@@ -340,7 +377,8 @@ def poster_residue(line_texts):
             return False          # sentence punctuation — real prose
     return True
 
-COMMUNITY_HEAD_RE = re.compile(r'^(PRAYER REQUESTS|NOTES AND ANNOUNCEMENTS|Music Team\b)')
+COMMUNITY_HEAD_RE = re.compile(
+    r'^(PRAYER REQUESTS|NOTES AND ANNOUNCEMENTS|Notes and Announcements|Music Team\b)')
 
 
 def split_boxes(lines):
@@ -779,7 +817,7 @@ def parse(extracted, opts=None):
                 elif re.match(r'^PRAYER REQUESTS', first.text):
                     guide['prayerRequests'] = parse_prayer_requests(box)
                     classified = True
-                elif re.match(r'^NOTES AND ANNOUNCEMENTS', first.text):
+                elif re.match(r'^(NOTES AND ANNOUNCEMENTS|Notes and Announcements)', first.text):
                     guide['announcements'] = parse_announcements(box)
                     classified = True
                 elif any(BOX_CREDITS_RE.search(l.text) for l in box):
