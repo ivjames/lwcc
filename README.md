@@ -25,8 +25,12 @@ becomes the front page.
   the admin page polls `GET /api/status?ids=…` for per-file progress, and
   every outcome (with parser warnings) lands in `/admin/history`. Add
   `?sync=1` to convert before the reply and get the result inline (the old
-  behavior). Failed conversions keep their PDF in `queue/failed/` for a retry
-  after a parser fix. Fails closed when no token is configured.
+  behavior). `?date=YYYY-MM-DD` pins the publish date, winning over whatever
+  the parser reads — for memorial programs whose printed dates are not the
+  service date; the admin upload table has a per-file date field for this.
+  Failed conversions keep their PDF in `queue/failed/` and show on `/admin`
+  with a Retry button (optionally pinned to a date) — after a parser fix,
+  no re-upload is needed. Fails closed when no token is configured.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
 Every published Sunday keeps its uploaded PDF as `public/<date>/source.pdf`,

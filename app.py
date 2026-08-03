@@ -199,13 +199,19 @@ def guide_with_nav(d):
     return html
 
 
-def convert_pdf(pdf_path):
-    """Run the wgconvert pipeline and publish into public/<dateISO>/."""
+def convert_pdf(pdf_path, date_override=None):
+    """Run the wgconvert pipeline and publish into public/<dateISO>/.
+    date_override (YYYY-MM-DD) wins over whatever the parser finds — for
+    memorial programs whose printed dates are not the service date."""
     church = load_church()
     work_dir = tempfile.mkdtemp(prefix='wg-upload-')
     try:
         extracted = extract(pdf_path, work_dir)
         guide = parse(extracted)
+        if date_override:
+            guide['dateISO'] = date_override
+            if not guide['date']:
+                guide['date'] = date_label(date_override)
         if not guide['dateISO']:
             raise ValueError('no service date found in the PDF — convert it '
                              'manually with bin/wg-convert and hand-edit guide.json')
@@ -258,7 +264,7 @@ def job_update(jid, **kw):
         JOBS.setdefault(jid, {}).update(kw)
 
 
-def spool_upload(body, fname):
+def spool_upload(body, fname, date_override=None):
     os.makedirs(QUEUE_DIR, exist_ok=True)
     jid = (datetime.datetime.now().strftime('%Y%m%d%H%M%S')
            + '-' + os.urandom(4).hex())
@@ -266,7 +272,11 @@ def spool_upload(body, fname):
     path = os.path.join(QUEUE_DIR, f'{jid}__{safe}')
     with open(path, 'wb') as fh:
         fh.write(body)
-    job_update(jid, status='queued', file=fname or None, path=path)
+    if date_override:
+        with open(path + '.meta', 'w', encoding='utf-8') as fh:
+            json.dump({'date': date_override}, fh)
+    job_update(jid, status='queued', file=fname or None, path=path,
+               **({'dateOverride': date_override} if date_override else {}))
     CONVERT_Q.put(jid)
     return jid
 
@@ -279,25 +289,31 @@ def convert_worker():
         if not job.get('path'):
             continue
         path, fname = job['path'], job.get('file')
+        override = job.get('dateOverride')
+        extra = {**({'file': fname} if fname else {}),
+                 **({'dateOverride': override} if override else {})}
         job_update(jid, status='converting')
         try:
-            guide, replaced = convert_pdf(path)
-            audit_log({'ok': True, **({'file': fname} if fname else {}),
-                       'dateISO': guide['dateISO'],
+            guide, replaced = convert_pdf(path, override)
+            audit_log({'ok': True, **extra, 'dateISO': guide['dateISO'],
                        'replaced': replaced, 'warnings': guide['warnings']})
             job_update(jid, status='warned' if guide['warnings'] else 'ok',
                        date=guide['date'], dateISO=guide['dateISO'],
                        url=f"/{guide['dateISO']}/", replaced=replaced,
                        warnings=guide['warnings'])
             os.unlink(path)
+            if os.path.exists(path + '.meta'):
+                os.unlink(path + '.meta')
         except Exception as e:
             traceback.print_exc()
-            audit_log({'ok': False, **({'file': fname} if fname else {}),
-                       'error': str(e)})
+            audit_log({'ok': False, **extra, 'error': str(e)})
             job_update(jid, status='failed', error=str(e))
             try:        # keep the PDF for a retry after the parser learns it
                 os.makedirs(FAILED_DIR, exist_ok=True)
                 shutil.move(path, os.path.join(FAILED_DIR, os.path.basename(path)))
+                if os.path.exists(path + '.meta'):
+                    shutil.move(path + '.meta',
+                                os.path.join(FAILED_DIR, os.path.basename(path) + '.meta'))
             except OSError:
                 pass
 
@@ -320,10 +336,18 @@ def rescan_spool():
         return
     for name in sorted(os.listdir(QUEUE_DIR)):
         path = os.path.join(QUEUE_DIR, name)
-        if not os.path.isfile(path):
+        if not os.path.isfile(path) or name.endswith('.meta'):
             continue
+        override = None
+        if os.path.exists(path + '.meta'):
+            try:
+                with open(path + '.meta', encoding='utf-8') as fh:
+                    override = (json.load(fh) or {}).get('date')
+            except (OSError, ValueError):
+                pass
         jid, _, safe = name.partition('__')
-        job_update(jid or name, status='queued', file=safe or None, path=path)
+        job_update(jid or name, status='queued', file=safe or None, path=path,
+                   **({'dateOverride': override} if override else {}))
         CONVERT_Q.put(jid or name)
 
 
@@ -724,7 +748,11 @@ function statusCell(q) {
           failed: '<span class="err">✖ failed</span>'}[q.status];
 }
 
-function resultCell(q) {
+function resultCell(q, i) {
+  if (q.status === 'queued') {
+    return '<input type="date" class="qdate" data-i="' + i + '" value="' + (q.override || '') +
+      '" title="Optional: publish under this exact date (memorial programs). Blank = the date printed in the PDF.">';
+  }
   if (q.status === 'failed') return '<span class="err">' + q.error + '</span>';
   if (!q.data) return '';
   let html = '<a href="' + q.data.url + '">' + q.data.date + '</a>';
@@ -738,9 +766,9 @@ function resultCell(q) {
 
 function renderQueue() {
   const tb = $('queue').querySelector('tbody');
-  tb.innerHTML = queue.map(q =>
+  tb.innerHTML = queue.map((q, i) =>
     '<tr><td>' + q.file.name + '</td><td class="st">' + statusCell(q) +
-    '</td><td>' + resultCell(q) + '</td></tr>').join('');
+    '</td><td>' + resultCell(q, i) + '</td></tr>').join('');
   $('queue').hidden = !queue.length;
   $('go').disabled = running || !queue.some(q => q.status === 'queued');
   $('clear').disabled = running || !queue.length;
@@ -771,6 +799,23 @@ $('drop').addEventListener('drop', e => {
   addFiles(e.dataTransfer.files);
 });
 $('clear').addEventListener('click', () => { queue = []; renderQueue(); });
+$('queue').addEventListener('change', e => {
+  if (e.target.classList.contains('qdate')) queue[+e.target.dataset.i].override = e.target.value;
+});
+
+async function retryFailed(btn, name) {
+  const date = btn.parentElement.querySelector('.retrydate').value;
+  btn.disabled = true;
+  const res = await fetch('/api/retry', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(date ? {name: name, date: date} : {name: name}),
+  });
+  if (res.status === 401) { location.reload(); return; }
+  const data = await res.json().catch(() => ({ok: false, error: res.statusText}));
+  if (!data.ok) { alert(data.error || 'failed'); btn.disabled = false; return; }
+  location.reload();
+}
 
 async function adminAction(action, date) {
   if (action === 'unpublish' && !confirm('Unpublish ' + date + '? The folder is set aside, not deleted.')) return;
@@ -795,7 +840,7 @@ $('go').addEventListener('click', async () => {
     q.status = 'uploading';
     renderQueue();
     try {
-      const res = await fetch('/api/upload', {
+      const res = await fetch('/api/upload' + (q.override ? '?date=' + q.override : ''), {
         method: 'POST',
         headers: {'Content-Type': 'application/pdf',
                   'X-Filename': encodeURIComponent(q.file.name)},
@@ -968,6 +1013,8 @@ def history_rows(entries):
             detail = ''
         if e.get('replaced'):
             status_html += ' <span class="warn">(replaced existing)</span>'
+        if e.get('dateOverride'):
+            status_html += ' <span class="warn">(date set manually)</span>'
         rows.append(f'<tr><td class="st">{when}</td><td>{esc(e.get("file") or "—")}</td>'
                     f'<td class="st">{sunday}</td><td class="st">{status_html}</td>'
                     f'<td>{detail}</td></tr>')
@@ -977,6 +1024,31 @@ def history_rows(entries):
 HISTORY_TABLE_HEAD = ('<table><thead><tr><th>When</th><th>File</th>'
                       '<th>Sunday</th><th>Status</th><th>Details</th></tr>'
                       '</thead><tbody>')
+
+
+def failed_uploads_html():
+    """Failed conversions whose PDFs were kept in queue/failed/ — offer a
+    retry (optionally pinned to a date) instead of a re-upload."""
+    try:
+        names = sorted(f for f in os.listdir(FAILED_DIR) if not f.endswith('.meta'))
+    except OSError:
+        return ''
+    if not names:
+        return ''
+    items = []
+    for n in names:
+        disp = n.partition('__')[2] or n
+        items.append(
+            f'<li style="margin:8px 0"><code>{esc(disp)}</code> '
+            f'<input type="date" class="retrydate"> '
+            f'<button class="mini" onclick="retryFailed(this, \'{n}\')">Retry</button></li>')
+    return ('<div class="card"><p><b>Failed conversions</b> — these PDFs are '
+            'kept on the server, so after a parser fix just retry (no '
+            're-upload). Set the date to force publishing under a specific '
+            'Sunday — for memorial programs whose printed dates are not the '
+            'service date — or leave it blank to let the parser decide.</p>'
+            '<ul style="list-style:none;padding-left:0">'
+            + ''.join(items) + '</ul></div>')
 
 
 def recent_uploads_html():
@@ -1400,7 +1472,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == '/admin':
             if self.require_admin():
                 self.send_page(ADMIN_PAGE
-                               .replace('__HISTORY__', recent_uploads_html())
+                               .replace('__HISTORY__',
+                                        failed_uploads_html() + recent_uploads_html())
                                .replace('__REVIEW__', manage_html()),
                                cache='no-store')
             return
@@ -1457,7 +1530,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == '/admin/login':
             self.handle_login(body)
             return
-        if path not in ('/api/upload', '/api/review', '/api/rerender',
+        if path not in ('/api/upload', '/api/retry', '/api/review', '/api/rerender',
                         '/api/reconvert', '/api/unpublish', '/api/save'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
             return
@@ -1471,6 +1544,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not hmac.compare_digest(got, expected):
             self.send_json({'ok': False, 'error': 'bad upload token'}, status=401)
             return
+        if path == '/api/retry':
+            self.handle_retry(body)
+            return
         if path != '/api/upload':
             self.handle_action(path.rsplit('/', 1)[1], body)
             return
@@ -1478,11 +1554,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({'ok': False, 'error': 'not a PDF'}, status=400)
             return
         fname = self.upload_filename()
-        if urllib.parse.parse_qs(query).get('sync', ['0'])[0] not in ('1', 'true'):
+        qs = urllib.parse.parse_qs(query)
+        override = (qs.get('date') or [''])[0]
+        if override and not DATE_DIR_RE.match(override):
+            self.send_json({'ok': False, 'error': 'date must be YYYY-MM-DD'}, status=400)
+            return
+        override = override or None
+        if (qs.get('sync') or ['0'])[0] not in ('1', 'true'):
             # Default: accept the bytes, convert from the queue. ?sync=1 keeps
             # the old convert-before-replying behavior for scripts that want
             # the result inline.
-            jid = spool_upload(body, fname)
+            jid = spool_upload(body, fname, override)
             self.send_json({'ok': True, 'queued': True, 'id': jid,
                             **({'file': fname} if fname else {})})
             return
@@ -1490,8 +1572,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             tmp.write(body)
             tmp.close()
-            guide, replaced = convert_pdf(tmp.name)
+            guide, replaced = convert_pdf(tmp.name, override)
             audit_log({'ok': True, **({'file': fname} if fname else {}),
+                       **({'dateOverride': override} if override else {}),
                        'dateISO': guide['dateISO'],
                        'replaced': replaced, 'warnings': guide['warnings']})
             self.send_json({
@@ -1509,6 +1592,43 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({'ok': False, 'error': str(e)}, status=422)
         finally:
             os.unlink(tmp.name)
+
+    def handle_retry(self, body):
+        """Re-enqueue a failed conversion from queue/failed/ — the PDF was
+        kept, so no re-upload is needed. An optional date pins the publish
+        date (memorials); otherwise any date stored with the original
+        upload is carried over."""
+        try:
+            data = json.loads(body or b'{}')
+        except ValueError:
+            self.send_json({'ok': False, 'error': 'invalid JSON body'}, status=400)
+            return
+        name = os.path.basename(str(data.get('name') or ''))
+        src = os.path.join(FAILED_DIR, name)
+        if not name or name.endswith('.meta') or not os.path.isfile(src):
+            self.send_json({'ok': False, 'error': f'no failed upload named {name!r}'},
+                           status=404)
+            return
+        date = str(data.get('date') or '') or None
+        if date and not DATE_DIR_RE.match(date):
+            self.send_json({'ok': False, 'error': 'date must be YYYY-MM-DD'}, status=400)
+            return
+        if not date and os.path.exists(src + '.meta'):
+            try:
+                with open(src + '.meta', encoding='utf-8') as fh:
+                    date = (json.load(fh) or {}).get('date')
+            except (OSError, ValueError):
+                pass
+        with open(src, 'rb') as fh:
+            pdf = fh.read()
+        fname = name.partition('__')[2] or name
+        jid = spool_upload(pdf, fname, date)
+        for stale in (src, src + '.meta'):
+            if os.path.exists(stale):
+                os.unlink(stale)
+        audit_log({'action': 'retry', 'file': fname, 'ok': True,
+                   **({'dateOverride': date} if date else {})})
+        self.send_json({'ok': True, 'id': jid})
 
     def upload_filename(self):
         """Original filename when the uploader sends X-Filename (the admin

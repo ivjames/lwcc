@@ -160,6 +160,18 @@ try:
     assert snap['waiting'] == 0 and snap['converting'] is None, \
         'status responses carry a live queue snapshot'
 
+    # An explicit ?date= pins publishing regardless of what the PDF says
+    # (memorial programs whose printed dates are not the service date).
+    status, body = req('/api/upload?sync=1&date=2020-01-05', data=pdf,
+                       headers={**COOKIE, 'Content-Type': 'application/pdf'})
+    assert status == 200, (status, body)
+    d = json.loads(body)
+    assert d['ok'] and d['dateISO'] == '2020-01-05', d
+    assert os.path.exists(os.path.join(scratch, 'public', '2020-01-05', 'index.html'))
+    status, body = req('/api/upload?sync=1&date=Jan-5', data=pdf,
+                       headers={**COOKIE, 'Content-Type': 'application/pdf'})
+    assert status == 400, 'malformed override rejected'
+
     out_dir = os.path.join(scratch, 'public', '2026-08-02')
     for f in ('index.html', 'guide.json', 'cover.jpg'):
         assert os.path.exists(os.path.join(out_dir, f)), f
@@ -231,6 +243,49 @@ try:
     status, body = req('/admin', headers=COOKIE)
     assert b'Recent uploads' in body and b'/admin/history' in body, \
         'admin page shows the recent-history card'
+
+    # Failed conversions keep their PDF server-side; /api/retry re-enqueues
+    # them without a re-upload, carrying any pinned date forward.
+    status, body = req('/api/upload?date=2030-05-05', data=b'%PDF-garbage',
+                       headers={**COOKIE, 'Content-Type': 'application/pdf',
+                                'X-Filename': 'broken.pdf'})
+    assert status == 200 and json.loads(body)['queued'], (status, body)
+    gid = json.loads(body)['id']
+    for _ in range(240):
+        status, body = req('/api/status?ids=' + gid, headers=COOKIE)
+        js = json.loads(body)['jobs'][gid]
+        if js['status'] in ('ok', 'warned', 'failed'):
+            break
+        time.sleep(0.5)
+    assert js['status'] == 'failed', js
+    failed_dir = os.path.join(scratch, 'queue', 'failed')
+    kept = [f for f in os.listdir(failed_dir) if not f.endswith('.meta')]
+    assert len(kept) == 1 and kept[0].endswith('__broken.pdf'), kept
+    assert os.path.exists(os.path.join(failed_dir, kept[0] + '.meta')), \
+        'pinned date survives the failure'
+    status, body = req('/admin', headers=COOKIE)
+    assert b'Failed conversions' in body and b'broken.pdf' in body \
+        and b'retryFailed' in body, 'failed card with retry UI'
+    status, body = req('/api/retry', data=json.dumps({'name': 'nope.pdf'}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 404, 'unknown failed upload -> not found'
+    status, body = req('/api/retry', data=json.dumps({'name': kept[0]}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body)['ok'], body
+    rid = json.loads(body)['id']
+    for _ in range(240):
+        status, body = req('/api/status?ids=' + rid, headers=COOKIE)
+        js = json.loads(body)['jobs'][rid]
+        if js['status'] in ('ok', 'warned', 'failed'):
+            break
+        time.sleep(0.5)
+    assert js['status'] == 'failed', 'garbage still fails, via the retry path'
+    kept2 = [f for f in os.listdir(failed_dir) if not f.endswith('.meta')]
+    assert len(kept2) == 1 and kept2[0].endswith('__broken.pdf') and kept2 != kept, \
+        'kept again under the new job id'
+    entries = [json.loads(l) for l in open(log_path)]
+    assert any(e.get('action') == 'retry' and e.get('dateOverride') == '2030-05-05'
+               for e in entries), 'retry audited with the carried-over date'
 
     gj = os.path.join(scratch, 'public', '2026-08-09', 'guide.json')
     g = json.load(open(gj))
