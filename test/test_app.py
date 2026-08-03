@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
@@ -36,13 +37,30 @@ proc = subprocess.Popen(
     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None                      # keep 3xx visible (login/logout flows)
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+LAST = {}                                # headers of the most recent response
+
+
 def req(path, data=None, headers=None, method=None):
     r = urllib.request.Request(BASE + path, data=data, headers=headers or {}, method=method)
     try:
-        with urllib.request.urlopen(r, timeout=60) as resp:
+        with OPENER.open(r, timeout=60) as resp:
+            LAST['headers'] = resp.headers
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
+        LAST['headers'] = e.headers
         return e.code, e.read()
+
+
+def login(token, nxt='/admin'):
+    return req('/admin/login', method='POST',
+               data=urllib.parse.urlencode({'token': token, 'next': nxt}).encode(),
+               headers={'Content-Type': 'application/x-www-form-urlencoded'})
 
 
 try:
@@ -60,8 +78,29 @@ try:
     status, body = req('/archive')
     assert status == 200 and b'Nothing published yet' in body
 
+    # The whole admin area is behind a sign-in: pages answer 401 with the
+    # login form until the session cookie is set.
     status, body = req('/admin')
+    assert status == 401 and b'Admin Sign-in' in body and b'name="token"' in body
+    assert b'Publish Worship Guides' not in body
+    assert 'no-store' in (LAST['headers'].get('Cache-Control') or '')
+
+    status, body = login('wrong')
+    assert status == 401 and b'Wrong token' in body
+
+    # Right token: 303 + long-lived HttpOnly cookie; an off-site "next" is
+    # ignored in favor of /admin.
+    status, body = login(TOKEN, nxt='https://evil.example/')
+    assert status == 303, (status, body)
+    setc = LAST['headers'].get('Set-Cookie') or ''
+    assert 'wg_token=' in setc and 'HttpOnly' in setc and 'Max-Age=15552000' in setc, setc
+    assert LAST['headers'].get('Location') == '/admin'
+    COOKIE = {'Cookie': setc.split(';', 1)[0]}
+
+    status, body = req('/admin', headers=COOKIE)
     assert status == 200 and b'Publish Worship Guides' in body and b'multiple' in body
+    assert b'id="token"' not in body, 'no per-action token field anymore'
+    assert 'no-store' in (LAST['headers'].get('Cache-Control') or '')
 
     with open(SAMPLE, 'rb') as fh:
         pdf = fh.read()
@@ -87,9 +126,10 @@ try:
     assert data['ok'] and data['dateISO'] == '2026-08-02' and data['warnings'] == [], data
     assert data['replaced'] is False, data
 
-    # Re-uploading the same Sunday overwrites in place and says so.
+    # Re-uploading the same Sunday overwrites in place and says so. The
+    # session cookie authenticates API calls just like the header does.
     status, body = req('/api/upload', data=pdf,
-                       headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/pdf'})
+                       headers={**COOKIE, 'Content-Type': 'application/pdf'})
     assert status == 200, (status, body)
     assert json.loads(body)['replaced'] is True
 
@@ -124,7 +164,9 @@ try:
     entries = [json.loads(l) for l in open(log_path)]
     assert any(e.get('ok') and e.get('dateISO') == '2026-08-02' for e in entries)
     assert any(not e.get('ok') for e in entries), 'failed attempts audited too'
-    status, body = req('/admin')
+    assert any(e.get('action') == 'login' and not e.get('ok') for e in entries), \
+        'failed sign-ins audited'
+    status, body = req('/admin', headers=COOKIE)
     assert b'Needs review' not in body
 
     gj = os.path.join(scratch, 'public', '2026-08-09', 'guide.json')
@@ -133,7 +175,7 @@ try:
     json.dump(g, open(gj, 'w'))
     status, body = req('/archive')
     assert b'needs review' in body, 'archive badge for warned guide'
-    status, body = req('/admin')
+    status, body = req('/admin', headers=COOKIE)
     assert b'Needs review' in body and b'untitled item' in body, 'review panel lists warnings'
     assert b'Published Sundays' in body and b'adminAction' in body, 'management panel present'
 
@@ -147,16 +189,18 @@ try:
     assert status == 200 and json.loads(body)['ok'], body
     g = json.load(open(gj))
     assert g['warnings'] == [] and 'untitled item' in g['reviewedWarnings'][0]
-    status, body = req('/admin')
+    status, body = req('/admin', headers=COOKIE)
     assert b'Needs review' not in body
     status, body = req('/archive')
     assert b'needs review' not in body
 
-    # Form editor: page loads with embedded data; save sanitizes server-side,
-    # preserves protected fields, and re-renders.
+    # Form editor: gated like the rest of admin; page loads with embedded
+    # data; save sanitizes server-side, preserves protected fields, re-renders.
     status, body = req('/admin/edit/2026-08-09')
+    assert status == 401 and b'Admin Sign-in' in body, 'editor gated too'
+    status, body = req('/admin/edit/2026-08-09', headers=COOKIE)
     assert status == 200 and b'guide-data' in body and b'Love Unleashed' in body
-    status, body = req('/admin/edit/1999-01-01')
+    status, body = req('/admin/edit/1999-01-01', headers=COOKIE)
     assert status == 404
 
     g = json.load(open(gj))
@@ -203,6 +247,13 @@ try:
     assert status == 404, 'unpublished folder is not served'
     status, body = action('unpublish', '2026-08-09')
     assert status == 404, 'acting on a gone date reports not found'
+
+    # Sign out clears the cookie and the browser lands back on the login gate.
+    status, body = req('/admin/logout', headers=COOKIE)
+    assert status == 303 and LAST['headers'].get('Location') == '/'
+    assert 'Max-Age=0' in (LAST['headers'].get('Set-Cookie') or '')
+    status, body = req('/admin', headers={'Cookie': 'wg_token='})
+    assert status == 401, 'cleared cookie no longer signs in'
 
     # Sermon search: title, scripture, and no-hit cases.
     status, body = req('/search?q=Unleashed')

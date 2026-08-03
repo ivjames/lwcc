@@ -7,9 +7,12 @@ newest at /) and converts newly uploaded worship-guide PDFs in place:
     GET  /            current (newest) Sunday's guide
     GET  /YYYY-MM-DD/ any published Sunday
     GET  /archive     list of every published Sunday
-    GET  /admin       upload page (the POST is what's protected, not the page)
-    POST /api/upload  raw PDF body -> convert -> publish; X-Upload-Token header
-                      must match UPLOAD_TOKEN from .env (fails closed if unset)
+    GET  /admin       admin area (upload, review, edit) — every page is gated
+                      by a sign-in cookie; POST /admin/login sets it (long-
+                      lived, HttpOnly) after checking the upload token once
+    POST /api/upload  raw PDF body -> convert -> publish; the admin cookie or
+                      an X-Upload-Token header must match UPLOAD_TOKEN from
+                      .env (fails closed if unset)
     GET  /healthz     liveness for the platform health-check sweep
 
 Stdlib only, runs under pm2 behind the site's nginx vhost per lab980
@@ -20,6 +23,7 @@ not silently dropped.
 import argparse
 import datetime
 import hmac
+import http.cookies
 import http.server
 import json
 import os
@@ -28,11 +32,17 @@ import shutil
 import sys
 import tempfile
 import traceback
+import urllib.parse
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, 'public')
 DATE_DIR_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 MAX_UPLOAD = 40 * 1024 * 1024
+COOKIE_NAME = 'wg_token'
+COOKIE_MAX_AGE = 180 * 24 * 3600
+# where /admin/login may redirect after sign-in; anything else falls back
+# to /admin so the token can't be used to bounce visitors off-site
+ADMIN_NEXT_RE = re.compile(r'/admin(/edit/\d{4}-\d{2}-\d{2})?')
 
 sys.path.insert(0, ROOT)
 from wgconvert import extract, parse, render  # noqa: E402
@@ -520,6 +530,31 @@ def search_page(query):
 """
 
 
+def login_page(next_path, error=None):
+    err = f'<p class="err">{error}</p>\n' if error else ''
+    next_attr = next_path.replace('&', '&amp;').replace('"', '&quot;')
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Sign-in</title><style>{PAGE_STYLE}</style></head>
+<body>
+<h1>Admin Sign-in</h1>
+<div class="card">
+{err}<form method="POST" action="/admin/login">
+  <input type="hidden" name="next" value="{next_attr}">
+  <p><label>Upload token<br>
+    <input type="password" name="token" size="28" autofocus
+           autocomplete="current-password"></label></p>
+  <p><button>Sign in</button></p>
+  <p><small style="color:#54574a">One sign-in unlocks uploading, reviewing,
+  and editing on this browser for about six months.</small></p>
+</form>
+</div>
+<p><a href="/">Current guide</a></p>
+</body></html>
+"""
+
+
 ADMIN_PAGE = ("""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -542,7 +577,6 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   <p>Add one PDF or a whole backlog. Files are converted and published one at
   a time — the newest Sunday always ends up as the front page, and every
   Sunday gets its permanent <code>/YYYY-MM-DD/</code> URL.</p>
-  <p><label>Upload token<br><input type="password" id="token" size="28"></label></p>
   <div id="drop">Drag PDFs here, or
     <input type="file" id="pdf" accept="application/pdf,.pdf" multiple></div>
   <p><button id="go" disabled>Convert &amp; publish</button>
@@ -553,13 +587,14 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   <div id="summary"></div>
 </div>
 __REVIEW__
-<p><a href="/">Current guide</a> · <a href="/archive">Archive</a></p>
+<p><a href="/">Current guide</a> · <a href="/archive">Archive</a> ·
+   <a href="/admin/logout">Sign out</a></p>
 <script>
 const $ = id => document.getElementById(id);
 let queue = [];   // {file, status, data, error}
 let running = false;
 
-$('token').value = localStorage.getItem('wgToken') || '';
+localStorage.removeItem('wgToken');  // pre-cookie versions left the secret here
 
 function addFiles(list) {
   for (const f of list) {
@@ -619,23 +654,19 @@ $('drop').addEventListener('drop', e => {
 $('clear').addEventListener('click', () => { queue = []; renderQueue(); });
 
 async function adminAction(action, date) {
-  const token = $('token').value.trim();
-  if (!token) { alert('Enter the upload token first.'); return; }
   if (action === 'unpublish' && !confirm('Unpublish ' + date + '? The folder is set aside, not deleted.')) return;
-  localStorage.setItem('wgToken', token);
   const res = await fetch('/api/' + action, {
     method: 'POST',
-    headers: {'X-Upload-Token': token, 'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({date}),
   });
+  if (res.status === 401) { location.reload(); return; }  // cookie expired -> sign-in page
   const data = await res.json().catch(() => ({ok: false, error: res.statusText}));
   if (!data.ok) { alert(data.error || 'failed'); return; }
   location.reload();
 }
 
 $('go').addEventListener('click', async () => {
-  const token = $('token').value.trim();
-  localStorage.setItem('wgToken', token);
   running = true;
   renderQueue();
   for (const q of queue) {
@@ -645,9 +676,10 @@ $('go').addEventListener('click', async () => {
     try {
       const res = await fetch('/api/upload', {
         method: 'POST',
-        headers: {'X-Upload-Token': token, 'Content-Type': 'application/pdf'},
+        headers: {'Content-Type': 'application/pdf'},
         body: q.file,
       });
+      if (res.status === 401) throw new Error('signed out — reload this page to sign in again');
       const text = await res.text();
       let data;
       try { data = JSON.parse(text); }
@@ -743,7 +775,6 @@ EDIT_PAGE = (r"""<!DOCTYPE html>
 <p><small class="hint">Text fields may use <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>,
 <code>&lt;sup&gt;</code>; anything else is neutralized on save. Prayers keep their
 line breaks. Saving re-renders the page immediately.</small></p>
-<p><label>Upload token <input type="password" id="token" size="28"></label></p>
 <div id="form"></div>
 <div class="savebar">
   <button id="save">Save &amp; re-render</button>
@@ -755,7 +786,6 @@ line breaks. Saving re-renders the page immediately.</small></p>
 <script>
 const $ = id => document.getElementById(id);
 const G = JSON.parse($('guide-data').textContent);
-$('token').value = localStorage.getItem('wgToken') || '';
 
 const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag);
@@ -908,17 +938,15 @@ function buildForm() {
 buildForm();
 
 $('save').addEventListener('click', async () => {
-  const token = $('token').value.trim();
-  if (!token) { $('msg').textContent = 'Enter the upload token first.'; return; }
-  localStorage.setItem('wgToken', token);
   $('save').disabled = true;
   $('msg').textContent = 'Saving…';
   try {
     const res = await fetch('/api/save', {
       method: 'POST',
-      headers: {'X-Upload-Token': token, 'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({date: '__DATE__', guide: G}),
     });
+    if (res.status === 401) throw new Error('signed out — reload this page to sign in again');
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || res.statusText);
     $('msg').innerHTML = 'Saved &amp; re-rendered — <a href="/__DATE__/">view the page</a>.';
@@ -948,8 +976,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     # -- helpers ------------------------------------------------------------
 
-    def send_page(self, body, status=200, ctype='text/html; charset=utf-8'):
+    def send_page(self, body, status=200, ctype='text/html; charset=utf-8',
+                  cache=None):
         data = body.encode('utf-8') if isinstance(body, str) else body
+        self._cache = cache
         self.send_response(status)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
@@ -958,6 +988,68 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def send_json(self, obj, status=200):
         self.send_page(json.dumps(obj), status=status, ctype='application/json')
+
+    # -- admin session ------------------------------------------------------
+
+    def cookie_token(self):
+        try:
+            jar = http.cookies.SimpleCookie(self.headers.get('Cookie', ''))
+        except http.cookies.CookieError:
+            return ''
+        morsel = jar.get(COOKIE_NAME)
+        return morsel.value if morsel else ''
+
+    def session_cookie(self, value, max_age):
+        cookie = (f'{COOKIE_NAME}={value}; Path=/; Max-Age={max_age}; '
+                  'HttpOnly; SameSite=Lax')
+        if self.headers.get('X-Forwarded-Proto') == 'https':
+            cookie += '; Secure'
+        return cookie
+
+    def redirect_303(self, location, cookie=None):
+        self._cache = 'no-store'
+        self.send_response(303)
+        self.send_header('Location', location)
+        if cookie:
+            self.send_header('Set-Cookie', cookie)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def require_admin(self):
+        """Gate for every admin page: True with a valid session cookie;
+        otherwise the sign-in page (or disabled notice) has been sent."""
+        expected = ENV.get('UPLOAD_TOKEN', '')
+        if not expected:
+            self.send_page('admin disabled: set UPLOAD_TOKEN in .env and restart\n',
+                           status=503, ctype='text/plain; charset=utf-8',
+                           cache='no-store')
+            return False
+        if hmac.compare_digest(self.cookie_token(), expected):
+            return True
+        self.send_page(login_page(self.path.split('?', 1)[0]), status=401,
+                       cache='no-store')
+        return False
+
+    def handle_login(self, body):
+        form = urllib.parse.parse_qs(body.decode('utf-8', 'replace'))
+        token = (form.get('token') or [''])[0].strip()
+        nxt = (form.get('next') or [''])[0]
+        if not ADMIN_NEXT_RE.fullmatch(nxt):
+            nxt = '/admin'
+        expected = ENV.get('UPLOAD_TOKEN', '')
+        if not expected:
+            self.send_page('admin disabled: set UPLOAD_TOKEN in .env and restart\n',
+                           status=503, ctype='text/plain; charset=utf-8',
+                           cache='no-store')
+            return
+        if token and hmac.compare_digest(token, expected):
+            audit_log({'action': 'login', 'ok': True})
+            self.redirect_303(nxt, cookie=self.session_cookie(token, COOKIE_MAX_AGE))
+        else:
+            audit_log({'action': 'login', 'ok': False})
+            self.send_page(login_page(nxt, error='Wrong token — check '
+                                      'UPLOAD_TOKEN in the app&#8217;s .env.'),
+                           status=401, cache='no-store')
 
     # -- routes -------------------------------------------------------------
 
@@ -974,17 +1066,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_page(archive_page())
             return
         if path == '/search':
-            import urllib.parse
             q = urllib.parse.parse_qs(query).get('q', [''])[0]
             self.send_page(search_page(q))
             return
         if path == '/admin':
-            self.send_page(ADMIN_PAGE.replace('__REVIEW__', manage_html()))
+            if self.require_admin():
+                self.send_page(ADMIN_PAGE.replace('__REVIEW__', manage_html()),
+                               cache='no-store')
+            return
+        if path == '/admin/logout':
+            self.redirect_303('/', cookie=self.session_cookie('', 0))
             return
         m = re.fullmatch(r'/admin/edit/(\d{4}-\d{2}-\d{2})', path)
         if m:
+            if not self.require_admin():
+                return
             if os.path.exists(os.path.join(PUBLIC, m.group(1), 'guide.json')):
-                self.send_page(edit_page(m.group(1)))
+                self.send_page(edit_page(m.group(1)), cache='no-store')
             else:
                 self.send_error(404, 'Not Found')
             return
@@ -1022,6 +1120,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         body = self.rfile.read(length)
         path = self.path.split('?', 1)[0]
+        if path == '/admin/login':
+            self.handle_login(body)
+            return
         if path not in ('/api/upload', '/api/review', '/api/rerender', '/api/unpublish', '/api/save'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
             return
@@ -1031,7 +1132,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             'uploads disabled: set UPLOAD_TOKEN in .env and restart'},
                            status=503)
             return
-        got = self.headers.get('X-Upload-Token', '')
+        got = self.headers.get('X-Upload-Token') or self.cookie_token()
         if not hmac.compare_digest(got, expected):
             self.send_json({'ok': False, 'error': 'bad upload token'}, status=401)
             return
@@ -1095,7 +1196,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def end_headers(self):
         # Guides are replaced in place when re-rendered; keep caching short.
-        self.send_header('Cache-Control', 'public, max-age=300')
+        # Admin and sign-in responses override this with no-store.
+        self.send_header('Cache-Control',
+                         getattr(self, '_cache', None) or 'public, max-age=300')
+        self._cache = None
         super().end_headers()
 
     def list_directory(self, path):  # no directory listings
