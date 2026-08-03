@@ -297,6 +297,9 @@ def build_item_body(kind, lines, item):
 # --- community page (music team / prayer requests / announcements) ---------
 
 CALENDAR_BLOCK_RE = re.compile(r'^(' + '|'.join(MONTHS) + r')\s+\d{1,2}:\s')
+# Giant display words from poster art bleeding onto content pages
+# ("PEACE LOVE", "JOY KINDNESS") — no lowercase, no digits, no colon.
+DISPLAY_CAPS_RE = re.compile(r"^[A-Z][A-Z\s&'!,-]{2,40}$")
 
 COMMUNITY_HEAD_RE = re.compile(r'^(PRAYER REQUESTS|NOTES AND ANNOUNCEMENTS|Music Team\b)')
 
@@ -392,6 +395,8 @@ def parse_announcements(lines):
             items.append({'heading': heading, 'text': body, 'kind': kind})
         elif any(BOX_CREDITS_RE.search(l.text) for l in para):
             continue          # stray hymn-credits lines — not announcements
+        elif all(DISPLAY_CAPS_RE.fullmatch(l.text) for l in para):
+            continue          # poster display-text fragments
         elif items:
             items[-1]['text'] += ' ' + text
         else:
@@ -692,9 +697,12 @@ def parse(extracted, opts=None):
                     classified = True
                 elif any(BOX_CREDITS_RE.search(l.text) for l in box):
                     pass      # hymn copyright block — discarded (see above)
-                elif first.runs and first.runs[0].b and first.runs[0].i:
+                elif first.runs and first.runs[0].b and first.runs[0].i \
+                        and len(first.runs[0].text.strip()) >= 8:
                     guide['specialEvents'].append(parse_special_event(box))
                     classified = True
+                elif all(DISPLAY_CAPS_RE.fullmatch(l.text) for l in box):
+                    pass      # poster display-text fragments — not content
                 elif CALENDAR_BLOCK_RE.match(first.text):
                     guide['announcements'].append({
                         'heading': 'This Week', 'kind': 'note',
