@@ -236,40 +236,41 @@ def convert_pdf(pdf_path, date_override=None, source_name=None):
         if not guide['dateISO']:
             raise ValueError('no service date found in the PDF — convert it '
                              'manually with bin/wg-convert and hand-edit guide.json')
-        out_dir = os.path.join(PUBLIC, guide['dateISO'])
-        replaced = os.path.exists(os.path.join(out_dir, 'index.html'))
-        os.makedirs(out_dir, exist_ok=True)
-        cover_dest = None
-        if extracted.cover_path and not guide.get('suppressCover'):
-            cover_dest = os.path.join(out_dir, 'cover' + os.path.splitext(extracted.cover_path)[1])
-            shutil.copyfile(extracted.cover_path, cover_dest)
-        for fl in guide.get('flyers') or []:
-            fl['image'] = f"flyer-{fl['page']}.jpg"
-            render_page_image(pdf_path, fl['page'], os.path.join(out_dir, fl['image']))
-        # Re-conversions can produce fewer flyers (e.g. a page reclassified
-        # as engraved music) — drop images the new guide no longer references,
-        # and stale covers when the guide suppresses one (else a later
-        # re-render would resurrect it from disk).
-        current = {fl['image'] for fl in guide.get('flyers') or []}
-        for f in os.listdir(out_dir):
-            if re.fullmatch(r'flyer-\d+\.jpg', f) and f not in current:
-                os.unlink(os.path.join(out_dir, f))
-            elif guide.get('suppressCover') and re.fullmatch(r'cover\.(jpe?g|png|webp)', f):
-                os.unlink(os.path.join(out_dir, f))
-        with open(os.path.join(out_dir, 'guide.json'), 'w', encoding='utf-8') as fh:
-            json.dump(guide, fh, indent=2, ensure_ascii=False)
-            fh.write('\n')
-        # Retain the uploaded PDF so parser upgrades can re-convert
-        # server-side (the Re-convert admin action) without a re-upload.
-        source_dest = os.path.join(out_dir, 'source.pdf')
-        if os.path.abspath(pdf_path) != os.path.abspath(source_dest):
-            shutil.copyfile(pdf_path, source_dest)
-        html = render(guide, church,
-                      banner_path=os.path.join(ROOT, 'assets', 'banner.png'),
-                      cover_path=cover_dest, flyer_dir=out_dir)
-        with open(os.path.join(out_dir, 'index.html'), 'w', encoding='utf-8') as fh:
-            fh.write(html)
-        return guide, replaced
+        with PUBLISH_LOCK:
+            out_dir = os.path.join(PUBLIC, guide['dateISO'])
+            replaced = os.path.exists(os.path.join(out_dir, 'index.html'))
+            os.makedirs(out_dir, exist_ok=True)
+            cover_dest = None
+            if extracted.cover_path and not guide.get('suppressCover'):
+                cover_dest = os.path.join(out_dir, 'cover' + os.path.splitext(extracted.cover_path)[1])
+                shutil.copyfile(extracted.cover_path, cover_dest)
+            for fl in guide.get('flyers') or []:
+                fl['image'] = f"flyer-{fl['page']}.jpg"
+                render_page_image(pdf_path, fl['page'], os.path.join(out_dir, fl['image']))
+            # Re-conversions can produce fewer flyers (e.g. a page
+            # reclassified as engraved music) — drop images the new guide no
+            # longer references, and stale covers when the guide suppresses
+            # one (else a later re-render would resurrect it from disk).
+            current = {fl['image'] for fl in guide.get('flyers') or []}
+            for f in os.listdir(out_dir):
+                if re.fullmatch(r'flyer-\d+\.jpg', f) and f not in current:
+                    os.unlink(os.path.join(out_dir, f))
+                elif guide.get('suppressCover') and re.fullmatch(r'cover\.(jpe?g|png|webp)', f):
+                    os.unlink(os.path.join(out_dir, f))
+            with open(os.path.join(out_dir, 'guide.json'), 'w', encoding='utf-8') as fh:
+                json.dump(guide, fh, indent=2, ensure_ascii=False)
+                fh.write('\n')
+            # Retain the uploaded PDF so parser upgrades can re-convert
+            # server-side (the Re-convert admin action) without a re-upload.
+            source_dest = os.path.join(out_dir, 'source.pdf')
+            if os.path.abspath(pdf_path) != os.path.abspath(source_dest):
+                shutil.copyfile(pdf_path, source_dest)
+            html = render(guide, church,
+                          banner_path=os.path.join(ROOT, 'assets', 'banner.png'),
+                          cover_path=cover_dest, flyer_dir=out_dir)
+            with open(os.path.join(out_dir, 'index.html'), 'w', encoding='utf-8') as fh:
+                fh.write(html)
+            return guide, replaced
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -288,6 +289,17 @@ def load_church():
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 CONVERT_Q = queue.Queue()
+# Extraction/OCR parallelize across worker threads (the work is all
+# subprocesses); publishing into public/<date>/ is serialized so two jobs
+# never interleave writes.
+PUBLISH_LOCK = threading.Lock()
+
+
+def convert_workers():
+    configured = (ENV.get('CONVERT_WORKERS') or '').strip()
+    if configured.isdigit() and int(configured) > 0:
+        return int(configured)
+    return min(4, max(1, (os.cpu_count() or 1) - 1))
 
 
 def job_update(jid, **kw):
@@ -356,11 +368,11 @@ def convert_worker():
 
 def queue_snapshot():
     """Live queue state for the admin page and /api/status: how many jobs
-    wait, and which file is converting right now."""
+    wait, and which files are converting right now (one per worker)."""
     with JOBS_LOCK:
         waiting = sum(1 for j in JOBS.values() if j.get('status') == 'queued')
-        conv = next(({k: v for k, v in j.items() if k != 'path'}
-                     for j in JOBS.values() if j.get('status') == 'converting'), None)
+        conv = [{k: v for k, v in j.items() if k != 'path'}
+                for j in JOBS.values() if j.get('status') == 'converting']
     return {'waiting': waiting, 'converting': conv}
 
 
@@ -909,12 +921,14 @@ async function pollBanner() {
     if (res.status === 401) return;        // signed out — stop quietly
     const data = await res.json();
     const qs = data.queue || {};
-    if (!qs.waiting && !qs.converting) {
+    const conv = qs.converting || [];
+    if (!qs.waiting && !conv.length) {
       if (!running && !queue.length) location.reload();
       return;
     }
     _qb.innerHTML = qs.waiting + ' file' + (qs.waiting === 1 ? '' : 's') + ' waiting' +
-      (qs.converting ? ', converting <b>' + (qs.converting.file || '…') + '</b>' : '');
+      (conv.length ? ', converting ' +
+        conv.map(c => '<b>' + (c.file || '…') + '</b>').join(', ') : '');
   } catch (e) { /* transient — keep polling */ }
   setTimeout(pollBanner, 3000);
 }
@@ -1254,8 +1268,11 @@ def recent_uploads_html():
     snap = queue_snapshot()
     active = ''
     if snap['waiting'] or snap['converting']:
-        conv = snap['converting']
-        now = f", converting <b>{esc(conv.get('file') or '…')}</b>" if conv else ''
+        now = ''
+        if snap['converting']:
+            names = ', '.join(f"<b>{esc(c.get('file') or '…')}</b>"
+                              for c in snap['converting'])
+            now = f', converting {names}'
         active = (f'<p class="warn"><b>Server queue active:</b> '
                   f'<span id="queuebanner">{snap["waiting"]} '
                   f'file{"s" if snap["waiting"] != 1 else ""} '
@@ -1974,7 +1991,12 @@ def main():
     args = ap.parse_args()
     os.makedirs(PUBLIC, exist_ok=True)
     rescan_spool()
-    threading.Thread(target=convert_worker, daemon=True, name='convert-worker').start()
+    workers = convert_workers()
+    for i in range(workers):
+        threading.Thread(target=convert_worker, daemon=True,
+                         name=f'convert-worker-{i + 1}').start()
+    print(f'conversion workers: {workers} '
+          f'(set CONVERT_WORKERS in .env to override)', flush=True)
     server = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     token = 'set' if ENV.get('UPLOAD_TOKEN') else 'NOT SET (uploads disabled)'
     print(f'lwcc serving {PUBLIC} on http://{args.host}:{args.port} — upload token {token}',
