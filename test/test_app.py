@@ -169,7 +169,7 @@ try:
     assert js['replaced'] is True and js['warnings'] == [], js
     assert not os.listdir(os.path.join(scratch, 'queue')), 'spool emptied after success'
     snap = json.loads(body)['queue']
-    assert snap['waiting'] == 0 and snap['converting'] is None, \
+    assert snap['waiting'] == 0 and snap['converting'] == [], \
         'status responses carry a live queue snapshot'
 
     # An explicit ?date= pins publishing regardless of what the PDF says
