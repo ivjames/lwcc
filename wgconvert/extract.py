@@ -55,6 +55,29 @@ class Page:
     height: int
     lines: list = field(default_factory=list)
     ocr_text: str | None = None
+    engraved: bool = False      # a sheet-music score page — deliberately
+                                # not reproduced: no OCR, no flyer image
+
+
+# Real-text residue on an engraved score page: hymn credits and the title
+# over the staves. Absorbed with the engraving.
+CREDITS_LINE_RE = re.compile(
+    r'©|℗|CCLI|Public Domain|Used by [Pp]ermission|\b[Ww]ords\b|\b[Mm]usic\b'
+    r'|\b[Tt]ext:|\b[Tt]une:|arr\.')
+
+
+def page_is_engraved(raw_items, lines):
+    """A page whose extracted text is (almost) all engraving: music fonts or
+    the engraving ink color, with at most a few surviving real-text lines
+    that are credits or short display text (the hymn title)."""
+    if not any(it['font'].color == ENGRAVING_COLOR
+               or MUSIC_FONT_RE.search(it['font'].family)
+               for it in raw_items):
+        return False
+    if len(lines) > 4:
+        return False
+    return all(CREDITS_LINE_RE.search(l.text) or len(l.text.split()) <= 6
+               for l in lines)
 
 
 def _run(cmd):
@@ -190,7 +213,7 @@ def _finish_line(cluster, page):
     )
 
 
-def _find_cover_image(pdf_path, out_dir):
+def _find_cover_image(pdf_path, out_dir, page1_blank=False):
     """Pick the weekly cover art: the largest embedded image on page 1 that is
     not masthead-shaped (the banner is a fixed ~4:1 strip; covers are
     photo-shaped)."""
@@ -216,12 +239,16 @@ def _find_cover_image(pdf_path, out_dir):
     if not file:
         return None
     if os.path.splitext(file)[1].lower() not in ('.png', '.jpg', '.jpeg', '.webp'):
-        # Scanned guides embed CCITT-fax/JBIG2 streams pdfimages can't hand
-        # us as web images — render the whole page instead; on a scan, page 1
-        # *is* the cover.
         for f in os.listdir(out_dir):
             if f.startswith('img-'):
                 os.unlink(os.path.join(out_dir, f))
+        if not page1_blank:
+            # A text guide whose cover art came through in an unusable
+            # stream: better no cover than the whole page as one.
+            return None
+        # Scanned guides embed CCITT-fax/JBIG2 streams pdfimages can't hand
+        # us as web images — render the whole page instead; on a scan, page 1
+        # *is* the cover.
         dest = os.path.join(out_dir, 'cover.jpg')
         render_page_image(pdf_path, 1, dest)
         return dest
@@ -285,10 +312,15 @@ def extract(pdf_path, work_dir, ocr=True):
     _run(['pdftohtml', '-xml', '-i', '-q', pdf_path, xml_path])
     with open(xml_path, encoding='utf-8') as fh:
         xml = fh.read()
-    pages = [Page(number=p['number'], width=p['width'], height=p['height'],
-                  lines=_build_lines(p))
-             for p in _parse_xml(xml)]
-    image_pages = [p for p in pages if not p.lines]
+    pages = []
+    for p in _parse_xml(xml):
+        page = Page(number=p['number'], width=p['width'], height=p['height'],
+                    lines=_build_lines(p))
+        if page_is_engraved(p['items'], page.lines):
+            page.engraved = True
+            page.lines = []          # credits/title residue goes with the score
+        pages.append(page)
+    image_pages = [p for p in pages if not p.lines and not p.engraved]
     if image_pages:
         if ocr and _has_tesseract():
             for p in image_pages:
@@ -299,5 +331,7 @@ def extract(pdf_path, work_dir, ocr=True):
                 f'pages {nums} have no text layer and tesseract is not installed — '
                 'content on them (e.g. the Prayer Journal) will be missing. '
                 'Install tesseract-ocr.')
-    cover_path = _find_cover_image(pdf_path, work_dir)
+    cover_path = _find_cover_image(
+        pdf_path, work_dir,
+        page1_blank=not (pages and pages[0].lines))
     return Extracted(pages=pages, cover_path=cover_path, warnings=warnings)

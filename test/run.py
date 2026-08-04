@@ -74,6 +74,24 @@ assert _lab and _lab['label'] == 'HYMN', 'stray backtick prefix tolerated'
 assert kind_for('CLOSING HYMN') == 'music' and known_label('CLOSING HYMN')
 assert known_label('OPENING WORDS') and known_label('DECLARATION OF FORGIVENESS')
 
+# Engraved score pages: music-font/engraving-color pages are deliberately
+# not reproduced — never OCR'd, never flyer-ized, and their credits/title
+# residue goes with the score. Pages without engraving marks are untouched.
+from types import SimpleNamespace as NS  # noqa: E402
+from wgconvert.extract import page_is_engraved, CREDITS_LINE_RE  # noqa: E402
+_eng_items = [{'font': NS(color='#231f20', family='Maestro')}]
+_txt_items = [{'font': NS(color='#000000', family='Georgia')}]
+assert page_is_engraved(_eng_items, [])
+assert page_is_engraved(_eng_items, [
+    _line('Shepherd Me, O God'),
+    _line('Words: Marty Haugen © 1986 GIA Publications, Inc.')])
+assert not page_is_engraved(_txt_items, []), 'no engraving marks → image page'
+assert not page_is_engraved(_eng_items, [
+    _line(f'line {i} of real prose content that keeps this page textual')
+    for i in range(5)]), 'pages with real content are never absorbed'
+assert CREDITS_LINE_RE.search('Music by John Fluker, arr. D. Albulario')
+assert not CREDITS_LINE_RE.search('We pray for the whole world.')
+
 # 2024 festival/stewardship vocabulary and recurring page furniture
 from wgconvert.parse import FIXTURE_BLOCK_RE  # noqa: E402
 assert kind_for('PRELUDE') == 'music' and kind_for('HOMILY') == 'message'
@@ -235,6 +253,7 @@ try:
         assert expected in labels2, f'communion label {expected!r} parsed'
     gt = [o for o in g2['order'] if o.get('label') == 'The Great Thanksgiving']
     assert len(gt) == 1 and gt[0]['body'], 'eucharistic prayer labeled, not flagged'
+    assert g2['flyers'] == [], 'no music or content page adopted as a flyer'
     assert not any(o['kind'] == 'item' and o['label'] is None for o in g2['order'])
     assert [m['name'] for m in g2['musicTeam']] == [
         'Dave Albulario', 'Jennifer Rudy', 'John Fluker', 'Hannah Yi', 'Jim Orr']

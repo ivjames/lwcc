@@ -46,6 +46,10 @@ def materialize_flyers(pdf, guide, out_dir):
     for fl in guide.get('flyers') or []:
         fl['image'] = f"flyer-{fl['page']}.jpg"
         render_page_image(pdf, fl['page'], os.path.join(out_dir, fl['image']))
+    current = {fl['image'] for fl in guide.get('flyers') or []}
+    for f in os.listdir(out_dir):
+        if re.fullmatch(r'flyer-\d+\.jpg', f) and f not in current:
+            os.unlink(os.path.join(out_dir, f))
 
 
 def convert_one(pdf, args, church, render_html=True):

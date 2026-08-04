@@ -360,6 +360,7 @@ try:
     # parser passes without a re-upload — and lands in the history record.
     status, body = req('/admin', headers=COOKIE)
     assert b'Re-convert' in body, 'admin lists the re-convert action'
+    assert b'id="reconverteverything"' in body, 'full-sweep re-convert offered'
     with open(os.path.join(out_dir, 'index.html'), 'w') as fh:
         fh.write('stale')
     status, body = action('reconvert', '2026-08-02')

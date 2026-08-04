@@ -244,6 +244,12 @@ def convert_pdf(pdf_path, date_override=None, source_name=None):
         for fl in guide.get('flyers') or []:
             fl['image'] = f"flyer-{fl['page']}.jpg"
             render_page_image(pdf_path, fl['page'], os.path.join(out_dir, fl['image']))
+        # Re-conversions can produce fewer flyers (e.g. a page reclassified
+        # as engraved music) — drop images the new guide no longer references.
+        current = {fl['image'] for fl in guide.get('flyers') or []}
+        for f in os.listdir(out_dir):
+            if re.fullmatch(r'flyer-\d+\.jpg', f) and f not in current:
+                os.unlink(os.path.join(out_dir, f))
         with open(os.path.join(out_dir, 'guide.json'), 'w', encoding='utf-8') as fh:
             json.dump(guide, fh, indent=2, ensure_ascii=False)
             fh.write('\n')
@@ -869,29 +875,32 @@ if (_rv) _rv.addEventListener('click', async () => {
   location.reload();
 });
 
-const _ra = document.getElementById('reconvertall');
-if (_ra) _ra.addEventListener('click', async () => {
-  const dates = _ra.dataset.dates.split(' ').filter(Boolean);
-  if (!confirm('Re-convert ' + dates.length + ' Sundays from their stored PDFs? ' +
-               'Hand-edits to them will be overwritten.')) return;
-  _ra.disabled = true;
-  _ra.textContent = 'Queueing ' + dates.length + ' re-conversions…';
-  try {
-    const res = await fetch('/api/reconvert-batch', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({dates: dates}),
-    });
-    const data = await res.json().catch(() => ({ok: false}));
-    if (!data.ok) throw new Error(data.error || res.statusText);
-    // The server queue takes it from here — the banner shows live progress
-    // and this page can be closed.
-    location.reload();
-  } catch (e) {
-    alert('Could not queue re-conversions: ' + e.message);
-    _ra.disabled = false;
-  }
-});
+for (const _id of ['reconvertall', 'reconverteverything']) {
+  const _btn = document.getElementById(_id);
+  if (!_btn) continue;
+  _btn.addEventListener('click', async () => {
+    const dates = _btn.dataset.dates.split(' ').filter(Boolean);
+    if (!confirm('Re-convert ' + dates.length + ' Sundays from their stored PDFs? ' +
+                 'Hand-edits to them will be overwritten.')) return;
+    _btn.disabled = true;
+    _btn.textContent = 'Queueing ' + dates.length + ' re-conversions…';
+    try {
+      const res = await fetch('/api/reconvert-batch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dates: dates}),
+      });
+      const data = await res.json().catch(() => ({ok: false}));
+      if (!data.ok) throw new Error(data.error || res.statusText);
+      // The server queue takes it from here — the banner shows live progress
+      // and this page can be closed.
+      location.reload();
+    } catch (e) {
+      alert('Could not queue re-conversions: ' + e.message);
+      _btn.disabled = false;
+    }
+  });
+}
 
 async function retryFailed(btn, name) {
   const date = btn.parentElement.querySelector('.retrydate').value;
@@ -1055,11 +1064,20 @@ def manage_html():
             f'{reconvert}'
             f'<button class="mini" onclick="adminAction(\'unpublish\', \'{d}\')">'
             f'Unpublish</button></li>')
+    src_dates = [d for d in dates
+                 if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf'))]
+    sweep = ''
+    if src_dates:
+        sweep = (f'<p><button class="mini" id="reconverteverything" '
+                 f'data-dates="{" ".join(src_dates)}">Re-convert every Sunday '
+                 f'({len(src_dates)})</button> — full sweep through the server '
+                 f'queue after a converter fix, flagged or not.</p>')
     out.append('<div class="card"><p><b>Published Sundays</b> — re-render '
                'rebuilds the page from its guide.json (after hand-edits); '
                're-convert re-runs the converter on the stored source PDF '
                '(picks up parser upgrades, discards hand-edits); '
                'unpublish sets the folder aside without deleting it.</p>'
+               + sweep +
                '<ul style="list-style:none;padding-left:0">'
                + ''.join(rows) + '</ul></div>')
     return '\n'.join(out)
