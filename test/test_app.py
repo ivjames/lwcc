@@ -135,6 +135,7 @@ try:
     assert status == 200, (status, body)
     data = json.loads(body)
     assert data['ok'] and data['dateISO'] == '2026-08-02' and data['warnings'] == [], data
+    assert data.get('notes') == [], 'responses carry the informational tier too'
     assert data['replaced'] is False, data
 
     # Re-uploading the same Sunday overwrites in place and says so. The

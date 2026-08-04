@@ -315,11 +315,12 @@ def convert_worker():
         try:
             guide, replaced = convert_pdf(path, override, fname)
             audit_log({'ok': True, **extra, 'dateISO': guide['dateISO'],
-                       'replaced': replaced, 'warnings': guide['warnings']})
+                       'replaced': replaced, 'warnings': guide['warnings'],
+                       **({'notes': guide['notes']} if guide.get('notes') else {})})
             job_update(jid, status='warned' if guide['warnings'] else 'ok',
                        date=guide['date'], dateISO=guide['dateISO'],
                        url=f"/{guide['dateISO']}/", replaced=replaced,
-                       warnings=guide['warnings'])
+                       warnings=guide['warnings'], notes=guide.get('notes') or [])
             os.unlink(path)
             if os.path.exists(path + '.meta'):
                 os.unlink(path + '.meta')
@@ -545,6 +546,7 @@ def sanitize_guide(sub, existing):
 
     g['flyers'] = existing.get('flyers') or []
     g['warnings'] = existing.get('warnings') or []
+    g['notes'] = existing.get('notes') or []
     if existing.get('reviewedWarnings'):
         g['reviewedWarnings'] = existing['reviewedWarnings']
     return g
@@ -717,6 +719,7 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   td,th{padding:6px 8px;border-bottom:1px solid #d8d6c7;text-align:left;vertical-align:top}
   .st{white-space:nowrap}
   ul.warns{margin:4px 0 0;padding-left:18px;color:#8a6410}
+  ul.notes{margin:4px 0 0;padding-left:18px;color:#54574a;font-size:.92em}
   #summary{font-weight:700;margin-top:10px}
   button.mini{padding:4px 12px;font-size:.82em;margin-left:8px;background:#3f6b82}
   a.minilink{background:#3f6b82;color:#fff;text-decoration:none;border-radius:8px;
@@ -779,6 +782,10 @@ function resultCell(q, i) {
   if (q.data.warnings.length) {
     html += '<ul class="warns">' +
       q.data.warnings.map(w => '<li>' + w + '</li>').join('') + '</ul>';
+  }
+  if (q.data.notes && q.data.notes.length) {
+    html += '<ul class="notes">' +
+      q.data.notes.map(n => '<li>' + n + '</li>').join('') + '</ul>';
   }
   return html;
 }
@@ -1090,6 +1097,10 @@ def history_rows(entries):
             status_html += ' <span class="warn">(replaced existing)</span>'
         if e.get('dateOverride'):
             status_html += ' <span class="warn">(date set manually)</span>'
+        if e.get('notes'):
+            detail += ('<ul class="notes">'
+                       + ''.join(f'<li>{esc(n)}</li>' for n in e['notes'])
+                       + '</ul>')
         rows.append(f'<tr><td class="st">{when}</td><td>{esc(e.get("file") or "—")}</td>'
                     f'<td class="st">{sunday}</td><td class="st">{status_html}</td>'
                     f'<td>{detail}</td></tr>')
@@ -1196,6 +1207,7 @@ def history_page(query):
   td,th{{padding:6px 8px;border-bottom:1px solid #d8d6c7;text-align:left;vertical-align:top}}
   .st{{white-space:nowrap}}
   ul.warns{{margin:4px 0 0;padding-left:18px;color:#8a6410}}
+  ul.notes{{margin:4px 0 0;padding-left:18px;color:#54574a;font-size:.92em}}
 </style></head>
 <body>
 <h1>Upload History</h1>
@@ -1651,7 +1663,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             audit_log({'ok': True, **({'file': fname} if fname else {}),
                        **({'dateOverride': override} if override else {}),
                        'dateISO': guide['dateISO'],
-                       'replaced': replaced, 'warnings': guide['warnings']})
+                       'replaced': replaced, 'warnings': guide['warnings'],
+                       **({'notes': guide['notes']} if guide.get('notes') else {})})
             self.send_json({
                 'ok': True,
                 'date': guide['date'],
@@ -1659,6 +1672,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 'url': f"/{guide['dateISO']}/",
                 'replaced': replaced,
                 'warnings': guide['warnings'],
+                'notes': guide.get('notes') or [],
             })
         except Exception as e:                        # surface, don't 500-blank
             traceback.print_exc()
@@ -1741,7 +1755,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # belong in the /admin/history record.
                 audit_log({'ok': True, 'file': f'{date}/source.pdf',
                            'reconvert': True, 'dateISO': guide['dateISO'],
-                           'replaced': replaced, 'warnings': guide['warnings']})
+                           'replaced': replaced, 'warnings': guide['warnings'],
+                           **({'notes': guide['notes']} if guide.get('notes') else {})})
                 self.send_json({'ok': True, 'date': guide['dateISO'],
                                 'warnings': guide['warnings']})
                 return

@@ -74,10 +74,13 @@ def convert_one(pdf, args, church, render_html=True):
 
         if not args.quiet:
             n = len(guide['warnings'])
-            extra = f", {n} warning(s)" if n else ''
+            nn = len(guide.get('notes') or [])
+            extra = (f", {n} warning(s)" if n else '') + (f", {nn} note(s)" if nn else '')
             target = f'{out_dir}/' if render_html else f'{out_dir}/guide.json'
             print(f"✔ {os.path.basename(pdf)} -> {target}  ({guide['date'] or 'date unknown'}{extra})")
         report_warnings(os.path.basename(pdf), guide['warnings'])
+        for note in guide.get('notes') or []:
+            print(f'  ℹ {os.path.basename(pdf)}: {note}', file=sys.stderr)
         return 1 if guide['warnings'] else 0
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

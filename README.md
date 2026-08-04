@@ -120,9 +120,13 @@ Three stages, each usable on its own:
    worship (labels, titles, speakers, prayers with their line structure,
    scripture with verse-number superscripts, congregation refrains, stage
    directions), music team, prayer requests, announcements, special events,
-   and the prayer journal. Unrecognized labels are parsed generically and
-   reported as warnings — nothing is silently dropped, so drift in older
-   guides surfaces immediately (exit code 1 when any file warns).
+   and the prayer journal. Nothing is silently dropped; findings are
+   two-tier: **warnings** mean content may be lost or wrong (missing
+   sections in a text guide, an uncorroborated OCR date — these flag the
+   review panel and exit code 1) while **notes** mean content was kept but
+   classified loosely (unrecognized label parsed generically, unlabeled
+   block kept) — recorded in guide.json and the upload history, no review
+   demanded.
 
 3. **render** (`wgconvert/render.py`) — `guide.json` + `config/church.json` +
    `template/guide.css` → `index.html` in the approved design: sticky section

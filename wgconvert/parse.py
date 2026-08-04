@@ -651,6 +651,10 @@ def parse_journal(ocr_text):
 
 def parse(extracted, opts=None):
     warnings = list(extracted.warnings or [])
+    # Two tiers: warnings mean content may be lost or wrong (review-worthy);
+    # notes mean content was kept but classified loosely (recorded in the
+    # history, no review needed).
+    notes = []
     guide = {
         'date': None, 'dateISO': None, 'season': None,
         'series': None, 'coverAlt': None,
@@ -658,6 +662,7 @@ def parse(extracted, opts=None):
         'musicTeam': [], 'prayerRequests': [], 'announcements': [],
         'specialEvents': [], 'flyers': [], 'journal': None,
         'warnings': warnings,
+        'notes': notes,
     }
 
     text_pages = [p for p in extracted.pages if p.lines]
@@ -775,7 +780,7 @@ def parse(extracted, opts=None):
                 # generic fallback — fine, but let the operator know
                 if not re.search(r'QUESTIONS? FOR REFLECTION|INVITATION TO THE OFFERING',
                                  label['label']):
-                    warnings.append(
+                    notes.append(
                         f'unrecognized order-of-worship label "{label["label"]}" (parsed generically)')
             guide['order'].append(item)
             current = {'item': item, 'kind': kind, 'lines': []}
@@ -813,7 +818,7 @@ def parse(extracted, opts=None):
                         'titleQuoted': False, 'who': None, 'note': None, 'body': []}
                 guide['order'].append(item)
                 current = {'item': item, 'kind': 'plain', 'lines': []}
-                warnings.append(
+                notes.append(
                     f'page {l.page}: content without a label kept as an untitled '
                     f'item (starts: "{l.text[:50]}")')
         current['lines'].append(l)
@@ -907,7 +912,7 @@ def parse(extracted, opts=None):
                             'heading': title_case(head), 'kind': 'note',
                             'text': hm.group(2).strip()})
                         continue
-                    warnings.append(
+                    notes.append(
                         f'page {first.page}: unclassified block starting '
                         f'"{first.text[:50]}" (added as announcement)')
                     guide['announcements'].append({
