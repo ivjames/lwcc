@@ -240,17 +240,21 @@ def convert_pdf(pdf_path, date_override=None, source_name=None):
         replaced = os.path.exists(os.path.join(out_dir, 'index.html'))
         os.makedirs(out_dir, exist_ok=True)
         cover_dest = None
-        if extracted.cover_path:
+        if extracted.cover_path and not guide.get('suppressCover'):
             cover_dest = os.path.join(out_dir, 'cover' + os.path.splitext(extracted.cover_path)[1])
             shutil.copyfile(extracted.cover_path, cover_dest)
         for fl in guide.get('flyers') or []:
             fl['image'] = f"flyer-{fl['page']}.jpg"
             render_page_image(pdf_path, fl['page'], os.path.join(out_dir, fl['image']))
         # Re-conversions can produce fewer flyers (e.g. a page reclassified
-        # as engraved music) — drop images the new guide no longer references.
+        # as engraved music) — drop images the new guide no longer references,
+        # and stale covers when the guide suppresses one (else a later
+        # re-render would resurrect it from disk).
         current = {fl['image'] for fl in guide.get('flyers') or []}
         for f in os.listdir(out_dir):
             if re.fullmatch(r'flyer-\d+\.jpg', f) and f not in current:
+                os.unlink(os.path.join(out_dir, f))
+            elif guide.get('suppressCover') and re.fullmatch(r'cover\.(jpe?g|png|webp)', f):
                 os.unlink(os.path.join(out_dir, f))
         with open(os.path.join(out_dir, 'guide.json'), 'w', encoding='utf-8') as fh:
             json.dump(guide, fh, indent=2, ensure_ascii=False)

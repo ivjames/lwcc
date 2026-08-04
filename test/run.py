@@ -71,6 +71,17 @@ _lab = match_label(_line('HYMN-CAROL: “O Come, All Ye Faithful” / “Adéste
 assert _lab and kind_for(_lab['label']) == 'music', 'hyphenated hymn label'
 _lab = match_label(_line('`HYMN: “Let There Be Peace on Earth”'))
 assert _lab and _lab['label'] == 'HYMN', 'stray backtick prefix tolerated'
+
+# Early-2023 Title Case labels — accepted when the vocabulary knows the
+# uppercased phrase; prose protects itself (periods break the lookahead,
+# long candidates are rejected, dialog turns are not in the vocabulary).
+_lab = match_label(_line('Opening Prayer – Kelly Frankiewicz M.Div'))
+assert _lab and _lab['label'] == 'OPENING PRAYER' and _lab['who'] == 'Kelly Frankiewicz M.Div'
+_lab = match_label(_line('The Sharing of the Cup'))
+assert _lab and _lab['label'] == 'THE SHARING OF THE CUP'
+assert match_label(_line('Scripture says God loves you.')) is None
+assert match_label(_line('People: Let me be Your change agent.')) is None
+assert match_label(_line('Pastor: The table is ready.')) is None
 assert kind_for('CLOSING HYMN') == 'music' and known_label('CLOSING HYMN')
 assert known_label('OPENING WORDS') and known_label('DECLARATION OF FORGIVENESS')
 
@@ -95,8 +106,9 @@ assert not CREDITS_LINE_RE.search('We pray for the whole world.')
 # 2024 festival/stewardship vocabulary and recurring page furniture
 from wgconvert.parse import FIXTURE_BLOCK_RE  # noqa: E402
 assert kind_for('PRELUDE') == 'music' and kind_for('HOMILY') == 'message'
-assert kind_for('PASTOR') == 'litany' and kind_for('CONGREGATION') == 'litany'
-assert known_label('LITURGIST') and known_label('STEWARDSHIP MOMENT')
+assert not known_label('PASTOR') and not known_label('CONGREGATION'), \
+    'dialog turns are not sections — they stay inside the liturgy body'
+assert known_label('STEWARDSHIP MOMENT')
 assert known_label('THE CEREMONY OF CANDLE LIGHTING')
 assert known_label('LIGHTING OF THE PASCHAL CANDLE')
 assert known_label('FLOWERING THE EASTER CROSS') and known_label('EASTER PROCLAMATION')

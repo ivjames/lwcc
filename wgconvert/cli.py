@@ -62,7 +62,7 @@ def convert_one(pdf, args, church, render_html=True):
         os.makedirs(out_dir, exist_ok=True)
 
         cover_dest = None
-        if extracted.cover_path:
+        if extracted.cover_path and not guide.get('suppressCover'):
             cover_dest = os.path.join(
                 out_dir, 'cover' + os.path.splitext(extracted.cover_path)[1])
             shutil.copyfile(extracted.cover_path, cover_dest)
