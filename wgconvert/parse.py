@@ -586,6 +586,18 @@ def journal_from_lines(lines):
 
 GPS_PAGE_RE = re.compile(r'Notes from the Service|My Prayers this week', re.I)
 
+# An engraved hymn scanned/photocopied into the bulletin: its lyrics OCR as
+# hyphenated syllables ("chan - nel of your peace"), which prose never
+# produces. Measured on real scans: score pages hit 12-25 breaks, every
+# other page type hits 0.
+SYLLABLE_BREAK_RE = re.compile(r'[a-z] ?- [a-z]')
+SCORE_CREDITS_RE = re.compile(r'©|Music by|CCLI|OCP|Transcribed|Adapted')
+
+
+def score_page(ocr_text):
+    breaks = len(SYLLABLE_BREAK_RE.findall(ocr_text))
+    return breaks >= 4 or (breaks >= 2 and bool(SCORE_CREDITS_RE.search(ocr_text)))
+
 
 def text_journal_blob(page_lines):
     """A text-layer Prayer Journal page, reshaped into the paragraph blob
@@ -933,6 +945,10 @@ def parse(extracted, opts=None):
             else:
                 warnings.append(
                     f'page {p.number}: Prayer Journal page found but could not be parsed from OCR')
+        elif score_page(p.ocr_text):
+            # The music-not-reproduced rule, extended to scans.
+            notes.append(f'page {p.number}: engraved score page '
+                         f'(music is not reproduced)')
         elif not (re.search(r'\bGROW\b[\s\S]*\bPRAY\b[\s\S]*\bSTUDY\b', p.ocr_text)
                   or GPS_PAGE_RE.search(p.ocr_text)):
             # GPS notes card: the three caps headings (case-sensitive — any

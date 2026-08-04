@@ -128,6 +128,17 @@ assert _j['morning'].startswith('Loving God') and _j['morning'].endswith('Amen.'
 assert _j['midday'].startswith('Consider The Upper Room')
 assert _j['evening'].startswith('Holy One')
 
+# Engraved scores scanned into a bulletin: hyphenated-syllable OCR is the
+# tell; prose pages never trip it.
+from wgconvert.parse import score_page  # noqa: E402
+assert score_page('Make me a chan - nel of your peace. Where there is hat - red, '
+                  'let me bring your love. in - ju - ry, your par - don, Lord')
+assert score_page('Let there be peace on earth, and let it be - gin with me. '
+                  'With ev - ery step I take. Music by Sy Miller © 1955 Jan-Lee Music')
+assert not score_page('We commend all of life to you, O God, knowing that you '
+                      'hear our twenty-first-century prayers and answer them.')
+assert not score_page('Anthem: “Shine, Jesus, Shine”\nPRAYER FOR ILLUMINATION')
+
 # Scanned guides (no text layer anywhere): the date comes from page-image
 # OCR and every page publishes as an image. Memorial lifespan dates
 # ("July 21, 1944 – November 29, 2025") never become the service date.
