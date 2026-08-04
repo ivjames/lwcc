@@ -320,6 +320,13 @@ def extract(pdf_path, work_dir, ocr=True):
             page.engraved = True
             page.lines = []          # credits/title residue goes with the score
         pages.append(page)
+    if not any(len(p.lines) > 2 for p in pages):
+        # No page has real text density: this is a scan. A stray annotation
+        # typed onto one page ("Hannah Yi, pianist") must not make the
+        # document count as a text guide — clear it and let OCR read the
+        # whole page, annotation included.
+        for p in pages:
+            p.lines = []
     image_pages = [p for p in pages if not p.lines and not p.engraved]
     if image_pages:
         if ocr and _has_tesseract():
