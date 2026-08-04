@@ -110,6 +110,13 @@ wg-convert convert backlog/*.pdf -o site/       # batch a whole folder
 
 Three stages, each usable on its own:
 
+Scanned bulletins (no text layer) are read too: pages whose OCR reads as
+typed prose are structured through the normal parser — order of worship,
+prayers, announcements and all — with a note recording the OCR provenance
+(the Original PDF link shows the printed page for verification). Art and
+poster pages stay images; engraved scores are dropped as everywhere else.
+A scan that is mostly art publishes as a facsimile of page images.
+
 1. **extract** (`wgconvert/extract.py`) — `pdftohtml -xml` gives every text run with
    font, color, position, and bold/italic flags. Sheet-music engraving noise
    (Finale exports: note glyphs, lyric syllables, composer credits) is dropped

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import re
 
+from .extract import Line, Run
+
 from .known_texts import KNOWN_TEXTS
 
 MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
@@ -83,7 +85,9 @@ LABEL_KINDS = [
     (re.compile(r'^PRELUDE'), 'music'),
     (re.compile(r'^HOMILY'), 'message'),
     (re.compile(r'CANDLE LIGHTING|PASCHAL CANDLE'), 'plain'),
-    (re.compile(r'^(PASTOR|LITURGIST|CONGREGATION)\b'), 'litany'),
+    # PASTOR/LITURGIST/CONGREGATION/LEADER/PEOPLE are dialog turns, not
+    # sections — deliberately absent so title-case turns stay inside the
+    # liturgy body they belong to.
     (re.compile(r'^PRESENTATION OF'), 'plain'),
     (re.compile(r'^STEWARDSHIP'), 'plain'),
     (re.compile(r'^FLOWERING'), 'plain'),
@@ -200,18 +204,30 @@ def match_label(l):
         # vocabulary constraint is what keeps this fallback honest.
         text = l.text.strip().lstrip('`\\').strip()
         lm = re.match(r"([A-Z][A-Z'’&|\s-]{2,}?)\s*(?=:|[–—]|[“\"]|$)", text)
-        cand = re.sub(r'\s+', ' ', lm.group(1)).strip() if lm else ''
+        cand = re.sub(r'\s+', ' ', lm.group(1)).strip().rstrip('- ') if lm else ''
         if cand and known_label(cand) \
                 and not all(w.lower() in SMALL_WORDS for w in cand.split(' ')):
             label = cand
             rest = text[lm.end():].lstrip(': ').strip()
         else:
-            tm = re.match(r"(Hymn|Closing Hymn|Offertory|Anthem|Special Music)"
-                          r"\s*:\s*(.*)$", text)
-            if not tm:
-                return None
-            label = tm.group(1).upper()
-            rest = tm.group(2)
+            # The early-2023 backlog prints labels in Title Case ("Opening
+            # Prayer – Kelly…", "The Sharing of the Cup"): accept short
+            # candidates the vocabulary knows once uppercased. Sentences
+            # protect themselves — trailing periods break the lookahead
+            # and long candidates are rejected.
+            tc = re.match(r"([A-Z][A-Za-z'’&\s]{2,38}?)\s*(?=:|[–—]|[“\"]|$)", text)
+            cand2 = re.sub(r'\s+', ' ', tc.group(1)).strip() if tc else ''
+            if cand2 and len(cand2.split()) <= 5 and known_label(cand2.upper()) \
+                    and not all(w.lower() in SMALL_WORDS for w in cand2.split(' ')):
+                label = cand2.upper()
+                rest = text[tc.end():].lstrip(': ').strip()
+            else:
+                tm = re.match(r"(Hymn|Closing Hymn|Offertory|Anthem|Special Music)"
+                              r"\s*:\s*(.*)$", text)
+                if not tm:
+                    return None
+                label = tm.group(1).upper()
+                rest = tm.group(2)
     if not title:
         tm = re.search(r'[“"](.+?)[”"]', rest)
         if tm:
@@ -400,7 +416,7 @@ def poster_residue(line_texts):
     return True
 
 COMMUNITY_HEAD_RE = re.compile(
-    r'^(PRAYER REQUESTS|NOTES AND ANNOUNCEMENTS|Notes and Announcements|Music Team\b)')
+    r'^\*?\s*(PRAYER REQUESTS|NOTES AND ANNOUNCEMENTS|Notes and Announcements|Music Team\b)')
 
 
 def split_boxes(lines):
@@ -599,6 +615,30 @@ def score_page(ocr_text):
     return breaks >= 4 or (breaks >= 2 and bool(SCORE_CREDITS_RE.search(ocr_text)))
 
 
+def ocr_lines(p):
+    """Pseudo-Lines from a typed scan's OCR text: page number, vertical
+    order, paragraph gaps (blank lines widen the gap so split_boxes sees
+    paragraphs), and bracket-only lines marked italic so stage directions
+    survive. Position and boldness are unknowable — label matching rides
+    the vocabulary fallback, which these bulletins' 2023-style labels use
+    anyway."""
+    lines = []
+    top = 0
+    for raw in (p.ocr_text or '').split('\n'):
+        t = ' '.join(raw.split())
+        # OCR renders the printed en dash as an ASCII hyphen; the label
+        # machinery splits attribution on [–—].
+        t = re.sub(r'(?<=\S) - (?=\S)', ' – ', t)
+        if not t:
+            top += 50
+            continue
+        italic = bool(re.fullmatch(r'\[.*\]', t))
+        lines.append(Line(page=p.number, top=top, bottom=top + 12, left=50,
+                          height=12, runs=[Run(text=t, i=italic)], text=t))
+        top += 20
+    return lines
+
+
 def text_journal_blob(page_lines):
     """A text-layer Prayer Journal page, reshaped into the paragraph blob
     parse_journal expects: paragraph breaks forced at the known section
@@ -678,6 +718,31 @@ def parse(extracted, opts=None):
     }
 
     text_pages = [p for p in extracted.pages if p.lines]
+    if not text_pages:
+        # A typed bulletin scanned without a text layer: the categories are
+        # all there — read them. Structure the pages whose OCR reads as
+        # prose; leave art/poster, score, journal, and GPS pages to the
+        # image pipeline; adopt the result only when enough known labels
+        # emerge (pure-art scans stay facsimiles).
+        candidates = []
+        for p in extracted.pages:
+            if not p.ocr_text or score_page(p.ocr_text) \
+                    or GPS_PAGE_RE.search(p.ocr_text) \
+                    or re.search(r'\bGROW\b[\s\S]*\bPRAY\b[\s\S]*\bSTUDY\b', p.ocr_text) \
+                    or re.search(r'Prayer Journal', p.ocr_text, re.I):
+                continue
+            if len(p.ocr_text.split()) < 60:
+                continue          # short display text — an art page
+            candidates.append((p, ocr_lines(p)))
+        hits = sum(1 for _, ls in candidates for l in ls if match_label(l))
+        if hits >= 4:
+            for p, ls in candidates:
+                p.lines = ls
+            text_pages = [p for p in extracted.pages if p.lines]
+            guide['suppressCover'] = True   # page 1 is content, not cover art
+            notes.append('structured from OCR of a scanned typed bulletin — '
+                         'text may carry OCR misreads; the Original PDF link '
+                         'shows the printed page')
     all_lines = [l for p in text_pages for l in p.lines]
 
     # -- page 1 header: date + season --------------------------------------
@@ -761,8 +826,8 @@ def parse(extracted, opts=None):
     community_start = -1
     while i < len(all_lines):
         l = all_lines[i]
-        if re.match(r'^Music Team\b', l.text) or re.match(r'^PRAYER REQUESTS', l.text) \
-                or re.match(r'^NOTES AND ANNOUNCEMENTS', l.text):
+        if re.match(r'^\*?\s*Music Team\b', l.text) or re.match(r'^PRAYER REQUESTS', l.text) \
+                or re.match(r'^(NOTES AND ANNOUNCEMENTS|Notes and Announcements)', l.text):
             community_start = i
             break
         if line_is_stage(l):
@@ -872,7 +937,7 @@ def parse(extracted, opts=None):
             pending = []
             for box in split_boxes(page_lines):
                 first = box[0]
-                if re.match(r'^Music Team\b', first.text):
+                if re.match(r'^\*?\s*Music Team\b', first.text):
                     guide['musicTeam'] = parse_music_team(box)
                     classified = True
                 elif re.match(r'^PRAYER REQUESTS', first.text):
@@ -936,7 +1001,7 @@ def parse(extracted, opts=None):
 
     # -- OCR pages: journal; GPS notes card is intentionally skipped --------
     for p in extracted.pages:
-        if not p.ocr_text:
+        if not p.ocr_text or p.lines:   # p.lines: structured from OCR above
             continue
         if re.search(r'Prayer Journal', p.ocr_text, re.I):
             guide['journal'] = parse_journal(p.ocr_text)
