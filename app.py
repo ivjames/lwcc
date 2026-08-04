@@ -796,6 +796,12 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   button.mini{padding:4px 12px;font-size:.82em;margin-left:8px;background:#3f6b82}
   a.minilink{background:#3f6b82;color:#fff;text-decoration:none;border-radius:8px;
     padding:4px 12px;font-size:.82em;margin-left:8px;font-family:Arial,Helvetica,sans-serif}
+  table.pub td{border-bottom:1px solid #eeece0}
+  table.pub td.acts{text-align:right;white-space:nowrap}
+  table.pub .mini,table.pub .minilink{margin-left:5px;padding:3px 9px;font-size:.78em}
+  table.pub tr.yr th{font-family:Arial,Helvetica,sans-serif;font-size:.9em;
+    letter-spacing:2px;color:#054253;border-bottom:2px solid #0a5a6e;padding-top:16px}
+  table.pub tr.yr th span{color:#54574a;font-weight:400;letter-spacing:0}
 </style></head>
 <body>
 <h1>Publish Worship Guides</h1>
@@ -1100,7 +1106,7 @@ def manage_html():
     if flagged:
         items = []
         for d, m in sorted(flagged, reverse=True):
-            warns = ''.join(f'<li class="warn">{w}</li>' for w in m['warnings'])
+            warns = ''.join(f'<li class="warn">{esc(w)}</li>' for w in m['warnings'])
             items.append(
                 f'<li style="margin:10px 0"><a href="/{d}/">{date_label(d)}</a> '
                 f'<button class="mini" onclick="adminAction(\'review\', \'{d}\')">'
@@ -1130,21 +1136,29 @@ def manage_html():
                    + ''.join(items) + '</ul></div>')
 
     rows = []
+    year = None
     for d in dates:
+        if d[:4] != year:
+            year = d[:4]
+            n = sum(1 for x in dates if x[:4] == year)
+            rows.append(f'<tr class="yr"><th colspan="3">{year} '
+                        f'<span>({n} Sunday{"s" if n > 1 else ""})</span></th></tr>')
         m = metas.get(d)
-        title = f' — {m["title"]}' if m and m['title'] else ''
+        title = esc(m['title']) if m and m['title'] else ''
         reconvert = ''
         if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf')):
             reconvert = (f'<button class="mini" onclick="adminAction(\'reconvert\', '
                          f'\'{d}\')">Re-convert</button>')
         rows.append(
-            f'<li style="margin:7px 0"><a href="/{d}/">{d}</a>{title} '
+            f'<tr><td class="st"><a href="/{d}/">{d}</a></td>'
+            f'<td>{title}</td>'
+            f'<td class="acts">'
             f'<a class="minilink" href="/admin/edit/{d}">Edit</a>'
             f'<button class="mini" onclick="adminAction(\'rerender\', \'{d}\')">'
             f'Re-render</button>'
             f'{reconvert}'
             f'<button class="mini" onclick="adminAction(\'unpublish\', \'{d}\')">'
-            f'Unpublish</button></li>')
+            f'Unpublish</button></td></tr>')
     src_dates = [d for d in dates
                  if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf'))]
     sweep = ''
@@ -1159,8 +1173,8 @@ def manage_html():
                '(picks up parser upgrades, discards hand-edits); '
                'unpublish sets the folder aside without deleting it.</p>'
                + sweep +
-               '<ul style="list-style:none;padding-left:0">'
-               + ''.join(rows) + '</ul></div>')
+               '<div style="overflow-x:auto"><table class="pub"><tbody>'
+               + ''.join(rows) + '</tbody></table></div></div>')
     return '\n'.join(out)
 
 
