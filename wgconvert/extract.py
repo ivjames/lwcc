@@ -217,6 +217,13 @@ def _find_cover_image(pdf_path, out_dir, page1_blank=False):
     """Pick the weekly cover art: the largest embedded image on page 1 that is
     not masthead-shaped (the banner is a fixed ~4:1 strip; covers are
     photo-shaped)."""
+    if page1_blank:
+        # A scan: page 1 *is* the cover, and pdfimages hands back raw
+        # embedded streams that can arrive inverted or mangled (bilevel
+        # scans especially). Render the page like every other scan page.
+        dest = os.path.join(out_dir, 'cover.jpg')
+        render_page_image(pdf_path, 1, dest)
+        return dest
     listing = _run(['pdfimages', '-list', pdf_path])
     rows = []
     for line in listing.split('\n')[2:]:
@@ -239,19 +246,12 @@ def _find_cover_image(pdf_path, out_dir, page1_blank=False):
     if not file:
         return None
     if os.path.splitext(file)[1].lower() not in ('.png', '.jpg', '.jpeg', '.webp'):
+        # A text guide whose cover art came through in an unusable stream:
+        # better no cover than the whole page as one.
         for f in os.listdir(out_dir):
             if f.startswith('img-'):
                 os.unlink(os.path.join(out_dir, f))
-        if not page1_blank:
-            # A text guide whose cover art came through in an unusable
-            # stream: better no cover than the whole page as one.
-            return None
-        # Scanned guides embed CCITT-fax/JBIG2 streams pdfimages can't hand
-        # us as web images — render the whole page instead; on a scan, page 1
-        # *is* the cover.
-        dest = os.path.join(out_dir, 'cover.jpg')
-        render_page_image(pdf_path, 1, dest)
-        return dest
+        return None
     dest = os.path.join(out_dir, 'cover' + os.path.splitext(file)[1])
     os.rename(os.path.join(out_dir, file), dest)
     # Clean up the other page-1 extractions (banner + mask copies).
