@@ -90,6 +90,26 @@ assert FIXTURE_BLOCK_RE.match('continues!')
 assert not FIXTURE_BLOCK_RE.match('Our church picnic continues this week')
 assert not FIXTURE_BLOCK_RE.match('Let us pray for the needs of the world.')
 
+# Text-layer Prayer Journal pages (2026 winter/spring editions) rebuild the
+# OCR-style paragraph blob and reuse parse_journal.
+from wgconvert.parse import parse_journal, text_journal_blob  # noqa: E402
+_jpage = [_line(t) for t in (
+    '\\', 'Prayer Journal',
+    'Use this prayer in your time with God each day.',
+    'Household Prayer: Morning',
+    'Loving God, as this new day dawns, may your Spirit',
+    'guide my feet. Amen.',
+    'Consider The Upper Room Daily Devotional',
+    'as a resource for Midday Prayer.',
+    'Household Prayer: Evening',
+    'Holy One, thank you for the gift of this day. Amen.',
+)]
+_j = parse_journal(text_journal_blob(_jpage))
+assert _j and _j['subtitle'] == 'Use this prayer in your time with God each day.'
+assert _j['morning'].startswith('Loving God') and _j['morning'].endswith('Amen.')
+assert _j['midday'].startswith('Consider The Upper Room')
+assert _j['evening'].startswith('Holy One')
+
 # Scanned guides (no text layer anywhere): the date comes from page-image
 # OCR and every page publishes as an image. Memorial lifespan dates
 # ("July 21, 1944 – November 29, 2025") never become the service date.

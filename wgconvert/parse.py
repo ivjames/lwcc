@@ -587,6 +587,18 @@ def journal_from_lines(lines):
 GPS_PAGE_RE = re.compile(r'Notes from the Service|My Prayers this week', re.I)
 
 
+def text_journal_blob(page_lines):
+    """A text-layer Prayer Journal page, reshaped into the paragraph blob
+    parse_journal expects: paragraph breaks forced at the known section
+    markers (visual box gaps are unreliable — the title, subtitle, and
+    morning prayer often share one box)."""
+    blob = ' '.join(l.text for l in page_lines).replace('\\', ' ').strip()
+    blob = re.sub(r'\s*(Household Prayer:\s*(?:Morning|Evening)'
+                  r'|Consider The Upper Room|Use this prayer)',
+                  r'\n\n\1', blob)
+    return re.sub(r'^\s*(Prayer Journal)\s*', r'\1\n\n', blob)
+
+
 def parse_journal(ocr_text):
     paras = [re.sub(r'\s+', ' ', p).strip()
              for p in re.split(r'\n\s*\n', ocr_text)]
@@ -828,6 +840,16 @@ def parse(extracted, opts=None):
                 continue
             boxable.append((page_num, page_lines))
         for page_num, page_lines in boxable:
+            # 2026 winter/spring editions print the Prayer Journal as real
+            # text, not the usual flattened screenshot — rebuild the OCR-style
+            # paragraph blob from the line boxes and reuse the same parser.
+            if guide['journal'] is None and any(
+                    re.fullmatch(r'\\?\s*Prayer Journal', l.text.strip())
+                    for l in page_lines):
+                j = parse_journal(text_journal_blob(page_lines))
+                if j:
+                    guide['journal'] = j
+                    continue
             classified = False
             poster_seen = False
             pending = []
