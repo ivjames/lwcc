@@ -171,13 +171,13 @@ def match_label(l):
     in the same run ("PRAYER OF CONFESSION – Taylor White"), or title-case
     music labels ("Hymn:", "Offertory:") — accepted when the vocabulary
     knows them."""
-    if l.left > 160 or not l.runs:
+    if l.left > 320 or not l.runs:
         return None
     first = l.runs[0]
     label = title = None
     rest = ''
     m = re.fullmatch(r"\s*([A-Z][A-Z'’&|\s]{2,}?):?\s*(?:[“\"](.+?)[”\"])?\s*",
-                     first.text) if first.b else None
+                     first.text) if (first.b and l.left <= 160) else None
     if m:
         label = re.sub(r'\s+', ' ', m.group(1)).strip()
         if all(w.lower() in SMALL_WORDS for w in label.split(' ')):
@@ -195,17 +195,19 @@ def match_label(l):
         # "— Speaker[, role]" attribution.
         rest = ''.join(r.text for r in l.runs[1:])
     else:
-        if l.left > 105:
-            return None
-        lm = re.match(r"\s*([A-Z][A-Z'’&|\s]{2,}?)\s*(?=:|[–—]|[“\"]|$)", l.text)
+        # Centered labels sit well right of the margin; junk prefixes
+        # (backticks, emoji-placeholder backslashes) precede some. The
+        # vocabulary constraint is what keeps this fallback honest.
+        text = l.text.strip().lstrip('`\\').strip()
+        lm = re.match(r"([A-Z][A-Z'’&|\s-]{2,}?)\s*(?=:|[–—]|[“\"]|$)", text)
         cand = re.sub(r'\s+', ' ', lm.group(1)).strip() if lm else ''
         if cand and known_label(cand) \
                 and not all(w.lower() in SMALL_WORDS for w in cand.split(' ')):
             label = cand
-            rest = l.text[lm.end():].lstrip(': ').strip()
+            rest = text[lm.end():].lstrip(': ').strip()
         else:
-            tm = re.match(r"\s*(Hymn|Closing Hymn|Offertory|Anthem|Special Music)"
-                          r"\s*:\s*(.*)$", l.text)
+            tm = re.match(r"(Hymn|Closing Hymn|Offertory|Anthem|Special Music)"
+                          r"\s*:\s*(.*)$", text)
             if not tm:
                 return None
             label = tm.group(1).upper()
@@ -868,12 +870,26 @@ def parse(extracted, opts=None):
                     if poster_seen and poster_residue(l.text for l in box):
                         continue    # residue between poster display blocks
                     first = box[0]
+                    text = tidy_prose(' '.join(runs_to_markup(l.runs) for l in box))
+                    # A shouted heading with a colon (or exclamation) leading
+                    # body text is an announcement in its own box — file it
+                    # under its heading, no review needed.
+                    hm = re.match(r'^(?:<b>)?([^:<!]{2,80}?)[:!](?:</b>)?\s*([\s\S]+)$', text)
+                    head = (re.sub(r'<[^>]+>', '', hm.group(1))
+                            .replace('&amp;', '&').strip()) if hm else ''
+                    alpha = [c for c in head if c.isalpha()]
+                    if head and alpha \
+                            and sum(c.isupper() for c in alpha) / len(alpha) >= 0.6 \
+                            and hm.group(2).strip():
+                        guide['announcements'].append({
+                            'heading': title_case(head), 'kind': 'note',
+                            'text': hm.group(2).strip()})
+                        continue
                     warnings.append(
                         f'page {first.page}: unclassified block starting '
                         f'"{first.text[:50]}" (added as announcement)')
                     guide['announcements'].append({
-                        'heading': None, 'kind': 'note',
-                        'text': tidy_prose(' '.join(runs_to_markup(l.runs) for l in box))})
+                        'heading': None, 'kind': 'note', 'text': text})
     else:
         warnings.append('no community section (Music Team / Prayer Requests / Announcements) found')
 

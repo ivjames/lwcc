@@ -58,6 +58,19 @@ _lab = match_label(_line('Offertory: “Alleluia! Give the Glory” David Albula
 assert _lab and _lab['label'] == 'OFFERTORY' and _lab['who'] == 'David Albulario'
 assert match_label(_line('You are welcome here.')) is None
 assert match_label(_line('THANKS BE TO GOD')) is None, 'unknown caps prose is not a label'
+
+# Centered labels (well right of the margin), hyphenated and junk-prefixed
+# variants — accepted only because the vocabulary knows them.
+_lab = match_label(_line('ENTRANCE PROCESSIONAL – “All Glory, Laud, and Honor”', left=220))
+assert _lab and _lab['label'] == 'ENTRANCE PROCESSIONAL', 'centered label accepted'
+_lab = match_label(_line('Hymn: “Hosanna, Loud Hosanna”', left=250))
+assert _lab and _lab['label'] == 'HYMN'
+assert match_label(_line('REJOICE ALWAYS', left=220)) is None, \
+    'centered unknown caps still not a label'
+_lab = match_label(_line('HYMN-CAROL: “O Come, All Ye Faithful” / “Adéste Fidéles”'))
+assert _lab and kind_for(_lab['label']) == 'music', 'hyphenated hymn label'
+_lab = match_label(_line('`HYMN: “Let There Be Peace on Earth”'))
+assert _lab and _lab['label'] == 'HYMN', 'stray backtick prefix tolerated'
 assert kind_for('CLOSING HYMN') == 'music' and known_label('CLOSING HYMN')
 assert known_label('OPENING WORDS') and known_label('DECLARATION OF FORGIVENESS')
 
