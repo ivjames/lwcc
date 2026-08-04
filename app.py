@@ -641,12 +641,12 @@ def archive_page():
         meta = guide_meta(d)
         line = f'<a href="/{d}/">{date_label(d)}</a>'
         if meta and meta['title']:
-            line += f" — <b>{meta['title']}</b>"
+            line += f" — <b>{esc(meta['title'])}</b>"
             if meta['by']:
-                line += f" <span style=\"color:#54574a\">({meta['by']})</span>"
+                line += f" <span style=\"color:#54574a\">({esc(meta['by'])})</span>"
         if meta and meta['refs']:
             line += ('<br><span style="color:#54574a;font-size:.9em">'
-                     + ' · '.join(meta['refs']) + '</span>')
+                     + ' · '.join(esc(r) for r in meta['refs']) + '</span>')
         if meta and meta['warnings']:
             n = len(meta['warnings'])
             line += (f'<br><span class="warn" style="font-size:.9em">⚠ needs review '
@@ -712,8 +712,7 @@ def search_page(query):
                     end = min(len(meta['blob']), pos + 160)
                     snippet = ('…' if start else '') + meta['blob'][start:end] + \
                               ('…' if end < len(meta['blob']) else '')
-                    snippet = (snippet.replace('&', '&amp;').replace('<', '&lt;')
-                               .replace('>', '&gt;'))
+                    snippet = esc(snippet)
                     for w in words:
                         if len(w) < 3:      # don't blanket-highlight "a"/"of"/"an"
                             continue
@@ -721,23 +720,22 @@ def search_page(query):
                                          snippet, flags=re.I)
             head = f'<a href="/{d}/">{date_label(d)}</a>'
             if title:
-                head += f' — <b>{title}</b>'
+                head += f' — <b>{esc(title)}</b>'
             if by:
-                head += f' <span style="color:#54574a">({by})</span>'
+                head += f' <span style="color:#54574a">({esc(by)})</span>'
             if refs:
                 head += ('<br><span style="color:#54574a;font-size:.9em">'
-                         + ' · '.join(refs) + '</span>')
+                         + ' · '.join(esc(r) for r in refs) + '</span>')
             body = f'<br><span style="font-size:.92em">{snippet}</span>' if snippet else ''
             results.append(f'    <li style="margin:12px 0">{head}{body}</li>')
     if q and not results:
-        listing = '<p>No results for <b>' + (q.replace('&', '&amp;')
-                  .replace('<', '&lt;').replace('>', '&gt;')) + '</b>.</p>'
+        listing = f'<p>No results for <b>{esc(q)}</b>.</p>'
     elif results:
         joined = '\n'.join(results)
         listing = f'<ul style="list-style:none;padding-left:0">\n{joined}\n</ul>'
     else:
         listing = '<p>Search sermon titles, scripture, speakers, or any text from the guides.</p>'
-    q_attr = q.replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;')
+    q_attr = esc(q)
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -757,7 +755,7 @@ def search_page(query):
 
 def login_page(next_path, error=None):
     err = f'<p class="err">{error}</p>\n' if error else ''
-    next_attr = next_path.replace('&', '&amp;').replace('"', '&quot;')
+    next_attr = esc(next_path)
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -826,6 +824,7 @@ __REVIEW__
    <a href="/admin/logout">Sign out</a></p>
 <script>
 const $ = id => document.getElementById(id);
+const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 let queue = [];   // {file, status, data, error}
 let running = false;
 
@@ -853,17 +852,17 @@ function resultCell(q, i) {
     return '<input type="date" class="qdate" data-i="' + i + '" value="' + (q.override || '') +
       '" title="Optional: publish under this exact date (memorial programs). Blank = the date printed in the PDF.">';
   }
-  if (q.status === 'failed') return '<span class="err">' + q.error + '</span>';
+  if (q.status === 'failed') return '<span class="err">' + escHtml(q.error) + '</span>';
   if (!q.data) return '';
   let html = '<a href="' + q.data.url + '">' + q.data.date + '</a>';
   if (q.data.replaced) html += ' <span class="warn">(replaced existing)</span>';
   if (q.data.warnings.length) {
     html += '<ul class="warns">' +
-      q.data.warnings.map(w => '<li>' + w + '</li>').join('') + '</ul>';
+      q.data.warnings.map(w => '<li>' + escHtml(w) + '</li>').join('') + '</ul>';
   }
   if (q.data.notes && q.data.notes.length) {
     html += '<ul class="notes">' +
-      q.data.notes.map(n => '<li>' + n + '</li>').join('') + '</ul>';
+      q.data.notes.map(n => '<li>' + escHtml(n) + '</li>').join('') + '</ul>';
   }
   return html;
 }
@@ -871,7 +870,7 @@ function resultCell(q, i) {
 function renderQueue() {
   const tb = $('queue').querySelector('tbody');
   tb.innerHTML = queue.map((q, i) =>
-    '<tr><td>' + q.file.name + '</td><td class="st">' + statusCell(q) +
+    '<tr><td>' + escHtml(q.file.name) + '</td><td class="st">' + statusCell(q) +
     '</td><td>' + resultCell(q, i) + '</td></tr>').join('');
   $('queue').hidden = !queue.length;
   $('go').disabled = running || !queue.some(q => q.status === 'queued');
@@ -934,7 +933,7 @@ async function pollBanner() {
     }
     _qb.innerHTML = qs.waiting + ' file' + (qs.waiting === 1 ? '' : 's') + ' waiting' +
       (conv.length ? ', converting ' +
-        conv.map(c => '<b>' + (c.file || '…') + '</b>').join(', ') : '');
+        conv.map(c => '<b>' + escHtml(c.file || '…') + '</b>').join(', ') : '');
   } catch (e) { /* transient — keep polling */ }
   setTimeout(pollBanner, 3000);
 }
@@ -985,7 +984,8 @@ for (const _id of ['reconvertall', 'reconverteverything']) {
   });
 }
 
-async function retryFailed(btn, name) {
+async function retryFailed(btn) {
+  const name = btn.dataset.name;
   const date = btn.parentElement.querySelector('.retrydate').value;
   btn.disabled = true;
   const res = await fetch('/api/retry', {
@@ -1179,7 +1179,8 @@ def manage_html():
 
 
 def esc(s):
-    return (str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
+    return (str(s).replace('&', '&amp;').replace('<', '&lt;')
+            .replace('>', '&gt;').replace('"', '&quot;'))
 
 
 def upload_status(e):
@@ -1264,7 +1265,8 @@ def failed_uploads_html():
         items.append(
             f'<li style="margin:8px 0"><code>{esc(disp)}</code> '
             f'<input type="date" class="retrydate"> '
-            f'<button class="mini" onclick="retryFailed(this, \'{n}\')">Retry</button></li>')
+            f'<button class="mini" data-name="{esc(n)}" '
+            f'onclick="retryFailed(this)">Retry</button></li>')
     return ('<div class="card"><p><b>Failed conversions</b> — these PDFs are '
             'kept on the server, so after a parser fix just retry (no '
             're-upload). Set the date to force publishing under a specific '
