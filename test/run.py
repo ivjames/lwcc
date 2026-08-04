@@ -128,6 +128,9 @@ _g = parse(_scan)
 assert _g['dateISO'] == '2023-01-22', _g['dateISO']
 assert any('page-image OCR' in w for w in _g['warnings'])
 assert [f['page'] for f in _g['flyers']] == [1, 2], _g['flyers']
+assert not any('no community section' in w or 'no order-of-worship' in w
+               or 'no Prayer Journal' in w for w in _g['warnings']), \
+    'scan-inherent absences are not review items'
 _mem = Extracted(pages=[
     Page(number=1, width=612, height=792, lines=[],
          ocr_text='Taylor White\nJuly 21, 1944 – November 29, 2025\n'

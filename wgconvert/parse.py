@@ -912,7 +912,9 @@ def parse(extracted, opts=None):
                         f'"{first.text[:50]}" (added as announcement)')
                     guide['announcements'].append({
                         'heading': None, 'kind': 'note', 'text': text})
-    else:
+    elif text_pages:
+        # Only meaningful for text guides — a scan's community content is in
+        # its page images.
         warnings.append('no community section (Music Team / Prayer Requests / Announcements) found')
 
     # -- OCR pages: journal; GPS notes card is intentionally skipped --------
@@ -938,10 +940,11 @@ def parse(extracted, opts=None):
         by = guide['series']['by'] or ''
         guide['coverAlt'] = f"Message series artwork: {guide['series']['title']}. {by}".strip()
 
-    # sanity checks the operator will want to hear about
-    if not guide['order']:
+    # sanity checks the operator will want to hear about. Scans publish as
+    # page images (no items is their nature), and plenty of editions simply
+    # have no Prayer Journal — a journal page that FAILED to parse warns
+    # specifically above.
+    if not guide['order'] and text_pages:
         warnings.append('no order-of-worship items found')
     guide['flyers'].sort(key=lambda f: f['page'])
-    if not guide['journal']:
-        warnings.append('no Prayer Journal parsed')
     return guide

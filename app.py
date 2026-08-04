@@ -199,10 +199,26 @@ def guide_with_nav(d):
     return html
 
 
-def convert_pdf(pdf_path, date_override=None):
+def filename_matches_date(fname, date_iso):
+    """True when the upload's filename (or stored source path) independently
+    carries the same date — 'WG 010823.pdf', 'WG_2023_01_08.pdf',
+    'WG 4.16.23 PDF.pdf', '2023-01-08/source.pdf' all corroborate
+    2023-01-08. Used to clear the OCR-date verify warning: two independent
+    sources agreeing leaves nothing for a human to check."""
+    if not fname or not date_iso:
+        return False
+    y, mo, d = date_iso.split('-')
+    pats = (rf'{y}[ _.-]?{mo}[ _.-]?{d}',       # 20230108 / 2023-01-08 / 2023_01_08
+            rf'\b{mo}{d}{y[2:]}\b',             # 010823
+            rf'\b{int(mo)}\.{int(d)}\.{y[2:]}\b')   # 4.16.23
+    return any(re.search(p, fname) for p in pats)
+
+
+def convert_pdf(pdf_path, date_override=None, source_name=None):
     """Run the wgconvert pipeline and publish into public/<dateISO>/.
     date_override (YYYY-MM-DD) wins over whatever the parser finds — for
-    memorial programs whose printed dates are not the service date."""
+    memorial programs whose printed dates are not the service date.
+    source_name (the uploaded filename) corroborates OCR-read dates."""
     church = load_church()
     work_dir = tempfile.mkdtemp(prefix='wg-upload-')
     try:
@@ -212,6 +228,9 @@ def convert_pdf(pdf_path, date_override=None):
             guide['dateISO'] = date_override
             if not guide['date']:
                 guide['date'] = date_label(date_override)
+        elif guide['dateISO'] and filename_matches_date(source_name, guide['dateISO']):
+            guide['warnings'] = [w for w in guide['warnings']
+                                 if 'service date read from page-image OCR' not in w]
         if not guide['dateISO']:
             raise ValueError('no service date found in the PDF — convert it '
                              'manually with bin/wg-convert and hand-edit guide.json')
@@ -294,7 +313,7 @@ def convert_worker():
                  **({'dateOverride': override} if override else {})}
         job_update(jid, status='converting')
         try:
-            guide, replaced = convert_pdf(path, override)
+            guide, replaced = convert_pdf(path, override, fname)
             audit_log({'ok': True, **extra, 'dateISO': guide['dateISO'],
                        'replaced': replaced, 'warnings': guide['warnings']})
             job_update(jid, status='warned' if guide['warnings'] else 'ok',
@@ -803,6 +822,23 @@ $('queue').addEventListener('change', e => {
   if (e.target.classList.contains('qdate')) queue[+e.target.dataset.i].override = e.target.value;
 });
 
+const _rv = document.getElementById('reviewall');
+if (_rv) _rv.addEventListener('click', async () => {
+  const dates = _rv.dataset.dates.split(' ').filter(Boolean);
+  if (!confirm('Mark all ' + dates.length + ' listed Sundays reviewed? ' +
+               'Their warnings move to reviewedWarnings in each guide.json.')) return;
+  _rv.disabled = true;
+  for (const d of dates) {
+    _rv.textContent = 'Reviewing ' + d + '…';
+    await fetch('/api/review', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({date: d}),
+    }).catch(() => {});
+  }
+  location.reload();
+});
+
 const _ra = document.getElementById('reconvertall');
 if (_ra) _ra.addEventListener('click', async () => {
   const dates = _ra.dataset.dates.split(' ').filter(Boolean);
@@ -959,6 +995,11 @@ def manage_html():
                 f'data-dates="{" ".join(bulk)}">Re-convert all listed '
                 f'({len(bulk)})</button> — after a parser upgrade, re-runs the '
                 f'converter on each flagged Sunday&#8217;s stored PDF.</p>')
+        all_dates = ' '.join(d for d, _ in sorted(flagged, reverse=True))
+        bulk_html += (
+            f'<p><button class="mini" id="reviewall" data-dates="{all_dates}">'
+            f'Mark all reviewed ({len(flagged)})</button> — accept every '
+            f'listed Sunday as-is (warnings move to reviewedWarnings).</p>')
         out.append('<div class="card"><p><b>Needs review</b> — published with '
                    'parser warnings. Check the page; if it reads right, mark it '
                    'reviewed (warnings are kept in guide.json under '
@@ -1606,7 +1647,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             tmp.write(body)
             tmp.close()
-            guide, replaced = convert_pdf(tmp.name, override)
+            guide, replaced = convert_pdf(tmp.name, override, fname)
             audit_log({'ok': True, **({'file': fname} if fname else {}),
                        **({'dateOverride': override} if override else {}),
                        'dateISO': guide['dateISO'],
@@ -1695,7 +1736,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                     'uploaded before retention; re-upload it once'},
                                    status=404)
                     return
-                guide, replaced = convert_pdf(src)
+                guide, replaced = convert_pdf(src, None, f'{date}/source.pdf')
                 # No 'action' key: reconversions are conversions, so they
                 # belong in the /admin/history record.
                 audit_log({'ok': True, 'file': f'{date}/source.pdf',

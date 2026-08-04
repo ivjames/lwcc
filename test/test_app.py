@@ -16,6 +16,17 @@ import urllib.request
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 SAMPLE = os.path.join(ROOT, 'samples', 'WG_2026_08_02.pdf')
+
+# Filename-date corroboration (clears the OCR verify warning): every naming
+# style in the backlog, plus the reconvert source path.
+sys.path.insert(0, ROOT)
+import app as app_mod  # noqa: E402
+assert app_mod.filename_matches_date('WG 010823.pdf', '2023-01-08')
+assert app_mod.filename_matches_date('WG_2025_04_13.pdf', '2025-04-13')
+assert app_mod.filename_matches_date('WG 4.16.23 PDF.pdf', '2023-04-16')
+assert app_mod.filename_matches_date('2023-10-01/source.pdf', '2023-10-01')
+assert not app_mod.filename_matches_date('WG 010823.pdf', '2023-01-15')
+assert not app_mod.filename_matches_date(None, '2023-01-08')
 PORT = 8972
 BASE = f'http://127.0.0.1:{PORT}'
 TOKEN = 'test-token-123'
@@ -298,6 +309,7 @@ try:
     assert b'Published Sundays' in body and b'adminAction' in body, 'management panel present'
     assert b'id="reconvertall"' in body and b'2026-08-09' in body, \
         'bulk re-convert offered for flagged Sundays with stored sources'
+    assert b'id="reviewall"' in body, 'bulk mark-reviewed offered too'
 
     # Mark reviewed: warnings move to reviewedWarnings, panel and badge clear.
     def action(name, date, token=TOKEN):
