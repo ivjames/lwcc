@@ -33,6 +33,11 @@ becomes the front page.
   no re-upload is needed. Fails closed when no token is configured.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
+Every published Sunday links its printed original: the week-nav strip on a
+guide page offers "Original PDF" (`/<date>/original` — an embedded viewer
+with a link back to the converted page and a download link) whenever the
+source is stored.
+
 Every published Sunday keeps its uploaded PDF as `public/<date>/source.pdf`,
 so after a parser upgrade the admin panel's **Re-convert** action re-runs the
 converter server-side — no re-upload needed. Sundays uploaded before

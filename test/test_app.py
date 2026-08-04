@@ -382,6 +382,19 @@ try:
     status, body = action('reconvert', '2026-08-09')
     assert status == 404, 'no stored source -> not found, with guidance'
 
+    # Guide <-> original PDF navigation: the week-nav links to /DATE/original
+    # when a source is stored; the viewer page links back and embeds the PDF.
+    status, body = req('/2026-08-02/')
+    assert status == 200 and b'/2026-08-02/original' in body, 'guide links its PDF'
+    status, body = req('/2026-08-02/original')
+    assert status == 200 and b'source.pdf' in body \
+        and 'worship guide'.encode() in body, 'viewer embeds PDF and links back'
+    status, body = req('/2026-08-09/')
+    assert status == 200 and b'/2026-08-09/original' not in body, \
+        'no stored source -> no link'
+    status, body = req('/2026-08-09/original')
+    assert status == 404, 'viewer 404s without a stored source'
+
     # Form editor: gated like the rest of admin; page loads with embedded
     # data; save sanitizes server-side, preserves protected fields, re-renders.
     status, body = req('/admin/edit/2026-08-09')

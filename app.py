@@ -177,6 +177,8 @@ def weeknav_html(d):
         parts.append(f'<a rel="prev" href="/{older}/">&larr; {date_label(older)}</a>')
     parts.append('<a href="/archive">All Sundays</a>')
     parts.append('<a href="/search">Search</a>')
+    if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf')):
+        parts.append(f'<a href="/{d}/original">Original PDF</a>')
     if newer:
         parts.append(f'<a rel="next" href="/{newer}/">{date_label(newer)} &rarr;</a>')
     return ('<div class="weeknav" style="font-family:Arial,Helvetica,sans-serif;'
@@ -585,6 +587,31 @@ PAGE_STYLE = """
   button:disabled{opacity:.5;cursor:default}
   .warn{color:#8a6410}.err{color:#a20816}.ok{color:#1f7a44}
   code{background:#f1efe6;padding:2px 6px;border-radius:4px;font-size:.85em}
+"""
+
+
+def original_page(d):
+    """/DATE/original — the scanned/printed PDF exactly as uploaded, with a
+    bar back to the converted page (the PDF itself can't carry links)."""
+    label = date_label(d)
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Original PDF — {label}</title><style>
+  html,body{{height:100%;margin:0}}
+  .bar{{font-family:Arial,Helvetica,sans-serif;font-size:.9rem;display:flex;
+    gap:8px 22px;justify-content:center;flex-wrap:wrap;padding:12px 20px;
+    background:#f4f2ea;border-bottom:1px solid #d8d6c7;box-sizing:border-box}}
+  .bar a{{color:#a20816}}
+  embed{{display:block;width:100%;height:calc(100% - 45px);border:0}}
+</style></head>
+<body>
+<div class="bar">
+  <a href="/{d}/">&larr; {label} &mdash; worship guide</a>
+  <a href="/{d}/source.pdf" download="WG {d}.pdf">Download the PDF</a>
+</div>
+<embed src="/{d}/source.pdf" type="application/pdf">
+</body></html>
 """
 
 
@@ -1669,6 +1696,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
         if '/.' in path:
             self.send_error(404, 'Not Found')
+            return
+        m = re.fullmatch(r'/(\d{4}-\d{2}-\d{2})/original/?', path)
+        if m:
+            if os.path.exists(os.path.join(PUBLIC, m.group(1), 'source.pdf')):
+                self.send_page(original_page(m.group(1)))
+            else:
+                self.send_error(404, 'Not Found')
             return
         m = re.fullmatch(r'/(\d{4}-\d{2}-\d{2})', path)
         if m:
