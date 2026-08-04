@@ -307,11 +307,13 @@ try:
     g02['warnings'] = ['synthetic warning for the batch test']
     json.dump(g02, open(gj02, 'w'))
     status, body = req('/api/reconvert-batch',
-                       data=json.dumps({'dates': ['2026-08-02', '1999-01-01']}).encode(),
+                       data=json.dumps({'dates': ['2026-08-02', '2026-08-02',
+                                                  '1999-01-01']}).encode(),
                        headers={**COOKIE, 'Content-Type': 'application/json'})
     assert status == 200, (status, body)
     rb = json.loads(body)
     assert rb['ok'] and rb['queued'] == 1 and rb['skipped'] == ['1999-01-01'], rb
+    assert rb['alreadyQueued'] == ['2026-08-02'], 'duplicate dates never stack'
     qs = None
     for _ in range(240):
         status, body = req('/api/status?ids=', headers=COOKIE)
@@ -327,6 +329,10 @@ try:
     entries = [json.loads(l) for l in open(log_path)]
     assert any(e.get('action') == 'reconvert-batch' and e.get('queued') == 1
                for e in entries), 'batch queueing audited'
+    status, body = req('/api/reconvert-clear', data=b'{}',
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body) == {'ok': True, 'cleared': 0}, \
+        'clearing an idle queue is a no-op'
 
     gj = os.path.join(scratch, 'public', '2026-08-09', 'guide.json')
     g = json.load(open(gj))

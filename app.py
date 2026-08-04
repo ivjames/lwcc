@@ -311,7 +311,7 @@ def convert_worker():
         jid = CONVERT_Q.get()
         with JOBS_LOCK:
             job = dict(JOBS.get(jid) or {})
-        if not job.get('path'):
+        if not job.get('path') or job.get('status') == 'cancelled':
             continue
         path, fname = job['path'], job.get('file')
         override = job.get('dateOverride')
@@ -858,6 +858,19 @@ $('queue').addEventListener('change', e => {
   if (e.target.classList.contains('qdate')) queue[+e.target.dataset.i].override = e.target.value;
 });
 
+const _cr = document.getElementById('clearreconverts');
+if (_cr) _cr.addEventListener('click', async () => {
+  if (!confirm('Cancel all pending re-conversions? Queued uploads and the ' +
+               'file converting right now are not affected; stored sources stay put.')) return;
+  _cr.disabled = true;
+  const res = await fetch('/api/reconvert-clear', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: '{}'});
+  const data = await res.json().catch(() => ({ok: false}));
+  alert(data.ok ? data.cleared + ' pending re-conversion(s) cancelled.'
+                : (data.error || 'failed'));
+  location.reload();
+});
+
 const _qb = document.getElementById('queuebanner');
 async function pollBanner() {
   try {
@@ -1032,6 +1045,10 @@ def manage_html():
     if not dates:
         return ''
     metas = {d: guide_meta(d) for d in dates}
+    snap = queue_snapshot()
+    busy = (' disabled title="The queue is busy — these Sundays may already '
+            'be in it; wait for it to empty."'
+            if snap['waiting'] or snap['converting'] else '')
     out = []
 
     flagged = [(d, m) for d, m in metas.items() if m and m['warnings']]
@@ -1050,7 +1067,7 @@ def manage_html():
         bulk_html = ''
         if bulk:
             bulk_html = (
-                f'<p><button class="mini" id="reconvertall" '
+                f'<p><button class="mini" id="reconvertall"{busy} '
                 f'data-dates="{" ".join(bulk)}">Re-convert all listed '
                 f'({len(bulk)})</button> — after a parser upgrade, re-runs the '
                 f'converter on each flagged Sunday&#8217;s stored PDF.</p>')
@@ -1087,7 +1104,7 @@ def manage_html():
                  if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf'))]
     sweep = ''
     if src_dates:
-        sweep = (f'<p><button class="mini" id="reconverteverything" '
+        sweep = (f'<p><button class="mini" id="reconverteverything"{busy} '
                  f'data-dates="{" ".join(src_dates)}">Re-convert every Sunday '
                  f'({len(src_dates)})</button> — full sweep through the server '
                  f'queue after a converter fix, flagged or not.</p>')
@@ -1213,7 +1230,9 @@ def recent_uploads_html():
                   f'file{"s" if snap["waiting"] != 1 else ""} '
                   f'waiting{now}</span> — updates live; finished results appear '
                   f'below and in the history, and this page reloads when the '
-                  f'queue empties.</p>')
+                  f'queue empties. '
+                  f'<button class="mini" id="clearreconverts">Cancel pending '
+                  f're-conversions</button></p>')
     if not entries and not active:
         return ''
     table = (HISTORY_TABLE_HEAD + history_rows(entries) + '</tbody></table>') if entries else ''
@@ -1682,7 +1701,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         if path not in ('/api/upload', '/api/retry', '/api/review', '/api/rerender',
                         '/api/reconvert', '/api/reconvert-batch',
-                        '/api/unpublish', '/api/save'):
+                        '/api/reconvert-clear', '/api/unpublish', '/api/save'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
             return
         expected = ENV.get('UPLOAD_TOKEN', '')
@@ -1700,6 +1719,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         if path == '/api/reconvert-batch':
             self.handle_reconvert_batch(body)
+            return
+        if path == '/api/reconvert-clear':
+            # Cancel pending re-conversions (sources stay put; the job
+            # currently converting finishes). Uploads are untouched.
+            cleared = 0
+            with JOBS_LOCK:
+                for j in JOBS.values():
+                    if j.get('keep') and j.get('status') == 'queued':
+                        j['status'] = 'cancelled'
+                        cleared += 1
+            audit_log({'action': 'reconvert-clear', 'ok': True, 'cleared': cleared})
+            self.send_json({'ok': True, 'cleared': cleared})
             return
         if path != '/api/upload':
             self.handle_action(path.rsplit('/', 1)[1], body)
@@ -1760,23 +1791,32 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except ValueError:
             self.send_json({'ok': False, 'error': 'invalid JSON body'}, status=400)
             return
-        queued, skipped = [], []
+        queued, skipped, already = [], [], []
+        with JOBS_LOCK:
+            pending = {j.get('file') for j in JOBS.values()
+                       if j.get('keep') and j.get('status') in ('queued', 'converting')}
         for date in list(dates)[:500]:
             date = str(date)
             src = os.path.join(PUBLIC, date, 'source.pdf')
             if not DATE_DIR_RE.match(date) or not os.path.exists(src):
                 skipped.append(date)
                 continue
+            fname = f'{date}/source.pdf'
+            if fname in pending:
+                already.append(date)     # a re-convert of this Sunday is
+                continue                 # queued or running — don't stack
+            pending.add(fname)
             jid = (datetime.datetime.now().strftime('%Y%m%d%H%M%S')
                    + '-' + os.urandom(4).hex())
-            job_update(jid, status='queued', file=f'{date}/source.pdf',
-                       path=src, keep=True)
+            job_update(jid, status='queued', file=fname, path=src, keep=True)
             CONVERT_Q.put(jid)
             queued.append(date)
         audit_log({'action': 'reconvert-batch', 'ok': True,
                    'queued': len(queued),
-                   **({'skipped': skipped} if skipped else {})})
-        self.send_json({'ok': True, 'queued': len(queued), 'skipped': skipped})
+                   **({'skipped': skipped} if skipped else {}),
+                   **({'alreadyQueued': len(already)} if already else {})})
+        self.send_json({'ok': True, 'queued': len(queued), 'skipped': skipped,
+                        'alreadyQueued': already})
 
     def handle_retry(self, body):
         """Re-enqueue a failed conversion from queue/failed/ — the PDF was
