@@ -8,8 +8,11 @@
    the latest `origin/main` if it doesn't exist).
 2. Run both test suites before any push: `python3 test/run.py` and
    `python3 test/test_app.py` — green is a precondition, not a goal.
-3. Push the branch, then update `main` from it (fast-forward merge preferred;
-   rebase your branch onto `origin/main` first when it has moved).
+3. Push the branch, then merge it into `main` with a real merge commit
+   (`git merge --no-ff`). `main` only ever receives merge commits — never
+   direct commits, never fast-forwards — so branch provenance stays visible
+   in its history. Rebase your branch onto `origin/main` first when it has
+   moved.
 4. Multiple sessions work this repo concurrently. Always `git fetch` and
    check `origin/main` before pushing; if it moved, rebase on top of it and
    re-run the tests — never force-push `main`, and use `--force-with-lease`
