@@ -309,8 +309,10 @@ def convert_worker():
             continue
         path, fname = job['path'], job.get('file')
         override = job.get('dateOverride')
-        extra = {**({'file': fname} if fname else {}),
-                 **({'dateOverride': override} if override else {})}
+        keep = job.get('keep')          # re-convert jobs point at a stored
+        extra = {**({'file': fname} if fname else {}),  # source.pdf — never
+                 **({'dateOverride': override} if override else {}),  # consumed
+                 **({'reconvert': True} if keep else {})}
         job_update(jid, status='converting')
         try:
             guide, replaced = convert_pdf(path, override, fname)
@@ -321,21 +323,23 @@ def convert_worker():
                        date=guide['date'], dateISO=guide['dateISO'],
                        url=f"/{guide['dateISO']}/", replaced=replaced,
                        warnings=guide['warnings'], notes=guide.get('notes') or [])
-            os.unlink(path)
-            if os.path.exists(path + '.meta'):
-                os.unlink(path + '.meta')
+            if not keep:
+                os.unlink(path)
+                if os.path.exists(path + '.meta'):
+                    os.unlink(path + '.meta')
         except Exception as e:
             traceback.print_exc()
             audit_log({'ok': False, **extra, 'error': str(e)})
             job_update(jid, status='failed', error=str(e))
-            try:        # keep the PDF for a retry after the parser learns it
-                os.makedirs(FAILED_DIR, exist_ok=True)
-                shutil.move(path, os.path.join(FAILED_DIR, os.path.basename(path)))
-                if os.path.exists(path + '.meta'):
-                    shutil.move(path + '.meta',
-                                os.path.join(FAILED_DIR, os.path.basename(path) + '.meta'))
-            except OSError:
-                pass
+            if not keep:
+                try:    # keep the PDF for a retry after the parser learns it
+                    os.makedirs(FAILED_DIR, exist_ok=True)
+                    shutil.move(path, os.path.join(FAILED_DIR, os.path.basename(path)))
+                    if os.path.exists(path + '.meta'):
+                        shutil.move(path + '.meta',
+                                    os.path.join(FAILED_DIR, os.path.basename(path) + '.meta'))
+                except OSError:
+                    pass
 
 
 def queue_snapshot():
@@ -829,14 +833,33 @@ $('queue').addEventListener('change', e => {
   if (e.target.classList.contains('qdate')) queue[+e.target.dataset.i].override = e.target.value;
 });
 
+const _qb = document.getElementById('queuebanner');
+async function pollBanner() {
+  try {
+    const res = await fetch('/api/status?ids=');
+    if (res.status === 401) return;        // signed out — stop quietly
+    const data = await res.json();
+    const qs = data.queue || {};
+    if (!qs.waiting && !qs.converting) {
+      if (!running && !queue.length) location.reload();
+      return;
+    }
+    _qb.innerHTML = qs.waiting + ' file' + (qs.waiting === 1 ? '' : 's') + ' waiting' +
+      (qs.converting ? ', converting <b>' + (qs.converting.file || '…') + '</b>' : '');
+  } catch (e) { /* transient — keep polling */ }
+  setTimeout(pollBanner, 3000);
+}
+if (_qb) pollBanner();
+
 const _rv = document.getElementById('reviewall');
 if (_rv) _rv.addEventListener('click', async () => {
   const dates = _rv.dataset.dates.split(' ').filter(Boolean);
   if (!confirm('Mark all ' + dates.length + ' listed Sundays reviewed? ' +
                'Their warnings move to reviewedWarnings in each guide.json.')) return;
   _rv.disabled = true;
+  let done = 0;
   for (const d of dates) {
-    _rv.textContent = 'Reviewing ' + d + '…';
+    _rv.textContent = 'Reviewing ' + (++done) + '/' + dates.length + ': ' + d + '…';
     await fetch('/api/review', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -852,21 +875,22 @@ if (_ra) _ra.addEventListener('click', async () => {
   if (!confirm('Re-convert ' + dates.length + ' Sundays from their stored PDFs? ' +
                'Hand-edits to them will be overwritten.')) return;
   _ra.disabled = true;
-  let failed = 0;
-  for (const d of dates) {
-    _ra.textContent = 'Re-converting ' + d + '…';
-    try {
-      const res = await fetch('/api/reconvert', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({date: d}),
-      });
-      const data = await res.json().catch(() => ({ok: false}));
-      if (!data.ok) failed++;
-    } catch (e) { failed++; }
+  _ra.textContent = 'Queueing ' + dates.length + ' re-conversions…';
+  try {
+    const res = await fetch('/api/reconvert-batch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dates: dates}),
+    });
+    const data = await res.json().catch(() => ({ok: false}));
+    if (!data.ok) throw new Error(data.error || res.statusText);
+    // The server queue takes it from here — the banner shows live progress
+    // and this page can be closed.
+    location.reload();
+  } catch (e) {
+    alert('Could not queue re-conversions: ' + e.message);
+    _ra.disabled = false;
   }
-  if (failed) alert(failed + ' re-conversion(s) failed — see the upload history.');
-  location.reload();
 });
 
 async function retryFailed(btn, name) {
@@ -1148,9 +1172,11 @@ def recent_uploads_html():
         conv = snap['converting']
         now = f", converting <b>{esc(conv.get('file') or '…')}</b>" if conv else ''
         active = (f'<p class="warn"><b>Server queue active:</b> '
-                  f'{snap["waiting"]} file{"s" if snap["waiting"] != 1 else ""} '
-                  f'waiting{now} — refresh this page to update; finished results '
-                  f'appear below and in the history.</p>')
+                  f'<span id="queuebanner">{snap["waiting"]} '
+                  f'file{"s" if snap["waiting"] != 1 else ""} '
+                  f'waiting{now}</span> — updates live; finished results appear '
+                  f'below and in the history, and this page reloads when the '
+                  f'queue empties.</p>')
     if not entries and not active:
         return ''
     table = (HISTORY_TABLE_HEAD + history_rows(entries) + '</tbody></table>') if entries else ''
@@ -1618,7 +1644,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.handle_login(body)
             return
         if path not in ('/api/upload', '/api/retry', '/api/review', '/api/rerender',
-                        '/api/reconvert', '/api/unpublish', '/api/save'):
+                        '/api/reconvert', '/api/reconvert-batch',
+                        '/api/unpublish', '/api/save'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
             return
         expected = ENV.get('UPLOAD_TOKEN', '')
@@ -1633,6 +1660,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         if path == '/api/retry':
             self.handle_retry(body)
+            return
+        if path == '/api/reconvert-batch':
+            self.handle_reconvert_batch(body)
             return
         if path != '/api/upload':
             self.handle_action(path.rsplit('/', 1)[1], body)
@@ -1681,6 +1711,35 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_json({'ok': False, 'error': str(e)}, status=422)
         finally:
             os.unlink(tmp.name)
+
+    def handle_reconvert_batch(self, body):
+        """Queue re-conversions of published Sundays from their stored source
+        PDFs. Runs through the same worker as uploads, so the queue banner
+        shows live progress, results land in the history, and the browser
+        need not stay open."""
+        try:
+            data = json.loads(body or b'{}')
+            dates = data.get('dates') or []
+        except ValueError:
+            self.send_json({'ok': False, 'error': 'invalid JSON body'}, status=400)
+            return
+        queued, skipped = [], []
+        for date in list(dates)[:500]:
+            date = str(date)
+            src = os.path.join(PUBLIC, date, 'source.pdf')
+            if not DATE_DIR_RE.match(date) or not os.path.exists(src):
+                skipped.append(date)
+                continue
+            jid = (datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+                   + '-' + os.urandom(4).hex())
+            job_update(jid, status='queued', file=f'{date}/source.pdf',
+                       path=src, keep=True)
+            CONVERT_Q.put(jid)
+            queued.append(date)
+        audit_log({'action': 'reconvert-batch', 'ok': True,
+                   'queued': len(queued),
+                   **({'skipped': skipped} if skipped else {})})
+        self.send_json({'ok': True, 'queued': len(queued), 'skipped': skipped})
 
     def handle_retry(self, body):
         """Re-enqueue a failed conversion from queue/failed/ — the PDF was

@@ -299,6 +299,35 @@ try:
     assert any(e.get('action') == 'retry' and e.get('dateOverride') == '2030-05-05'
                for e in entries), 'retry audited with the carried-over date'
 
+    # Bulk re-convert runs through the server queue: jobs from stored
+    # sources (unknown dates skipped), progress in the live snapshot, and
+    # the stored source is never consumed.
+    gj02 = os.path.join(scratch, 'public', '2026-08-02', 'guide.json')
+    g02 = json.load(open(gj02))
+    g02['warnings'] = ['synthetic warning for the batch test']
+    json.dump(g02, open(gj02, 'w'))
+    status, body = req('/api/reconvert-batch',
+                       data=json.dumps({'dates': ['2026-08-02', '1999-01-01']}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200, (status, body)
+    rb = json.loads(body)
+    assert rb['ok'] and rb['queued'] == 1 and rb['skipped'] == ['1999-01-01'], rb
+    qs = None
+    for _ in range(240):
+        status, body = req('/api/status?ids=', headers=COOKIE)
+        qs = json.loads(body)['queue']
+        if not qs['waiting'] and not qs['converting']:
+            break
+        time.sleep(0.5)
+    assert qs and not qs['waiting'] and not qs['converting'], qs
+    g02 = json.load(open(gj02))
+    assert g02['warnings'] == [], 'batch re-convert regenerated the guide'
+    assert os.path.exists(os.path.join(scratch, 'public', '2026-08-02', 'source.pdf')), \
+        'stored source survives re-conversion'
+    entries = [json.loads(l) for l in open(log_path)]
+    assert any(e.get('action') == 'reconvert-batch' and e.get('queued') == 1
+               for e in entries), 'batch queueing audited'
+
     gj = os.path.join(scratch, 'public', '2026-08-09', 'guide.json')
     g = json.load(open(gj))
     g['warnings'] = ['page 7: content without a label kept as an untitled item']
