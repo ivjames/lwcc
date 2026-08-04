@@ -589,9 +589,12 @@ PAGE_STYLE = """
 
 
 def archive_page():
-    dates = published_dates()
-    rows = []
+    dates = published_dates()          # newest first
+    years = {}
     for d in dates:
+        years.setdefault(d[:4], []).append(d)
+
+    def row(d):
         meta = guide_meta(d)
         line = f'<a href="/{d}/">{date_label(d)}</a>'
         if meta and meta['title']:
@@ -605,8 +608,26 @@ def archive_page():
             n = len(meta['warnings'])
             line += (f'<br><span class="warn" style="font-size:.9em">⚠ needs review '
                      f'({n} parser warning{"s" if n > 1 else ""})</span>')
-        rows.append(f'    <li style="margin:8px 0">{line}</li>')
-    items = '\n'.join(rows) or '    <li>Nothing published yet.</li>'
+        return f'    <li style="margin:8px 0">{line}</li>'
+
+    if years:
+        jump = ' · '.join(f'<a href="#y{y}">{y}</a>' for y in sorted(years, reverse=True))
+        nav = (f'<p style="font-family:Arial,Helvetica,sans-serif;font-size:.95em">'
+               f'Jump to: {jump}</p>')
+        cards = []
+        for y in sorted(years, reverse=True):
+            rows = '\n'.join(row(d) for d in years[y])
+            n = len(years[y])
+            cards.append(f"""<h2 id="y{y}" style="font-family:Arial,Helvetica,sans-serif;
+  font-size:1.05rem;letter-spacing:2px;color:#054253;border-bottom:3px solid #0a5a6e;
+  display:inline-block;padding-bottom:4px;margin:26px 0 6px;scroll-margin-top:20px">{y}
+  <span style="color:#54574a;font-weight:400;font-size:.85em">({n} Sunday{'s' if n > 1 else ''})</span></h2>
+<div class="card"><ul style="list-style:none;padding-left:0">
+{rows}
+</ul></div>""")
+        listing = nav + '\n'.join(cards)
+    else:
+        listing = '<div class="card"><ul><li>Nothing published yet.</li></ul></div>'
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -615,9 +636,7 @@ def archive_page():
 <h1>Worship Guide Archive</h1>
 <form action="/search" style="margin:14px 0"><input type="search" name="q"
   placeholder="Search sermons…" size="28"> <button>Search</button></form>
-<div class="card"><ul style="list-style:none;padding-left:0">
-{items}
-</ul></div>
+{listing}
 <p><a href="/">Current guide</a></p>
 </body></html>
 """
