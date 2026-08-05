@@ -13,6 +13,12 @@ newest at /) and converts newly uploaded worship-guide PDFs in place:
     POST /api/upload  raw PDF body -> convert -> publish; the admin cookie or
                       an X-Upload-Token header must match UPLOAD_TOKEN from
                       .env (fails closed if unset)
+    GET  /admin/aiscan/YYYY-MM-DD   AI article scanner: review a Sunday for
+                      OCR misclassifications (announcements vs page directions
+                      vs content) and apply verified, text-preserving repairs;
+                      POST /api/aiscan runs a scan (needs ANTHROPIC_API_KEY
+                      in .env), POST /api/aiscan-apply applies/dismisses
+                      selected findings
     GET  /healthz     liveness for the platform health-check sweep
 
 Stdlib only, runs under pm2 behind the site's nginx vhost per lab980
@@ -49,7 +55,7 @@ COOKIE_MAX_AGE = 180 * 24 * 3600
 ADMIN_NEXT_RE = re.compile(r'/admin(/edit/\d{4}-\d{2}-\d{2})?')
 
 sys.path.insert(0, ROOT)
-from wgconvert import extract, parse, render  # noqa: E402
+from wgconvert import aiscan, extract, parse, render  # noqa: E402
 from wgconvert.extract import render_page_image  # noqa: E402
 
 
@@ -589,6 +595,219 @@ def save_guide(d, submitted):
     rerender_date(d)
 
 
+# --- AI article scanner -----------------------------------------------------
+# Reviews a published Sunday's guide.json with Claude for text the parser
+# filed under the wrong class (announcements vs page/stage directions vs
+# worship content) — the classic OCR-backlog failure. Findings live in
+# public/<date>/aiscan.json; repairs are verified text-preserving moves.
+
+def aiscan_load(d):
+    try:
+        with open(os.path.join(PUBLIC, d, 'aiscan.json'), encoding='utf-8') as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def aiscan_save(d, scan):
+    with open(os.path.join(PUBLIC, d, 'aiscan.json'), 'w', encoding='utf-8') as fh:
+        json.dump(scan, fh, indent=2, ensure_ascii=False)
+        fh.write('\n')
+
+
+def aiscan_open_count(scan):
+    return sum(1 for f in (scan or {}).get('findings') or []
+               if f.get('status') == 'open')
+
+
+def run_aiscan(d):
+    """Scan one Sunday and persist the result. Raises RuntimeError with an
+    operator-readable message when the API is unreachable or declines."""
+    api_key = ENV.get('ANTHROPIC_API_KEY', '')
+    if not api_key:
+        raise RuntimeError('AI scanner disabled: set ANTHROPIC_API_KEY in '
+                           '.env and restart')
+    with open(os.path.join(PUBLIC, d, 'guide.json'), encoding='utf-8') as fh:
+        guide = json.load(fh)
+    model = ENV.get('AISCAN_MODEL') or aiscan.DEFAULT_MODEL
+    scan = aiscan.scan_guide(guide, api_key, model=model)
+    scan['at'] = datetime.datetime.now().isoformat(timespec='seconds')
+    aiscan_save(d, scan)
+    return scan
+
+
+def apply_aiscan(d, ids, dismiss=False):
+    """Apply (or dismiss) selected findings; applied fixes rewrite guide.json
+    and re-render the page. Returns per-finding results."""
+    scan = aiscan_load(d)
+    if not scan:
+        raise RuntimeError('no AI scan stored for this Sunday — run one first')
+    findings = scan.get('findings') or []
+    ids = [i for i in ids if any(f.get('id') == i for f in findings)]
+    if dismiss:
+        for f in findings:
+            if f.get('id') in ids and f.get('status') == 'open':
+                f['status'] = 'dismissed'
+        aiscan_save(d, scan)
+        return {i: None for i in ids}
+    path = os.path.join(PUBLIC, d, 'guide.json')
+    with open(path, encoding='utf-8') as fh:
+        guide = json.load(fh)
+    open_ids = [i for i in ids
+                if any(f.get('id') == i and f.get('status') == 'open'
+                       for f in findings)]
+    new_guide, results = aiscan.apply_findings(guide, findings, open_ids)
+    applied = [i for i, reason in results.items() if reason is None]
+    if applied:
+        notes = new_guide.setdefault('notes', [])
+        for f in findings:
+            if f.get('id') in applied:
+                notes.append(f"AI repair applied: {f.get('issue')} "
+                             f"({(f.get('fix') or {}).get('op')})")
+        write_guide_json(path, new_guide)
+        rerender_date(d)
+    for f in findings:
+        reason = results.get(f.get('id'), '__untouched__')
+        if reason == '__untouched__':
+            continue
+        if reason is None:
+            f['status'] = 'applied'
+            f.pop('statusNote', None)
+        else:
+            f['status'] = 'skipped'
+            f['statusNote'] = reason
+    aiscan_save(d, scan)
+    return results
+
+
+AISCAN_PAGE = ("""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Scan __DATE__</title><style>__STYLE__
+  .finding{border-top:1px dashed #d8d6c7;padding:10px 0;margin-top:10px}
+  .finding blockquote{margin:6px 0;padding:6px 10px;background:#f1efe6;
+    border-left:3px solid #76a2bf;border-radius:4px;font-size:.92em}
+  .tag{font-family:Arial,Helvetica,sans-serif;font-size:.72em;border-radius:6px;
+    padding:2px 8px;color:#fff;background:#3f6b82;margin-left:6px}
+  .tag.high{background:#a20816}.tag.medium{background:#8a6410}.tag.low{background:#54574a}
+  .tag.applied{background:#1f7a44}.tag.dismissed{background:#54574a}
+  .tag.skipped{background:#8a6410}
+  .meta{color:#54574a;font-size:.88em}
+  button.mini{padding:4px 12px;font-size:.82em;margin-left:8px;background:#3f6b82}
+</style></head>
+<body>
+<h1>AI Article Scanner &mdash; __DATE__</h1>
+<div class="card">
+  <p>Reviews this Sunday&#8217;s parsed guide with Claude for text the OCR
+  pipeline filed under the wrong class &mdash; announcements vs page
+  directions vs worship content. Repairs move the printed text; nothing is
+  rewritten, and every fix is verified against the stored text before it is
+  applied.</p>
+  __KEYNOTE__
+  <p><button id="scan" __SCANDIS__>__SCANLABEL__</button>
+     <span id="scanmsg"></span></p>
+</div>
+<div id="results"></div>
+<p><a href="/__DATE__/">View page</a> &middot;
+   <a href="/admin/edit/__DATE__">Edit</a> &middot;
+   <a href="/admin">Back to admin</a></p>
+<script id="scan-data" type="application/json">__SCAN__</script>
+<script>
+const $ = id => document.getElementById(id);
+const SCAN = JSON.parse($('scan-data').textContent);
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function render() {
+  const box = $('results');
+  if (!SCAN) { box.innerHTML = ''; return; }
+  const open = SCAN.findings.filter(f => f.status === 'open');
+  let html = '<div class="card"><p><b>Scan from ' + esc(SCAN.at) + '</b>' +
+    ' <span class="meta">(' + esc(SCAN.model) + ')</span></p>' +
+    '<p>' + esc(SCAN.summary) + '</p>';
+  if (!SCAN.findings.length) {
+    html += '<p class="ok">No misclassifications found.</p>';
+  } else {
+    html += SCAN.findings.map(f =>
+      '<div class="finding">' +
+      (f.fix && f.status === 'open'
+        ? '<input type="checkbox" class="pick" value="' + esc(f.id) + '"> '
+        : '') +
+      '<b>' + esc(f.current) + ' &rarr; ' + esc(f.proposed) + '</b>' +
+      '<span class="tag ' + esc(f.confidence) + '">' + esc(f.confidence) + '</span>' +
+      (f.status !== 'open'
+        ? '<span class="tag ' + esc(f.status) + '">' + esc(f.status) + '</span>' : '') +
+      '<div>' + esc(f.issue) + '</div>' +
+      '<blockquote>' + esc(f.quote) + '</blockquote>' +
+      '<div class="meta">' + esc(f.path) +
+      (f.fix ? ' &middot; fix: ' + esc(f.fix.op) : ' &middot; no mechanical fix — edit by hand') +
+      (f.statusNote ? ' &middot; ' + esc(f.statusNote) : '') +
+      '</div></div>').join('');
+    if (open.some(f => f.fix)) {
+      html += '<p><button id="applysel">Apply selected</button>' +
+        '<button id="dismisssel" class="mini">Dismiss selected</button>' +
+        ' <span id="applymsg"></span></p>';
+    }
+  }
+  html += '</div>';
+  box.innerHTML = html;
+  const act = dismiss => async () => {
+    const ids = [...document.querySelectorAll('.pick:checked')].map(c => c.value);
+    if (!ids.length) { $('applymsg').textContent = 'Nothing selected.'; return; }
+    $('applymsg').textContent = dismiss ? 'Dismissing…' : 'Applying…';
+    const res = await fetch('/api/aiscan-apply', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({date: '__DATE__', ids: ids, dismiss: dismiss}),
+    });
+    const data = await res.json().catch(() => ({ok: false}));
+    if (!data.ok) { $('applymsg').textContent = 'Failed: ' + (data.error || res.status); return; }
+    location.reload();
+  };
+  const ap = $('applysel'), di = $('dismisssel');
+  if (ap) ap.addEventListener('click', act(false));
+  if (di) di.addEventListener('click', act(true));
+}
+render();
+
+$('scan').addEventListener('click', async () => {
+  $('scan').disabled = true;
+  $('scanmsg').textContent = 'Scanning — one Claude request, may take a minute…';
+  try {
+    const res = await fetch('/api/aiscan', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({date: '__DATE__'}),
+    });
+    const data = await res.json().catch(() => ({ok: false, error: 'HTTP ' + res.status}));
+    if (!data.ok) throw new Error(data.error || res.statusText);
+    location.reload();
+  } catch (e) {
+    $('scanmsg').textContent = 'Failed: ' + e.message;
+    $('scan').disabled = false;
+  }
+});
+</script>
+</body></html>
+""")   # __STYLE__ is filled in aiscan_page (PAGE_STYLE is defined below)
+
+
+def aiscan_page(d):
+    scan = aiscan_load(d)
+    scan_json = json.dumps(scan, ensure_ascii=False).replace('</', '<\\/')
+    key_set = bool(ENV.get('ANTHROPIC_API_KEY'))
+    keynote = ('' if key_set else
+               '<p class="warn">Scanning is disabled: set '
+               '<code>ANTHROPIC_API_KEY</code> in the app&#8217;s '
+               '<code>.env</code> and restart. Stored findings below are '
+               'still browsable.</p>')
+    return (AISCAN_PAGE
+            .replace('__STYLE__', PAGE_STYLE)
+            .replace('__SCAN__', scan_json)
+            .replace('__KEYNOTE__', keynote)
+            .replace('__SCANDIS__', '' if key_set else 'disabled')
+            .replace('__SCANLABEL__', 'Re-run AI scan' if scan else 'Run AI scan')
+            .replace('__DATE__', d))
+
+
 PAGE_STYLE = """
   body{font-family:Georgia,'Times New Roman',serif;background:#fbfaf5;color:#26241d;
     max-width:680px;margin:0 auto;padding:40px 20px;line-height:1.6}
@@ -984,6 +1203,29 @@ for (const _id of ['reconvertall', 'reconverteverything']) {
   });
 }
 
+const _as = document.getElementById('aiscanall');
+if (_as) _as.addEventListener('click', async () => {
+  const dates = _as.dataset.dates.split(' ').filter(Boolean);
+  if (!confirm('AI-scan ' + dates.length + ' Sundays? This runs one Claude ' +
+               'API request per Sunday and may take a while.')) return;
+  _as.disabled = true;
+  let done = 0, failed = 0;
+  for (const d of dates) {
+    _as.textContent = 'Scanning ' + (++done) + '/' + dates.length + ': ' + d + '…';
+    try {
+      const res = await fetch('/api/aiscan', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({date: d}),
+      });
+      const data = await res.json().catch(() => ({ok: false}));
+      if (!data.ok) failed++;
+    } catch (e) { failed++; }
+  }
+  if (failed) alert(failed + ' of ' + dates.length + ' scans failed — see the upload history.');
+  location.reload();
+});
+
 async function retryFailed(btn) {
   const name = btn.dataset.name;
   const date = btn.parentElement.querySelector('.retrydate').value;
@@ -1135,6 +1377,35 @@ def manage_html():
                    '<ul style="list-style:none;padding-left:0">'
                    + ''.join(items) + '</ul></div>')
 
+    scans = {d: aiscan_load(d) for d in dates}
+    flagged_ai = [(d, aiscan_open_count(scans[d])) for d in dates
+                  if aiscan_open_count(scans[d])]
+    key_set = bool(ENV.get('ANTHROPIC_API_KEY'))
+    ai_items = ''.join(
+        f'<li style="margin:6px 0"><a href="/admin/aiscan/{d}">{date_label(d)}</a> '
+        f'<span class="warn">— {n} open finding{"s" if n > 1 else ""}</span></li>'
+        for d, n in flagged_ai)
+    if ai_items:
+        ai_items = ('<ul style="list-style:none;padding-left:0">'
+                    + ai_items + '</ul>')
+    unscanned = ' '.join(d for d in dates if scans[d] is None)
+    scan_all = ''
+    if key_set and unscanned:
+        n = len(unscanned.split())
+        scan_all = (f'<p><button class="mini" id="aiscanall" '
+                    f'data-dates="{unscanned}">Scan all unscanned ({n})'
+                    f'</button> — runs one Claude request per Sunday.</p>')
+    key_note = ('' if key_set else
+                '<p class="warn">Scanning is disabled: set '
+                '<code>ANTHROPIC_API_KEY</code> in <code>.env</code> and '
+                'restart.</p>')
+    out.append('<div class="card"><p><b>AI article scanner</b> — reviews each '
+               'Sunday&#8217;s parsed guide for text the OCR pipeline filed '
+               'under the wrong class (announcements vs page directions vs '
+               'worship content). Open each Sunday&#8217;s scan page from the '
+               'list below to review and apply repairs.</p>'
+               + key_note + scan_all + ai_items + '</div>')
+
     rows = []
     year = None
     for d in dates:
@@ -1149,11 +1420,15 @@ def manage_html():
         if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf')):
             reconvert = (f'<button class="mini" onclick="adminAction(\'reconvert\', '
                          f'\'{d}\')">Re-convert</button>')
+        n_open = aiscan_open_count(scans[d])
+        ai_badge = (f' <span class="warn" style="font-size:.85em">🔎 {n_open}'
+                    f'</span>' if n_open else '')
         rows.append(
             f'<tr><td class="st"><a href="/{d}/">{d}</a></td>'
             f'<td>{title}</td>'
             f'<td class="acts">'
             f'<a class="minilink" href="/admin/edit/{d}">Edit</a>'
+            f'<a class="minilink" href="/admin/aiscan/{d}">AI scan</a>{ai_badge}'
             f'<button class="mini" onclick="adminAction(\'rerender\', \'{d}\')">'
             f'Re-render</button>'
             f'{reconvert}'
@@ -1726,6 +2001,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 self.send_error(404, 'Not Found')
             return
+        m = re.fullmatch(r'/admin/aiscan/(\d{4}-\d{2}-\d{2})', path)
+        if m:
+            if not self.require_admin():
+                return
+            if os.path.exists(os.path.join(PUBLIC, m.group(1), 'guide.json')):
+                self.send_page(aiscan_page(m.group(1)), cache='no-store')
+            else:
+                self.send_error(404, 'Not Found')
+            return
         if path == '/':
             dates = published_dates()
             if dates:
@@ -1772,7 +2056,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         if path not in ('/api/upload', '/api/retry', '/api/review', '/api/rerender',
                         '/api/reconvert', '/api/reconvert-batch',
-                        '/api/reconvert-clear', '/api/unpublish', '/api/save'):
+                        '/api/reconvert-clear', '/api/unpublish', '/api/save',
+                        '/api/aiscan', '/api/aiscan-apply'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
             return
         expected = ENV.get('UPLOAD_TOKEN', '')
@@ -1802,6 +2087,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         cleared += 1
             audit_log({'action': 'reconvert-clear', 'ok': True, 'cleared': cleared})
             self.send_json({'ok': True, 'cleared': cleared})
+            return
+        if path in ('/api/aiscan', '/api/aiscan-apply'):
+            self.handle_aiscan(path, body)
             return
         if path != '/api/upload':
             self.handle_action(path.rsplit('/', 1)[1], body)
@@ -1888,6 +2176,54 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                    **({'alreadyQueued': len(already)} if already else {})})
         self.send_json({'ok': True, 'queued': len(queued), 'skipped': skipped,
                         'alreadyQueued': already})
+
+    def handle_aiscan(self, path, body):
+        """Run an AI misclassification scan on one Sunday, or apply/dismiss
+        selected findings from a stored scan."""
+        try:
+            data = json.loads(body or b'{}')
+            date = str(data.get('date') or '')
+        except ValueError:
+            self.send_json({'ok': False, 'error': 'invalid JSON body'}, status=400)
+            return
+        if not DATE_DIR_RE.match(date) or \
+                not os.path.exists(os.path.join(PUBLIC, date, 'guide.json')):
+            self.send_json({'ok': False, 'error': f'no published guide for {date!r}'},
+                           status=404)
+            return
+        if path == '/api/aiscan' and not ENV.get('ANTHROPIC_API_KEY'):
+            self.send_json({'ok': False, 'error':
+                            'AI scanner disabled: set ANTHROPIC_API_KEY in '
+                            '.env and restart'}, status=503)
+            return
+        try:
+            if path == '/api/aiscan':
+                scan = run_aiscan(date)
+                audit_log({'action': 'aiscan', 'date': date, 'ok': True,
+                           'findings': len(scan['findings'])})
+                self.send_json({'ok': True, 'date': date,
+                                'findings': len(scan['findings']),
+                                'summary': scan['summary']})
+            else:
+                ids = [str(i) for i in (data.get('ids') or [])][:200]
+                dismiss = bool(data.get('dismiss'))
+                results = apply_aiscan(date, ids, dismiss=dismiss)
+                applied = sorted(i for i, r in results.items() if r is None)
+                skipped = {i: r for i, r in results.items() if r is not None}
+                audit_log({'action': 'aiscan-dismiss' if dismiss else 'aiscan-apply',
+                           'date': date, 'ok': True, 'ids': ids,
+                           **({'skipped': skipped} if skipped else {})})
+                self.send_json({'ok': True, 'date': date,
+                                'applied': applied, 'skipped': skipped})
+        except RuntimeError as e:
+            audit_log({'action': 'aiscan', 'date': date, 'ok': False,
+                       'error': str(e)})
+            self.send_json({'ok': False, 'error': str(e)}, status=502)
+        except Exception as e:
+            traceback.print_exc()
+            audit_log({'action': 'aiscan', 'date': date, 'ok': False,
+                       'error': str(e)})
+            self.send_json({'ok': False, 'error': str(e)}, status=500)
 
     def handle_retry(self, body):
         """Re-enqueue a failed conversion from queue/failed/ — the PDF was

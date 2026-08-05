@@ -27,6 +27,103 @@ assert app_mod.filename_matches_date('WG 4.16.23 PDF.pdf', '2023-04-16')
 assert app_mod.filename_matches_date('2023-10-01/source.pdf', '2023-10-01')
 assert not app_mod.filename_matches_date('WG 010823.pdf', '2023-01-15')
 assert not app_mod.filename_matches_date(None, '2023-01-08')
+
+# --- AI article scanner: digest, response parsing, and repair application run
+# without a key or network (the HTTP transport is injected).
+from wgconvert import aiscan  # noqa: E402
+
+_g = {
+    'dateISO': '2026-08-02', 'season': None, 'welcome': None,
+    'order': [
+        {'kind': 'stage', 'text': 'please stand as you are able'},
+        {'kind': 'item', 'type': 'plain', 'label': None, 'title': None,
+         'titleQuoted': False, 'who': None, 'note': None,
+         'body': [{'type': 'para',
+                   'text': 'Please remain seated during the postlude.'}]},
+        {'kind': 'item', 'type': 'prayer', 'label': 'Blessing', 'title': None,
+         'titleQuoted': False, 'who': None, 'note': None,
+         'body': [{'type': 'prayer', 'text': 'Go in peace. Amen.'},
+                  {'type': 'para',
+                   'text': 'The <b>potluck</b> is next Sunday at noon.'}]},
+    ],
+    'announcements': [
+        {'heading': None, 'kind': 'note', 'text': 'LEISURE WORLD COMMUNITY CHURCH'},
+        {'heading': 'Concert', 'kind': 'note', 'text': 'Duo concert Sunday at 3:00 PM.'},
+    ],
+    'specialEvents': [], 'notes': [], 'warnings': [],
+}
+_digest = aiscan.guide_digest(_g)
+assert _digest['order'][1]['i'] == 1 and _digest['announcements'][1]['i'] == 1
+assert _digest['order'][2]['body'][1]['j'] == 1
+
+
+def _canned(findings):
+    return {'model': 'claude-opus-5', 'stop_reason': 'end_turn',
+            'usage': {'input_tokens': 10, 'output_tokens': 5},
+            'content': [{'type': 'text', 'text': json.dumps(
+                {'summary': 'reviewed', 'findings': findings})}]}
+
+
+def _fix(op, **kw):
+    return {'op': op, 'orderIndex': None, 'blockIndex': None,
+            'annIndex': None, 'heading': None, **kw}
+
+
+def _fake_transport(payload, api_key):
+    assert api_key == 'test-key'
+    assert payload['model'] == 'claude-opus-5'
+    assert payload['fallbacks'] == 'default', 'refusal fallback opted in'
+    assert payload['output_config']['format']['type'] == 'json_schema'
+    assert 'please stand' in payload['messages'][0]['content']
+    return _canned([
+        {'path': 'order[1]', 'quote': 'Please remain seated',
+         'issue': 'untitled item is a page direction', 'current': 'content',
+         'proposed': 'stage', 'confidence': 'high',
+         'fix': _fix('item_to_stage', orderIndex=1)},
+        {'path': 'order[2].body[1]', 'quote': 'The <b>potluck</b> is next Sunday',
+         'issue': 'announcement inside the blessing', 'current': 'content',
+         'proposed': 'announcement', 'confidence': 'high',
+         'fix': _fix('para_to_announcement', orderIndex=2, blockIndex=1,
+                     heading='Potluck')},
+        {'path': 'announcements[0]', 'quote': 'LEISURE WORLD COMMUNITY CHURCH',
+         'issue': 'masthead page furniture', 'current': 'announcement',
+         'proposed': 'discard', 'confidence': 'high',
+         'fix': _fix('discard_announcement', annIndex=0)},
+        {'path': 'announcements[1]', 'quote': 'NOT ACTUALLY IN THE GUIDE',
+         'issue': 'stale finding must be skipped', 'current': 'announcement',
+         'proposed': 'discard', 'confidence': 'medium',
+         'fix': _fix('discard_announcement', annIndex=1)},
+        {'path': 'welcome', 'quote': 'something', 'issue': 'flag only',
+         'current': 'content', 'proposed': 'announcement', 'confidence': 'low',
+         'fix': _fix('none')},
+    ])
+
+
+_scan = aiscan.scan_guide(_g, 'test-key', transport=_fake_transport)
+assert [f['id'] for f in _scan['findings']] == ['f1', 'f2', 'f3', 'f4', 'f5']
+assert all(f['status'] == 'open' for f in _scan['findings'])
+assert _scan['findings'][4]['fix'] is None, 'op "none" becomes flag-only'
+_g2, _res = aiscan.apply_findings(_g, _scan['findings'],
+                                  ['f1', 'f2', 'f3', 'f4', 'f5'])
+assert _res['f1'] is None and _res['f2'] is None and _res['f3'] is None
+assert 'not found' in _res['f4'], 'mismatched quote refused, not applied'
+assert 'no mechanical fix' in _res['f5']
+assert _g2['order'][1] == {'kind': 'stage',
+                           'text': 'Please remain seated during the postlude.'}
+assert [b['text'] for b in _g2['order'][2]['body']] == ['Go in peace. Amen.']
+assert [a['heading'] for a in _g2['announcements']] == ['Concert', 'Potluck'], \
+    'furniture discarded, potluck moved — text preserved verbatim'
+assert _g2['announcements'][1]['text'] == 'The <b>potluck</b> is next Sunday at noon.'
+assert _g['order'][1]['kind'] == 'item', 'apply works on a copy'
+
+# a refusal from the safety classifiers is an error, not an empty scan
+try:
+    aiscan.scan_guide(_g, 'test-key', transport=lambda p, k: {
+        'stop_reason': 'refusal', 'content': []})
+    raise AssertionError('refusal must raise')
+except RuntimeError as e:
+    assert 'declined' in str(e)
+
 PORT = 8972
 BASE = f'http://127.0.0.1:{PORT}'
 TOKEN = 'test-token-123'
@@ -183,6 +280,85 @@ try:
     status, body = req('/api/upload?sync=1&date=Jan-5', data=pdf,
                        headers={**COOKIE, 'Content-Type': 'application/pdf'})
     assert status == 400, 'malformed override rejected'
+
+    # AI article scanner: page and endpoints are gated; scanning is refused
+    # without ANTHROPIC_API_KEY; applying repairs from a stored scan works
+    # end-to-end (moves are verified against the guide text, guide.json is
+    # rewritten, the page re-renders, statuses persist).
+    status, body = req('/admin/aiscan/2026-08-02')
+    assert status == 401 and b'Admin Sign-in' in body, 'aiscan page gated'
+    status, body = req('/admin/aiscan/2026-08-02', headers=COOKIE)
+    assert status == 200 and b'AI Article Scanner' in body
+    assert b'ANTHROPIC_API_KEY' in body, 'page says how to enable scanning'
+    status, body = req('/admin/aiscan/1999-01-01', headers=COOKIE)
+    assert status == 404
+    status, body = req('/api/aiscan', data=json.dumps({'date': '2026-08-02'}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 503 and b'ANTHROPIC_API_KEY' in body, 'scan fails closed without a key'
+    status, body = req('/api/aiscan', data=json.dumps({'date': '2026-08-02'}).encode(),
+                       headers={'Content-Type': 'application/json'})
+    assert status == 401, 'aiscan API needs the admin token'
+    status, body = req('/admin', headers=COOKIE)
+    assert b'AI article scanner' in body and b'/admin/aiscan/2026-08-02' in body, \
+        'admin page carries the scanner card and per-Sunday links'
+
+    # Stored-scan repair flow on the 2020-01-05 copy: move one real order
+    # item into announcements, dismiss a second flag-only finding.
+    ai_dir = os.path.join(scratch, 'public', '2020-01-05')
+    ai_guide = json.load(open(os.path.join(ai_dir, 'guide.json')))
+    idx, item = next((i, o) for i, o in enumerate(ai_guide['order'])
+                     if o['kind'] == 'item' and o.get('label') and o.get('body')
+                     and '<' not in o['body'][0]['text'])
+    scan_fixture = {
+        'at': '2026-08-05T10:00:00', 'model': 'claude-opus-5',
+        'summary': 'test fixture', 'usage': {'input': 1, 'output': 1},
+        'findings': [
+            {'id': 'f1', 'path': f'order[{idx}]',
+             'quote': item['body'][0]['text'][:80],
+             'issue': 'misfiled as order-of-worship content',
+             'current': 'content', 'proposed': 'announcement',
+             'confidence': 'high', 'status': 'open',
+             'fix': {'op': 'item_to_announcement', 'orderIndex': idx,
+                     'blockIndex': None, 'annIndex': None,
+                     'heading': 'Moved by scanner'}},
+            {'id': 'f2', 'path': 'welcome', 'quote': 'x', 'issue': 'flag only',
+             'current': 'content', 'proposed': 'announcement',
+             'confidence': 'low', 'status': 'open', 'fix': None},
+        ],
+    }
+    json.dump(scan_fixture, open(os.path.join(ai_dir, 'aiscan.json'), 'w'))
+    status, body = req('/admin', headers=COOKIE)
+    assert '🔎 2'.encode() in body, 'open-findings badge on the Sundays list'
+    assert b'2 open findings' in body, 'scanner card lists the flagged Sunday'
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'date': '2020-01-05', 'ids': ['f1']}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200, (status, body)
+    ap = json.loads(body)
+    assert ap['ok'] and ap['applied'] == ['f1'] and not ap['skipped'], ap
+    g_after = json.load(open(os.path.join(ai_dir, 'guide.json')))
+    assert len(g_after['order']) == len(ai_guide['order']) - 1, 'item moved out'
+    moved = g_after['announcements'][-1]
+    assert moved['heading'] == 'Moved by scanner'
+    _norm = lambda s: ' '.join(app_mod.clean_plain(s).split())  # noqa: E731
+    assert _norm(item['body'][0]['text'])[:40] in _norm(moved['text']), \
+        'printed text preserved, not rewritten'
+    assert any('AI repair applied' in n for n in g_after['notes'])
+    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
+    assert scan_after['findings'][0]['status'] == 'applied'
+    assert 'Moved by scanner' in open(os.path.join(ai_dir, 'index.html')).read(), \
+        'apply re-rendered the page'
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'date': '2020-01-05', 'ids': ['f2'],
+                                        'dismiss': True}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body)['ok'], body
+    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
+    assert scan_after['findings'][1]['status'] == 'dismissed'
+    status, body = req('/admin/aiscan/2020-01-05', headers=COOKIE)
+    assert status == 200 and b'misfiled as order-of-worship content' in body, \
+        'scan page embeds the stored findings'
+    assert b'"applied"' in body and b'"dismissed"' in body, 'statuses persisted'
 
     out_dir = os.path.join(scratch, 'public', '2026-08-02')
     for f in ('index.html', 'guide.json', 'cover.jpg'):
