@@ -52,7 +52,10 @@ becomes the front page.
   against its own Sunday's stored text (typography-tolerant: a plain-ASCII
   quote matches the printed curly quotes and dashes). Dismissed and skipped
   findings are both reversible — a Reopen button on the group (and per
-  Sunday) puts them back to open.
+  Sunday) puts them back to open. "Clear resolved" (per Sunday, or across
+  all Sundays from the admin card) archives applied and dismissed findings
+  into `resolvedFindings` in aiscan.json — out of the pages and groups, kept
+  as history, and preserved across re-scans.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
 Every published Sunday links its printed original: the week-nav strip on a
