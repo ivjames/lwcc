@@ -258,19 +258,35 @@ try:
                 'fix': ({'op': 'discard_announcement', 'orderIndex': None,
                          'blockIndex': None, 'annIndex': 0, 'heading': None}
                         if fix else None)}
+
+    def _ev(fid, quote):
+        return {'id': fid, 'quote': quote, 'issue': 'event misfiled',
+                'current': 'announcement', 'proposed': 'event',
+                'confidence': 'medium', 'status': 'open',
+                'fix': {'op': 'announcement_to_event', 'orderIndex': None,
+                        'blockIndex': None, 'annIndex': 1, 'eventIndex': None,
+                        'heading': None}}
     for d, fs in (('2026-01-04', [_f('f1', 'LEISURE  WORLD community church'),
-                                  _f('f2', 'one-off block', fix=False)]),
+                                  _f('f2', 'one-off block', fix=False),
+                                  _ev('f3', 'Concert this Sunday at 3 PM')]),
                   ('2026-01-11', [_f('f1', '<b>Leisure World</b> Community Church',
-                                     status='applied')])):
+                                     status='applied'),
+                                  _ev('f3', 'Church picnic next Saturday')])):
         open(os.path.join(app_mod.PUBLIC, d, 'index.html'), 'w').write('x')
         json.dump({'findings': fs},
                   open(os.path.join(app_mod.PUBLIC, d, 'aiscan.json'), 'w'))
     agg = app_mod.aiscan_aggregate()
-    assert len(agg) == 1, agg
+    assert [g['kind'] for g in agg] == ['exact', 'similar'], agg
     assert [i['date'] for i in agg[0]['items']] == ['2026-01-11', '2026-01-04'], \
-        'newest first, singleton excluded'
+        'newest first, singleton category excluded'
     assert [i['status'] for i in agg[0]['items']] == ['applied', 'open']
     assert agg[0]['current'] == 'announcement' and agg[0]['proposed'] == 'discard'
+    sim = agg[1]
+    assert sim['op'] == 'announcement_to_event' and len(sim['items']) == 2, sim
+    assert {i['quote'] for i in sim['items']} == \
+        {'Concert this Sunday at 3 PM', 'Church picnic next Saturday'}, \
+        'varying-text findings grouped by error category, quotes carried'
+    assert all(i['fixable'] for i in sim['items'])
 finally:
     app_mod.AISCAN_JOBS.clear()
     for k, v in _saved.items():
@@ -695,6 +711,26 @@ try:
         assert [f['id'] for f in sc['resolvedFindings']] == ['g1']
     status, body = req('/admin', headers=COOKIE)
     assert b'id="aiscanclear"' not in body, 'nothing settled left to clear'
+
+    # Varying-text findings with the same error category group in the
+    # "similar" tier of the aggregate view.
+    for d, q in zip(agg_dates, ('Concert this Sunday at 3 PM',
+                                'Church picnic next Saturday')):
+        sp = os.path.join(scratch, 'public', d, 'aiscan.json')
+        sc = json.load(open(sp))
+        sc['findings'].append({'id': 'h1', 'quote': q,
+                               'issue': 'event misfiled as announcement',
+                               'current': 'announcement', 'proposed': 'event',
+                               'confidence': 'medium', 'status': 'open',
+                               'fix': {'op': 'announcement_to_event',
+                                       'orderIndex': None, 'blockIndex': None,
+                                       'annIndex': 0, 'eventIndex': None,
+                                       'heading': None}})
+        json.dump(sc, open(sp, 'w'))
+    status, body = req('/admin/aiscan', headers=COOKIE)
+    assert status == 200 and b'"kind": "similar"' in body \
+        and b'Church picnic next Saturday' in body, \
+        'varying-text category appears in the similar tier'
 
     # Every admin page's inline JS must actually parse (all scanner states
     # are populated at this point: open, applied, dismissed, groups).

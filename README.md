@@ -45,9 +45,11 @@ becomes the front page.
   (default 10) at a time, markers in `queue/aiscan/` re-enqueued at startup —
   so an `lwcc redeploy` pauses in-flight scans rather than losing them, and
   the admin pages just watch the queue until it drains. `GET /admin/aiscan`
-  aggregates matching findings across Sundays — the same quoted text flagged
-  with the same reclassification on two or more guides (the weekly masthead
-  filed as an announcement, a recurring page direction absorbed as content) —
+  aggregates matching findings across Sundays in two tiers — identical
+  quoted text flagged the same way on two or more guides (the weekly
+  masthead filed as an announcement), and same-error-varying-text groups
+  (the same misclassification with different words each week, grouped by
+  current → proposed and fix op) —
   and applies or dismisses a whole group at once, each fix still verified
   against its own Sunday's stored text (typography-tolerant: a plain-ASCII
   quote matches the printed curly quotes and dashes). Dismissed and skipped
