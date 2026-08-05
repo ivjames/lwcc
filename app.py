@@ -752,30 +752,66 @@ def aiscan_group_key(f):
 
 
 def aiscan_aggregate():
-    """Matching findings across all published Sundays, grouped: only groups
-    spanning two or more Sundays qualify (singletons stay on their own
-    Sunday's scan page). Sorted widest first."""
-    groups = {}
+    """Matching findings across all published Sundays, in two tiers:
+    'exact' groups (same quoted text, same reclassification, two or more
+    Sundays — the recurring-fixture case) and 'similar' groups (same error
+    category — current -> proposed and the same fix op — where the quoted
+    text varies week to week, e.g. every announcement misfiled as a special
+    event). A finding sits in at most one group; singleton categories stay
+    on their own Sunday's scan page. Sorted exact first, then widest."""
+    all_items = []
     for d in published_dates():
         for f in (aiscan_load(d) or {}).get('findings') or []:
-            key = aiscan_group_key(f)
-            if key[0]:
-                groups.setdefault(key, []).append((d, f))
+            all_items.append((d, f))
+
+    def item_view(d, f, full=False):
+        v = {'date': d, 'id': f.get('id'), 'status': f.get('status'),
+             'confidence': f.get('confidence'), 'fixable': bool(f.get('fix'))}
+        if full:
+            v['quote'] = f.get('quote')
+            v['issue'] = f.get('issue')
+        return v
+
+    exact = {}
+    for d, f in all_items:
+        key = aiscan_group_key(f)
+        if key[0]:
+            exact.setdefault(key, []).append((d, f))
     out = []
-    for items in groups.values():
+    grouped = set()
+    for items in exact.values():
         if len({d for d, _ in items}) < 2:
             continue
         rep = items[0][1]
         out.append({
+            'kind': 'exact',
             'quote': rep.get('quote'),
             'issue': rep.get('issue'),
             'current': rep.get('current'),
             'proposed': rep.get('proposed'),
-            'items': [{'date': d, 'id': f.get('id'), 'status': f.get('status'),
-                       'confidence': f.get('confidence'),
-                       'fixable': bool(f.get('fix'))} for d, f in items],
+            'items': [item_view(d, f) for d, f in items],
         })
-    out.sort(key=lambda g: (-len(g['items']), g['quote'] or ''))
+        grouped.update((d, f.get('id')) for d, f in items)
+
+    cats = {}
+    for d, f in all_items:
+        if (d, f.get('id')) in grouped:
+            continue
+        op = (f.get('fix') or {}).get('op') or 'none'
+        cats.setdefault((f.get('current'), f.get('proposed'), op), []) \
+            .append((d, f))
+    for (cur, prop, op), items in sorted(cats.items(),
+                                         key=lambda kv: str(kv[0])):
+        if len(items) < 2:
+            continue
+        items.sort(key=lambda df: df[0], reverse=True)
+        out.append({
+            'kind': 'similar', 'op': op,
+            'current': cur, 'proposed': prop,
+            'items': [item_view(d, f, full=True) for d, f in items],
+        })
+    out.sort(key=lambda g: (0 if g['kind'] == 'exact' else 1,
+                            -len(g['items']), g.get('quote') or ''))
     return out
 
 
@@ -1070,16 +1106,22 @@ AISCAN_AGG_PAGE = ("""<!DOCTYPE html>
     text-decoration:none;color:#054253}
   .meta{color:#54574a;font-size:.88em}
   button.mini{padding:4px 12px;font-size:.82em;margin-right:8px;background:#3f6b82}
+  h2.sec{font-family:Arial,Helvetica,sans-serif;font-size:.95rem;letter-spacing:2px;
+    text-transform:uppercase;color:#054253;border-bottom:2px solid #0a5a6e;
+    display:inline-block;padding-bottom:3px;margin:22px 0 2px}
+  .itemrow{margin:5px 0}
 </style></head>
 <body>
 <h1>AI Article Scanner &mdash; Matching Findings</h1>
 <div class="card">
-  <p>Findings that recur across Sundays — the same quoted text flagged with
-  the same reclassification on two or more guides (the weekly masthead filed
-  as an announcement, the same page direction absorbed as content, &hellip;).
-  Apply or dismiss a whole group at once; each fix is still verified against
-  its own Sunday&#8217;s stored text before anything changes, and one-off
-  findings stay on their Sunday&#8217;s scan page.</p>
+  <p>Findings that recur across Sundays, in two tiers: <b>identical text</b>
+  (the same quoted text flagged the same way on two or more guides — the
+  weekly masthead, a repeated page direction) and <b>same error, varying
+  text</b> (the same misclassification with different words each week —
+  every announcement misfiled as a special event, say). Apply or dismiss a
+  whole group at once; each fix is still verified against its own
+  Sunday&#8217;s stored text before anything changes, and one-off findings
+  stay on their Sunday&#8217;s scan page.</p>
   <div id="groups"></div>
 </div>
 <p><a href="/admin">Back to admin</a> &middot; <a href="/archive">Archive</a></p>
@@ -1090,39 +1132,72 @@ const GROUPS = JSON.parse($('agg-data').textContent);
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+const cut = (s, n) => {
+  s = String(s == null ? '' : s);
+  return s.length > n ? s.slice(0, n) + '…' : s;
+};
+
+function groupHtml(g, gi) {
+  const openFix = g.items.filter(i => i.status === 'open' && i.fixable).length;
+  const open = g.items.filter(i => i.status === 'open').length;
+  const reopenable = g.items.filter(i =>
+    i.status === 'dismissed' || i.status === 'skipped').length;
+  const noFixDates = [...new Set(g.items
+    .filter(i => i.status === 'open' && !i.fixable).map(i => i.date))];
+  const btn = (mode, label) =>
+    '<button class="mini" data-gi="' + gi + '" data-mode="' + mode + '">' +
+    label + '</button>';
+  const buttons =
+    (openFix ? btn('apply', 'Apply all open fixes (' + openFix + ')') : '') +
+    (noFixDates.length ? btn('rescan', 'Re-scan for fixes (' +
+      noFixDates.length + ' Sundays)') : '') +
+    (open ? btn('dismiss', 'Dismiss all open (' + open + ')') : '') +
+    (reopenable ? btn('undismiss', 'Reopen (' + reopenable + ')') : '');
+  const dates = new Set(g.items.map(i => i.date)).size;
+  const head = '<b>' + esc(g.current) + ' &rarr; ' + esc(g.proposed) + '</b>' +
+    (g.kind === 'similar' && g.op !== 'none'
+      ? ' <span class="meta">fix: ' + esc(g.op) + '</span>' : '') +
+    ' <span class="meta">' + g.items.length + ' finding' +
+    (g.items.length > 1 ? 's' : '') + ' on ' + dates + ' Sunday' +
+    (dates > 1 ? 's' : '') + '</span>';
+  let body;
+  if (g.kind === 'exact') {
+    body = '<div>' + esc(g.issue) + '</div>' +
+      '<blockquote>' + esc(g.quote) + '</blockquote>' +
+      '<div>' + g.items.map(i =>
+        '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '">' +
+        esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
+        esc(i.status) + '</span></a>').join('') + '</div>';
+  } else {
+    body = g.items.map(i =>
+      '<div class="itemrow" title="' + esc(i.issue) + '">' +
+      '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '">' +
+      esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
+      esc(i.status) + '</span></a> ' +
+      '<span class="meta">&#8220;' + esc(cut(i.quote, 100)) + '&#8221;</span>' +
+      '<span class="tag ' + esc(i.confidence) + '">' + esc(i.confidence) +
+      '</span></div>').join('');
+  }
+  return '<div class="group">' + head + body +
+    (buttons ? '<p>' + buttons + '<span id="msg' + gi + '"></span></p>' : '') +
+    '</div>';
+}
+
 function render() {
   if (!GROUPS.length) {
     $('groups').innerHTML = '<p>No matching findings across Sundays yet — ' +
       'run AI scans from the <a href="/admin">admin panel</a> first.</p>';
     return;
   }
-  $('groups').innerHTML = GROUPS.map((g, gi) => {
-    const openFix = g.items.filter(i => i.status === 'open' && i.fixable).length;
-    const open = g.items.filter(i => i.status === 'open').length;
-    const reopenable = g.items.filter(i =>
-      i.status === 'dismissed' || i.status === 'skipped').length;
-    const noFixDates = [...new Set(g.items
-      .filter(i => i.status === 'open' && !i.fixable).map(i => i.date))];
-    const btn = (mode, label) =>
-      '<button class="mini" data-gi="' + gi + '" data-mode="' + mode + '">' +
-      label + '</button>';
-    const buttons =
-      (openFix ? btn('apply', 'Apply all open fixes (' + openFix + ')') : '') +
-      (noFixDates.length ? btn('rescan', 'Re-scan for fixes (' +
-        noFixDates.length + ' Sundays)') : '') +
-      (open ? btn('dismiss', 'Dismiss all open (' + open + ')') : '') +
-      (reopenable ? btn('undismiss', 'Reopen (' + reopenable + ')') : '');
-    return '<div class="group">' +
-      '<b>' + esc(g.current) + ' &rarr; ' + esc(g.proposed) + '</b>' +
-      ' <span class="meta">on ' + g.items.length + ' Sundays</span>' +
-      '<div>' + esc(g.issue) + '</div>' +
-      '<blockquote>' + esc(g.quote) + '</blockquote>' +
-      '<div>' + g.items.map(i =>
-        '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '">' +
-        esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
-        esc(i.status) + '</span></a>').join('') + '</div>' +
-      (buttons ? '<p>' + buttons + '<span id="msg' + gi + '"></span></p>' : '') +
-      '</div>';
+  const sections = [
+    ['exact', 'Identical text across Sundays'],
+    ['similar', 'Same error, varying text'],
+  ];
+  $('groups').innerHTML = sections.map(([kind, title]) => {
+    const withIdx = GROUPS.map((g, gi) => [g, gi]).filter(p => p[0].kind === kind);
+    if (!withIdx.length) return '';
+    return '<h2 class="sec">' + title + '</h2>' +
+      withIdx.map(p => groupHtml(p[0], p[1])).join('');
   }).join('');
   document.querySelectorAll('#groups button[data-mode]').forEach(b =>
     b.addEventListener('click', () => b.dataset.mode === 'rescan'
