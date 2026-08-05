@@ -437,6 +437,65 @@ def _apply_one(g, fix, quote):
     return f'unknown fix op {op!r}'
 
 
+def _relocate(g, op, quote):
+    """A fix whose stored index went stale (earlier fixes, hand edits, or a
+    re-convert shifted the guide) can often be recovered: search the whole
+    guide for the quoted text among targets the op could act on. Returns
+    (index_updates, reason) — updates only when exactly one target matches;
+    zero or several matches refuse with a reason, never a guess."""
+    q = _canon(quote)
+    if not q:
+        return None, None
+    order = g.get('order') or []
+    anns = g.get('announcements') or []
+    if op in ('item_to_stage', 'item_to_announcement'):
+        cands = [{'orderIndex': i} for i, o in enumerate(order)
+                 if o.get('kind') == 'item' and q in _canon(_item_text(o))]
+    elif op == 'stage_to_item':
+        cands = [{'orderIndex': i} for i, o in enumerate(order)
+                 if o.get('kind') == 'stage' and q in _canon(o.get('text'))]
+    elif op in ('para_to_announcement', 'para_to_stage', 'discard_para'):
+        cands = [{'orderIndex': i, 'blockIndex': j}
+                 for i, o in enumerate(order) if o.get('kind') == 'item'
+                 for j, b in enumerate(o.get('body') or [])
+                 if q in _canon(b.get('text'))]
+    elif op in ('discard_announcement', 'announcement_to_event',
+                'announcement_to_stage'):
+        cands = [{'annIndex': i} for i, a in enumerate(anns)
+                 if q in _canon((a.get('heading') or '') + ' '
+                                + (a.get('text') or ''))]
+    elif op == 'event_to_announcement':
+        cands = [{'eventIndex': i}
+                 for i, ev in enumerate(g.get('specialEvents') or [])
+                 if q in _canon((ev.get('heading') or '') + ' '
+                                + ' '.join(ev.get('paragraphs') or []))]
+    elif op == 'welcome_to_announcement':
+        cands = [{'blockIndex': j}
+                 for j, b in enumerate((g.get('welcome') or {}).get('body') or [])
+                 if q in _canon(b.get('text'))]
+    else:
+        return None, None
+    if len(cands) == 1:
+        return cands[0], None
+    if not cands:
+        return None, ('quoted text no longer exists in the guide — likely '
+                      'already fixed or edited away; dismiss this finding')
+    return None, (f'quoted text appears in {len(cands)} places — '
+                  'ambiguous, fix by hand')
+
+
+def _apply_relocated(g, fix, quote):
+    """Apply at the stored index; if that fails, relocate the quote and
+    retry once at the recovered position."""
+    err = _apply_one(g, fix, quote)
+    if err is None:
+        return None
+    updates, reason = _relocate(g, fix.get('op'), quote)
+    if updates is not None:
+        return _apply_one(g, {**fix, **updates}, quote)
+    return reason or err
+
+
 def apply_findings(guide, findings, ids):
     """Apply the selected findings to a copy of the guide. Returns
     (new_guide, results) where results maps finding id -> None (applied) or a
@@ -467,7 +526,7 @@ def apply_findings(guide, findings, ids):
 
     results = {}
     for f in sorted(chosen, key=sort_key):
-        results[f['id']] = _apply_one(g, f['fix'], f.get('quote') or '')
+        results[f['id']] = _apply_relocated(g, f['fix'], f.get('quote') or '')
     if any(r is None for r in results.values()):
         # an untitled item whose body was entirely moved/discarded is an
         # empty husk — drop it rather than render a blank entry

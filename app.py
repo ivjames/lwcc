@@ -860,6 +860,21 @@ def apply_aiscan(d, ids, action='apply'):
             scan['resolvedFindings'] = (scan.get('resolvedFindings') or []) + moved
             aiscan_save(d, scan)
         return {f.get('id'): None for f in moved}
+    if action == 'retry':
+        # One-click recovery for skipped fixes: reopen them and fall through
+        # to the apply path, which relocates stale positions by quote. Empty
+        # ids = every skipped finding that has a fix.
+        retry_ids = []
+        for f in findings:
+            if f.get('status') == 'skipped' and f.get('fix') \
+                    and (not ids or f.get('id') in ids):
+                f['status'] = 'open'
+                f.pop('statusNote', None)
+                retry_ids.append(f['id'])
+        if not retry_ids:
+            return {}
+        ids = retry_ids
+        action = 'apply'
     if action == 'undismiss':
         # Reopens dismissed findings and skipped ones alike — a skipped fix
         # (quote mismatch) is retryable once matching improves or the guide
@@ -978,8 +993,12 @@ function render() {
       f.status === 'dismissed' || f.status === 'skipped');
     const settled = SCAN.findings.filter(f =>
       f.status === 'applied' || f.status === 'dismissed').length;
+    const skippedFix = SCAN.findings.filter(f =>
+      f.status === 'skipped' && f.fix).length;
     const buttons =
       (open.some(f => f.fix) ? '<button id="applysel">Apply selected</button>' : '') +
+      (skippedFix ? '<button id="retryskipped" class="mini">Retry skipped fixes (' +
+        skippedFix + ')</button>' : '') +
       (open.length ? '<button id="dismisssel" class="mini">Dismiss selected</button>' : '') +
       (reopenable.length ? '<button id="undismisssel" class="mini">Reopen selected</button>' : '') +
       (settled ? '<button id="archiveall" class="mini">Clear resolved (' +
@@ -991,8 +1010,10 @@ function render() {
       'quoted text is re-checked against this Sunday&#8217;s stored guide; ' +
       'a skip means the check failed — usually because the guide changed ' +
       'after the scan (earlier fixes, a hand-edit, or a re-convert). The ' +
-      'reason is noted on each skipped finding. Reopen retries as-is; ' +
-      're-running the scan refreshes stale positions.</p>';
+      'reason is noted on each skipped finding. <b>Retry skipped fixes</b> ' +
+      'relocates the quoted text in the changed guide and applies when it ' +
+      'matches exactly one place; text that is gone or ambiguous still ' +
+      'refuses, and re-running the scan refreshes everything.</p>';
   }
   const archived = (SCAN.resolvedFindings || []).length;
   if (archived) {
@@ -1027,17 +1048,21 @@ function render() {
   if (ap) ap.addEventListener('click', act('apply'));
   if (di) di.addEventListener('click', act('dismiss'));
   if (un) un.addEventListener('click', act('undismiss'));
-  const ar = $('archiveall');
-  if (ar) ar.addEventListener('click', async () => {
-    ar.disabled = true;
-    const res = await fetch('/api/aiscan-apply', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({date: '__DATE__', archive: true}),
+  const oneShot = (id, body) => {
+    const b = $(id);
+    if (b) b.addEventListener('click', async () => {
+      b.disabled = true;
+      const res = await fetch('/api/aiscan-apply', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({ok: false}));
+      if (!data.ok) { $('applymsg').textContent = 'Failed: ' + (data.error || res.status); return; }
+      location.reload();
     });
-    const data = await res.json().catch(() => ({ok: false}));
-    if (!data.ok) { $('applymsg').textContent = 'Failed: ' + (data.error || res.status); return; }
-    location.reload();
-  });
+  };
+  oneShot('archiveall', {date: '__DATE__', archive: true});
+  oneShot('retryskipped', {date: '__DATE__', retry: true});
 }
 render();
 
@@ -1174,8 +1199,11 @@ function groupHtml(g, gi) {
   const btn = (mode, label) =>
     '<button class="mini" data-gi="' + gi + '" data-mode="' + mode + '">' +
     label + '</button>';
+  const skippedFix = g.items.filter(i =>
+    i.status === 'skipped' && i.fixable).length;
   const buttons =
     (openFix ? btn('apply', 'Apply all open fixes (' + openFix + ')') : '') +
+    (skippedFix ? btn('retry', 'Retry skipped fixes (' + skippedFix + ')') : '') +
     (noFixDates.length ? btn('rescan', 'Re-scan for fixes (' +
       noFixDates.length + ' Sundays)') : '') +
     (open ? btn('dismiss', 'Dismiss all open (' + open + ')') : '') +
@@ -1234,8 +1262,10 @@ function render() {
       'quoted text is re-checked against that Sunday&#8217;s stored guide. ' +
       'A skip means the check failed — usually because the guide changed ' +
       'after the scan (earlier fixes applied, a hand-edit, or a re-convert ' +
-      'moved the text). Each skipped finding carries its reason. Reopen ' +
-      'retries as-is; re-scanning the Sunday refreshes stale positions.</p>';
+      'moved the text). Each skipped finding carries its reason. ' +
+      '<b>Retry skipped fixes</b> relocates the quoted text in the changed ' +
+      'guide and applies when it matches exactly one place; text that is ' +
+      'gone or ambiguous still refuses, and a re-scan refreshes everything.</p>';
   }
   $('groups').innerHTML = html;
   document.querySelectorAll('#groups button[data-mode]').forEach(b =>
@@ -1276,14 +1306,17 @@ async function rescan(gi) {
   poll();
 }
 
-// mode: 'apply' (open findings with a fix), 'dismiss' (open findings),
+// mode: 'apply' (open findings with a fix), 'retry' (skipped findings with
+// a fix — reopened, relocated, re-applied), 'dismiss' (open findings),
 // 'undismiss' (dismissed or skipped findings back to open)
 async function act(gi, mode) {
   const g = GROUPS[gi];
-  const want = mode === 'undismiss' ? ['dismissed', 'skipped'] : ['open'];
+  const want = mode === 'undismiss' ? ['dismissed', 'skipped']
+    : mode === 'retry' ? ['skipped'] : ['open'];
+  const needFix = mode === 'apply' || mode === 'retry';
   const byDate = {};
   for (const i of g.items) {
-    if (!want.includes(i.status) || (mode === 'apply' && !i.fixable)) continue;
+    if (!want.includes(i.status) || (needFix && !i.fixable)) continue;
     (byDate[i.date] = byDate[i.date] || []).push(i.id);
   }
   const items = Object.entries(byDate).map(([date, ids]) => ({date: date, ids: ids}));
@@ -1292,7 +1325,8 @@ async function act(gi, mode) {
   const res = await fetch('/api/aiscan-apply', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({items: items, dismiss: mode === 'dismiss',
-                          undismiss: mode === 'undismiss'}),
+                          undismiss: mode === 'undismiss',
+                          retry: mode === 'retry'}),
   });
   if (res.status === 401) { location.reload(); return; }
   const data = await res.json().catch(() => ({ok: false}));
@@ -2814,7 +2848,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                        **({'skipped': skipped} if skipped else {})})
             self.send_json({'ok': True, 'queued': queued, 'skipped': skipped})
             return
-        action = ('archive' if data.get('archive')
+        action = ('retry' if data.get('retry')
+                  else 'archive' if data.get('archive')
                   else 'undismiss' if data.get('undismiss')
                   else 'dismiss' if data.get('dismiss') else 'apply')
         if isinstance(data.get('items'), list):
@@ -2826,8 +2861,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     continue
                 d = str(entry.get('date') or '')
                 ids = [str(i) for i in (entry.get('ids') or [])][:200]
-                if not ids and action != 'archive':
-                    continue      # archive with no ids = all settled findings
+                if not ids and action not in ('archive', 'retry'):
+                    continue      # archive/retry with no ids = all eligible
                 if not DATE_DIR_RE.match(d) or \
                         not os.path.exists(os.path.join(PUBLIC, d, 'guide.json')):
                     results[d or '?'] = {'error': 'no published guide'}
