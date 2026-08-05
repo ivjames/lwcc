@@ -57,8 +57,13 @@ becomes the front page.
   Sunday) puts them back to open. "Clear resolved" (per Sunday, or across
   all Sundays from the admin card) archives applied and dismissed findings
   into `resolvedFindings` in aiscan.json — out of the pages and groups, kept
-  as history, and preserved across re-scans. A group whose findings carry no
-  mechanical fix offers "Re-scan for fixes": its Sundays re-scan through the
+  as history, and preserved across re-scans. Skipped fixes are recoverable:
+  "Retry skipped fixes" (per group and per Sunday) reopens them and re-applies
+  through a relocation pass — when a stored position went stale (earlier
+  fixes, hand edits, a re-convert), the quoted text is searched for across
+  the guide and the fix applies only where it matches exactly one target;
+  vanished or ambiguous text still refuses with the reason. A group whose
+  findings carry no mechanical fix offers "Re-scan for fixes": its Sundays re-scan through the
   queue so the model can pick from the current fix vocabulary, then the
   group returns applyable.
 - `GET /healthz` — liveness for the platform `health-check` sweep

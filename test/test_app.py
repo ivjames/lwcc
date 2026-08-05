@@ -106,7 +106,7 @@ assert _scan['findings'][4]['fix'] is None, 'op "none" becomes flag-only'
 _g2, _res = aiscan.apply_findings(_g, _scan['findings'],
                                   ['f1', 'f2', 'f3', 'f4', 'f5'])
 assert _res['f1'] is None and _res['f2'] is None and _res['f3'] is None
-assert 'not found' in _res['f4'], 'mismatched quote refused, not applied'
+assert 'no longer exists' in _res['f4'], 'vanished quote refused, not applied'
 assert 'no mechanical fix' in _res['f5']
 assert _g2['order'][1] == {'kind': 'stage',
                            'text': 'Please remain seated during the postlude.'}
@@ -178,6 +178,34 @@ assert _res == {'p1': None, 'p2': None}, _res
 assert len(_g8['order']) == 1 and _g8['order'][0]['label'] == 'Welcome', \
     'furniture dropped and the emptied untitled item pruned'
 assert _g8['order'][0]['body'][0]['text'] == 'Good morning and welcome.'
+
+# stale indexes are recoverable: the applier relocates the quoted text and
+# applies only when it matches exactly one plausible target — equal matches
+# refuse rather than guess.
+_g9 = {'order': [], 'welcome': None, 'specialEvents': [],
+       'announcements': [
+           {'heading': 'New', 'kind': 'note', 'text': 'Inserted since the scan.'},
+           {'heading': None, 'kind': 'note',
+            'text': 'LEISURE WORLD COMMUNITY CHURCH'}]}
+_g10, _res = aiscan.apply_findings(_g9, [
+    {'id': 'r1', 'quote': 'LEISURE WORLD COMMUNITY CHURCH', 'issue': 'x',
+     'current': 'announcement', 'proposed': 'discard', 'confidence': 'high',
+     'status': 'open', 'fix': _fix('discard_announcement', annIndex=0)}],
+    ['r1'])
+assert _res['r1'] is None, _res
+assert [a['heading'] for a in _g10['announcements']] == ['New'], \
+    'stale index relocated by quote — the right entry removed'
+
+_g11 = {'order': [], 'welcome': None, 'specialEvents': [],
+        'announcements': [{'heading': None, 'kind': 'note', 'text': 'dup'},
+                          {'heading': None, 'kind': 'note', 'text': 'dup'},
+                          {'heading': None, 'kind': 'note', 'text': 'other'}]}
+_g12, _res = aiscan.apply_findings(_g11, [
+    {'id': 'r2', 'quote': 'dup', 'issue': 'x', 'current': 'announcement',
+     'proposed': 'discard', 'confidence': 'high', 'status': 'open',
+     'fix': _fix('discard_announcement', annIndex=2)}], ['r2'])
+assert 'ambiguous' in _res['r2'], 'never guesses between equal matches'
+assert len(_g12['announcements']) == 3, 'nothing removed on ambiguity'
 
 # a refusal from the safety classifiers is an error, not an empty scan
 try:
@@ -569,6 +597,21 @@ try:
     assert scan_after['findings'][0]['status'] == 'applied'
     assert 'Moved by scanner' in open(os.path.join(ai_dir, 'index.html')).read(), \
         'apply re-rendered the page'
+
+    # Retry skipped fixes: one call reopens them and re-applies through the
+    # relocation path; a quote gone from the guide re-skips with the clearer
+    # reason rather than being guessed at.
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'date': '2020-01-05',
+                                        'retry': True}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200, (status, body)
+    rt = json.loads(body)
+    assert rt['ok'] and rt['applied'] == [] \
+        and 'no longer exists' in rt['skipped']['f3'], rt
+    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
+    assert scan_after['findings'][2]['status'] == 'skipped', \
+        'unrecoverable fix re-skips instead of applying blind'
     status, body = req('/api/aiscan-apply',
                        data=json.dumps({'date': '2020-01-05', 'ids': ['f2'],
                                         'dismiss': True}).encode(),
