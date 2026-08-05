@@ -55,7 +55,10 @@ becomes the front page.
   Sunday) puts them back to open. "Clear resolved" (per Sunday, or across
   all Sundays from the admin card) archives applied and dismissed findings
   into `resolvedFindings` in aiscan.json — out of the pages and groups, kept
-  as history, and preserved across re-scans.
+  as history, and preserved across re-scans. A group whose findings carry no
+  mechanical fix offers "Re-scan for fixes": its Sundays re-scan through the
+  queue so the model can pick from the current fix vocabulary, then the
+  group returns applyable.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
 Every published Sunday links its printed original: the week-nav strip on a
