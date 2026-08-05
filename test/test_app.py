@@ -457,6 +457,21 @@ try:
         'scan page embeds the stored findings'
     assert b'"applied"' in body and b'"dismissed"' in body, 'statuses persisted'
 
+    # Dismissals are reversible: undismiss puts the finding back to open;
+    # a finding that isn't dismissed is refused, not silently touched.
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'date': '2020-01-05', 'ids': ['f2'],
+                                        'undismiss': True}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body)['applied'] == ['f2'], body
+    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
+    assert scan_after['findings'][1]['status'] == 'open', 'dismissal reversed'
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'date': '2020-01-05', 'ids': ['f1'],
+                                        'undismiss': True}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert json.loads(body)['skipped'] == {'f1': 'not dismissed'}, body
+
     # Matching findings across guides: the same quoted text flagged the same
     # way on several Sundays aggregates at /admin/aiscan, and one action
     # applies each Sunday's fix on its own guide.
@@ -510,6 +525,39 @@ try:
     status, body = req('/admin', headers=COOKIE)
     assert b'Matching findings across' in body, \
         'admin card links the aggregate view'
+
+    # Group-level dismiss/undismiss round-trip across guides.
+    for d in agg_dates:
+        sp = os.path.join(scratch, 'public', d, 'aiscan.json')
+        sc = json.load(open(sp))
+        sc['findings'].append({'id': 'g2', 'path': 'order[0]',
+                               'quote': 'RECURRING POSTER FRAGMENT',
+                               'issue': 'poster residue kept as content',
+                               'current': 'content', 'proposed': 'discard',
+                               'confidence': 'low', 'status': 'open',
+                               'fix': None})
+        json.dump(sc, open(sp, 'w'))
+    items = [{'date': d, 'ids': ['g2']} for d in agg_dates]
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'items': items, 'dismiss': True}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body)['ok'], body
+    for d in agg_dates:
+        sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
+        assert sc['findings'][-1]['status'] == 'dismissed', (d, sc['findings'][-1])
+    status, body = req('/admin/aiscan', headers=COOKIE)
+    assert status == 200 and b'RECURRING POSTER FRAGMENT' in body \
+        and b'Undismiss' in body, 'dismissed group offers undismiss'
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'items': items, 'undismiss': True}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200, (status, body)
+    br = json.loads(body)
+    assert br['ok'] and all(br['results'][d]['applied'] == ['g2']
+                            for d in agg_dates), br
+    for d in agg_dates:
+        sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
+        assert sc['findings'][-1]['status'] == 'open', 'group dismissal reversed'
 
     out_dir = os.path.join(scratch, 'public', '2026-08-02')
     for f in ('index.html', 'guide.json', 'cover.jpg'):

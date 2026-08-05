@@ -775,20 +775,34 @@ def aiscan_aggregate():
     return out
 
 
-def apply_aiscan(d, ids, dismiss=False):
-    """Apply (or dismiss) selected findings; applied fixes rewrite guide.json
-    and re-render the page. Returns per-finding results."""
+def apply_aiscan(d, ids, action='apply'):
+    """Apply, dismiss, or undismiss selected findings; applied fixes rewrite
+    guide.json and re-render the page. Returns per-finding results (None =
+    the action landed, a string = why it didn't)."""
     scan = aiscan_load(d)
     if not scan:
         raise RuntimeError('no AI scan stored for this Sunday — run one first')
     findings = scan.get('findings') or []
     ids = [i for i in ids if any(f.get('id') == i for f in findings)]
-    if dismiss:
+    if action == 'dismiss':
         for f in findings:
             if f.get('id') in ids and f.get('status') == 'open':
                 f['status'] = 'dismissed'
         aiscan_save(d, scan)
         return {i: None for i in ids}
+    if action == 'undismiss':
+        results = {}
+        for f in findings:
+            if f.get('id') not in ids:
+                continue
+            if f.get('status') == 'dismissed':
+                f['status'] = 'open'
+                f.pop('statusNote', None)
+                results[f['id']] = None
+            else:
+                results[f['id']] = 'not dismissed'
+        aiscan_save(d, scan)
+        return results
     path = os.path.join(PUBLIC, d, 'guide.json')
     with open(path, encoding='utf-8') as fh:
         guide = json.load(fh)
@@ -869,7 +883,7 @@ function render() {
   } else {
     html += SCAN.findings.map(f =>
       '<div class="finding">' +
-      (f.fix && f.status === 'open'
+      (f.status === 'open' || f.status === 'dismissed'
         ? '<input type="checkbox" class="pick" value="' + esc(f.id) + '"> '
         : '') +
       '<b>' + esc(f.current) + ' &rarr; ' + esc(f.proposed) + '</b>' +
@@ -882,29 +896,41 @@ function render() {
       (f.fix ? ' &middot; fix: ' + esc(f.fix.op) : ' &middot; no mechanical fix — edit by hand') +
       (f.statusNote ? ' &middot; ' + esc(f.statusNote) : '') +
       '</div></div>').join('');
-    if (open.some(f => f.fix)) {
-      html += '<p><button id="applysel">Apply selected</button>' +
-        '<button id="dismisssel" class="mini">Dismiss selected</button>' +
-        ' <span id="applymsg"></span></p>';
-    }
+    const dismissed = SCAN.findings.filter(f => f.status === 'dismissed');
+    const buttons =
+      (open.some(f => f.fix) ? '<button id="applysel">Apply selected</button>' : '') +
+      (open.length ? '<button id="dismisssel" class="mini">Dismiss selected</button>' : '') +
+      (dismissed.length ? '<button id="undismisssel" class="mini">Undismiss selected</button>' : '');
+    if (buttons) html += '<p>' + buttons + ' <span id="applymsg"></span></p>';
   }
   html += '</div>';
   box.innerHTML = html;
-  const act = dismiss => async () => {
-    const ids = [...document.querySelectorAll('.pick:checked')].map(c => c.value);
-    if (!ids.length) { $('applymsg').textContent = 'Nothing selected.'; return; }
-    $('applymsg').textContent = dismiss ? 'Dismissing…' : 'Applying…';
+  // mode: 'apply' acts on checked open findings with a fix, 'dismiss' on
+  // checked open findings, 'undismiss' on checked dismissed findings.
+  const act = mode => async () => {
+    const byId = {};
+    for (const f of SCAN.findings) byId[f.id] = f;
+    const want = mode === 'undismiss' ? 'dismissed' : 'open';
+    const ids = [...document.querySelectorAll('.pick:checked')]
+      .map(c => c.value)
+      .filter(id => byId[id] && byId[id].status === want &&
+                    (mode !== 'apply' || byId[id].fix));
+    if (!ids.length) { $('applymsg').textContent = 'Nothing selected for this action.'; return; }
+    $('applymsg').textContent = 'Working…';
     const res = await fetch('/api/aiscan-apply', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({date: '__DATE__', ids: ids, dismiss: dismiss}),
+      body: JSON.stringify({date: '__DATE__', ids: ids,
+                            dismiss: mode === 'dismiss',
+                            undismiss: mode === 'undismiss'}),
     });
     const data = await res.json().catch(() => ({ok: false}));
     if (!data.ok) { $('applymsg').textContent = 'Failed: ' + (data.error || res.status); return; }
     location.reload();
   };
-  const ap = $('applysel'), di = $('dismisssel');
-  if (ap) ap.addEventListener('click', act(false));
-  if (di) di.addEventListener('click', act(true));
+  const ap = $('applysel'), di = $('dismisssel'), un = $('undismisssel');
+  if (ap) ap.addEventListener('click', act('apply'));
+  if (di) di.addEventListener('click', act('dismiss'));
+  if (un) un.addEventListener('click', act('undismiss'));
 }
 render();
 
@@ -1029,6 +1055,14 @@ function render() {
   $('groups').innerHTML = GROUPS.map((g, gi) => {
     const openFix = g.items.filter(i => i.status === 'open' && i.fixable).length;
     const open = g.items.filter(i => i.status === 'open').length;
+    const dismissed = g.items.filter(i => i.status === 'dismissed').length;
+    const buttons =
+      (openFix ? '<button class="mini" onclick="act(' + gi + ', \'apply\')">' +
+        'Apply all open fixes (' + openFix + ')</button>' : '') +
+      (open ? '<button class="mini" onclick="act(' + gi + ', \'dismiss\')">' +
+        'Dismiss all open (' + open + ')</button>' : '') +
+      (dismissed ? '<button class="mini" onclick="act(' + gi + ', \'undismiss\')">' +
+        'Undismiss (' + dismissed + ')</button>' : '');
     return '<div class="group">' +
       '<b>' + esc(g.current) + ' &rarr; ' + esc(g.proposed) + '</b>' +
       ' <span class="meta">on ' + g.items.length + ' Sundays</span>' +
@@ -1038,30 +1072,29 @@ function render() {
         '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '">' +
         esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
         esc(i.status) + '</span></a>').join('') + '</div>' +
-      (open ? '<p>' +
-        (openFix ? '<button class="mini" onclick="act(' + gi + ', false)">' +
-          'Apply all open fixes (' + openFix + ')</button>' : '') +
-        '<button class="mini" onclick="act(' + gi + ', true)">' +
-          'Dismiss all open (' + open + ')</button>' +
-        '<span id="msg' + gi + '"></span></p>' : '') +
+      (buttons ? '<p>' + buttons + '<span id="msg' + gi + '"></span></p>' : '') +
       '</div>';
   }).join('');
 }
 render();
 
-async function act(gi, dismiss) {
+// mode: 'apply' (open findings with a fix), 'dismiss' (open findings),
+// 'undismiss' (dismissed findings back to open)
+async function act(gi, mode) {
   const g = GROUPS[gi];
+  const want = mode === 'undismiss' ? 'dismissed' : 'open';
   const byDate = {};
   for (const i of g.items) {
-    if (i.status !== 'open' || (!dismiss && !i.fixable)) continue;
+    if (i.status !== want || (mode === 'apply' && !i.fixable)) continue;
     (byDate[i.date] = byDate[i.date] || []).push(i.id);
   }
   const items = Object.entries(byDate).map(([date, ids]) => ({date: date, ids: ids}));
   if (!items.length) return;
-  $('msg' + gi).textContent = dismiss ? ' Dismissing…' : ' Applying…';
+  $('msg' + gi).textContent = ' Working…';
   const res = await fetch('/api/aiscan-apply', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({items: items, dismiss: dismiss}),
+    body: JSON.stringify({items: items, dismiss: mode === 'dismiss',
+                          undismiss: mode === 'undismiss'}),
   });
   if (res.status === 401) { location.reload(); return; }
   const data = await res.json().catch(() => ({ok: false}));
@@ -2551,10 +2584,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                        **({'skipped': skipped} if skipped else {})})
             self.send_json({'ok': True, 'queued': queued, 'skipped': skipped})
             return
+        action = ('undismiss' if data.get('undismiss')
+                  else 'dismiss' if data.get('dismiss') else 'apply')
         if isinstance(data.get('items'), list):
-            # Cross-guide batch (the aggregate view): apply/dismiss matching
-            # findings on each of their own Sundays independently.
-            dismiss = bool(data.get('dismiss'))
+            # Cross-guide batch (the aggregate view): apply/dismiss/undismiss
+            # matching findings on each of their own Sundays independently.
             results = {}
             for entry in data['items'][:200]:
                 if not isinstance(entry, dict):
@@ -2568,15 +2602,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     results[d or '?'] = {'error': 'no published guide'}
                     continue
                 try:
-                    r = apply_aiscan(d, ids, dismiss=dismiss)
+                    r = apply_aiscan(d, ids, action=action)
                     results[d] = {
                         'applied': sorted(i for i, v in r.items() if v is None),
                         'skipped': {i: v for i, v in r.items() if v is not None}}
                 except Exception as e:
                     traceback.print_exc()
                     results[d] = {'error': str(e)}
-            audit_log({'action': 'aiscan-dismiss' if dismiss else 'aiscan-apply',
-                       'ok': True, 'dates': sorted(results)})
+            audit_log({'action': f'aiscan-{action}', 'ok': True,
+                       'dates': sorted(results)})
             self.send_json({'ok': True, 'results': results})
             return
         date = str(data.get('date') or '')
@@ -2587,11 +2621,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         try:
             ids = [str(i) for i in (data.get('ids') or [])][:200]
-            dismiss = bool(data.get('dismiss'))
-            results = apply_aiscan(date, ids, dismiss=dismiss)
+            results = apply_aiscan(date, ids, action=action)
             applied = sorted(i for i, r in results.items() if r is None)
             skipped = {i: r for i, r in results.items() if r is not None}
-            audit_log({'action': 'aiscan-dismiss' if dismiss else 'aiscan-apply',
+            audit_log({'action': f'aiscan-{action}',
                        'date': date, 'ok': True, 'ids': ids,
                        **({'skipped': skipped} if skipped else {})})
             self.send_json({'ok': True, 'date': date,
