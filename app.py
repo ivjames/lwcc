@@ -1001,6 +1001,7 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Publish Worship Guides</title><style>__STYLE__
+  body{max-width:960px}
   #drop{border:2px dashed #76a2bf;border-radius:10px;padding:26px;text-align:center;
     color:#54574a;margin:10px 0}
   #drop.over{background:#eaf1f5;border-color:#054253}
@@ -1009,6 +1010,12 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   .st{white-space:nowrap}
   ul.warns{margin:4px 0 0;padding-left:18px;color:#8a6410}
   ul.notes{margin:4px 0 0;padding-left:18px;color:#54574a;font-size:.92em}
+  .detail{max-height:96px;overflow-y:auto;background:#faf9f3;border:1px solid #eeece0;
+    border-radius:6px;padding:4px 8px;font-size:.92em}
+  .detail ul{margin:0;padding-left:16px}
+  .detail li{margin:2px 0}
+  .tscroll{overflow-x:auto}
+  td.det{min-width:230px}
   #summary{font-weight:700;margin-top:10px}
   button.mini{padding:4px 12px;font-size:.82em;margin-left:8px;background:#3f6b82}
   a.minilink{background:#3f6b82;color:#fff;text-decoration:none;border-radius:8px;
@@ -1075,14 +1082,16 @@ function resultCell(q, i) {
   if (!q.data) return '';
   let html = '<a href="' + q.data.url + '">' + q.data.date + '</a>';
   if (q.data.replaced) html += ' <span class="warn">(replaced existing)</span>';
+  let extra = '';
   if (q.data.warnings.length) {
-    html += '<ul class="warns">' +
+    extra += '<ul class="warns">' +
       q.data.warnings.map(w => '<li>' + escHtml(w) + '</li>').join('') + '</ul>';
   }
   if (q.data.notes && q.data.notes.length) {
-    html += '<ul class="notes">' +
+    extra += '<ul class="notes">' +
       q.data.notes.map(n => '<li>' + escHtml(n) + '</li>').join('') + '</ul>';
   }
+  if (extra) html += '<div class="detail">' + extra + '</div>';
   return html;
 }
 
@@ -1489,7 +1498,7 @@ def upload_history(limit=None, status=None):
 def history_rows(entries):
     rows = []
     for e in entries:
-        when = esc(e.get('at') or '').replace('T', '&nbsp;')
+        when = esc(e.get('at') or '').replace('T', '<br>')
         d = e.get('dateISO')
         sunday = f'<a href="/{esc(d)}/">{esc(d)}</a>' if d else '—'
         st = upload_status(e)
@@ -1514,15 +1523,18 @@ def history_rows(entries):
             detail += ('<ul class="notes">'
                        + ''.join(f'<li>{esc(n)}</li>' for n in e['notes'])
                        + '</ul>')
+        if detail:
+            detail = f'<div class="detail">{detail}</div>'
         rows.append(f'<tr><td class="st">{when}</td><td>{esc(e.get("file") or "—")}</td>'
-                    f'<td class="st">{sunday}</td><td class="st">{status_html}</td>'
-                    f'<td>{detail}</td></tr>')
+                    f'<td class="st">{sunday}</td><td>{status_html}</td>'
+                    f'<td class="det">{detail}</td></tr>')
     return '\n'.join(rows)
 
 
-HISTORY_TABLE_HEAD = ('<table><thead><tr><th>When</th><th>File</th>'
-                      '<th>Sunday</th><th>Status</th><th>Details</th></tr>'
-                      '</thead><tbody>')
+HISTORY_TABLE_HEAD = ('<div class="tscroll"><table><thead><tr><th>When</th>'
+                      '<th>File</th><th>Sunday</th><th>Status</th>'
+                      '<th>Details</th></tr></thead><tbody>')
+HISTORY_TABLE_FOOT = '</tbody></table></div>'
 
 
 def failed_uploads_html():
@@ -1574,7 +1586,7 @@ def recent_uploads_html():
                   f're-conversions</button></p>')
     if not entries and not active:
         return ''
-    table = (HISTORY_TABLE_HEAD + history_rows(entries) + '</tbody></table>') if entries else ''
+    table = (HISTORY_TABLE_HEAD + history_rows(entries) + HISTORY_TABLE_FOOT) if entries else ''
     return ('<div class="card">' + active +
             '<p><b>Recent uploads</b> — results are kept, '
             'so closing this page loses nothing. '
@@ -1624,11 +1636,18 @@ def history_page(query):
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Upload History</title><style>{PAGE_STYLE}
+  body{{max-width:960px}}
   table{{width:100%;border-collapse:collapse;font-size:.95em}}
   td,th{{padding:6px 8px;border-bottom:1px solid #d8d6c7;text-align:left;vertical-align:top}}
   .st{{white-space:nowrap}}
   ul.warns{{margin:4px 0 0;padding-left:18px;color:#8a6410}}
   ul.notes{{margin:4px 0 0;padding-left:18px;color:#54574a;font-size:.92em}}
+  .detail{{max-height:96px;overflow-y:auto;background:#faf9f3;border:1px solid #eeece0;
+    border-radius:6px;padding:4px 8px;font-size:.92em}}
+  .detail ul{{margin:0;padding-left:16px}}
+  .detail li{{margin:2px 0}}
+  .tscroll{{overflow-x:auto}}
+  td.det{{min-width:230px}}
 </style></head>
 <body>
 <h1>Upload History</h1>
@@ -1639,7 +1658,7 @@ def history_page(query):
   <p>{filters}</p>
   {HISTORY_TABLE_HEAD}
 {rows}
-</tbody></table>
+{HISTORY_TABLE_FOOT}
 {truncated}
 </div>
 <p><a href="/admin">Back to admin</a> · <a href="/archive">Archive</a></p>
