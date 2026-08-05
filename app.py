@@ -758,10 +758,16 @@ def aiscan_aggregate():
     category — current -> proposed and the same fix op — where the quoted
     text varies week to week, e.g. every announcement misfiled as a special
     event). A finding sits in at most one group; singleton categories stay
-    on their own Sunday's scan page. Sorted exact first, then widest."""
+    on their own Sunday's scan page. Applied findings are settled — the fix
+    is in the guide itself — so they are left out entirely: chips never show
+    them, and a group whose every finding was applied disappears (each
+    Sunday's own scan page keeps the history). Sorted exact first, then
+    widest."""
     all_items = []
     for d in published_dates():
         for f in (aiscan_load(d) or {}).get('findings') or []:
+            if f.get('status') == 'applied':
+                continue
             all_items.append((d, f))
 
     def item_view(d, f, full=False):
@@ -774,9 +780,9 @@ def aiscan_aggregate():
             v['issue'] = f.get('issue')
         return v
 
-    # actionable first: open findings lead, then skipped (retryable),
-    # dismissed, applied — so settled work sinks to the bottom of every list
-    status_rank = {'open': 0, 'skipped': 1, 'dismissed': 2, 'applied': 3}
+    # actionable first: open findings lead, then skipped (retryable), then
+    # dismissed (reopenable) — applied never reaches this view
+    status_rank = {'open': 0, 'skipped': 1, 'dismissed': 2}
 
     def item_sort(items):
         items.sort(key=lambda df: df[0], reverse=True)      # newest first…
@@ -1173,7 +1179,8 @@ AISCAN_AGG_PAGE = ("""<!DOCTYPE html>
   every announcement misfiled as a special event, say). Apply or dismiss a
   whole group at once; each fix is still verified against its own
   Sunday&#8217;s stored text before anything changes, and one-off findings
-  stay on their Sunday&#8217;s scan page.</p>
+  stay on their Sunday&#8217;s scan page. Applied fixes drop off this page
+  — each Sunday&#8217;s own scan page keeps their history.</p>
   <div id="groups"></div>
 </div>
 <p><a href="/admin">Back to admin</a> &middot; <a href="/archive">Archive</a></p>

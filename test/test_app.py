@@ -299,18 +299,23 @@ try:
                                   _f('f2', 'one-off block', fix=False),
                                   _ev('f3', 'Concert this Sunday at 3 PM')]),
                   ('2026-01-11', [_f('f1', '<b>Leisure World</b> Community Church',
-                                     status='applied'),
+                                     status='dismissed'),
                                   _ev('f3', 'Church picnic next Saturday',
                                       status='skipped',
-                                      note='quoted text not found')])):
+                                      note='quoted text not found')]),
+                  ('2026-01-18', [_f('f1', 'Leisure World Community Church',
+                                     status='applied')])):
+        os.makedirs(os.path.join(app_mod.PUBLIC, d), exist_ok=True)
         open(os.path.join(app_mod.PUBLIC, d, 'index.html'), 'w').write('x')
         json.dump({'findings': fs},
                   open(os.path.join(app_mod.PUBLIC, d, 'aiscan.json'), 'w'))
     agg = app_mod.aiscan_aggregate()
     assert [g['kind'] for g in agg] == ['exact', 'similar'], agg
-    assert [i['status'] for i in agg[0]['items']] == ['open', 'applied'], \
+    assert [i['status'] for i in agg[0]['items']] == ['open', 'dismissed'], \
         'open findings lead, settled sink; singleton category excluded'
     assert [i['date'] for i in agg[0]['items']] == ['2026-01-04', '2026-01-11']
+    assert not any(i['status'] == 'applied' for g in agg for i in g['items']), \
+        'applied findings never reach the aggregate view'
     assert agg[0]['current'] == 'announcement' and agg[0]['proposed'] == 'discard'
     sim = agg[1]
     assert sim['op'] == 'announcement_to_event' and len(sim['items']) == 2, sim
@@ -706,8 +711,9 @@ try:
         sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
         assert sc['findings'][0]['status'] == 'applied'
     status, body = req('/admin/aiscan', headers=COOKIE)
-    assert status == 200 and b'"applied"' in body, \
-        'aggregate reflects the applied statuses'
+    assert status == 200 and b'recurring flowers blurb' not in body \
+        and b'"applied"' not in body, \
+        'a fully-applied group drops off the aggregate view'
     status, body = req('/admin', headers=COOKIE)
     assert b'Matching findings across' in body, \
         'admin card links the aggregate view'
