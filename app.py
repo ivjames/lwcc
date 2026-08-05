@@ -1056,13 +1056,13 @@ function render() {
     const openFix = g.items.filter(i => i.status === 'open' && i.fixable).length;
     const open = g.items.filter(i => i.status === 'open').length;
     const dismissed = g.items.filter(i => i.status === 'dismissed').length;
+    const btn = (mode, label) =>
+      '<button class="mini" data-gi="' + gi + '" data-mode="' + mode + '">' +
+      label + '</button>';
     const buttons =
-      (openFix ? '<button class="mini" onclick="act(' + gi + ', \'apply\')">' +
-        'Apply all open fixes (' + openFix + ')</button>' : '') +
-      (open ? '<button class="mini" onclick="act(' + gi + ', \'dismiss\')">' +
-        'Dismiss all open (' + open + ')</button>' : '') +
-      (dismissed ? '<button class="mini" onclick="act(' + gi + ', \'undismiss\')">' +
-        'Undismiss (' + dismissed + ')</button>' : '');
+      (openFix ? btn('apply', 'Apply all open fixes (' + openFix + ')') : '') +
+      (open ? btn('dismiss', 'Dismiss all open (' + open + ')') : '') +
+      (dismissed ? btn('undismiss', 'Undismiss (' + dismissed + ')') : '');
     return '<div class="group">' +
       '<b>' + esc(g.current) + ' &rarr; ' + esc(g.proposed) + '</b>' +
       ' <span class="meta">on ' + g.items.length + ' Sundays</span>' +
@@ -1075,6 +1075,8 @@ function render() {
       (buttons ? '<p>' + buttons + '<span id="msg' + gi + '"></span></p>' : '') +
       '</div>';
   }).join('');
+  document.querySelectorAll('#groups button[data-mode]').forEach(b =>
+    b.addEventListener('click', () => act(+b.dataset.gi, b.dataset.mode)));
 }
 render();
 
