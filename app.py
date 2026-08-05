@@ -791,16 +791,19 @@ def apply_aiscan(d, ids, action='apply'):
         aiscan_save(d, scan)
         return {i: None for i in ids}
     if action == 'undismiss':
+        # Reopens dismissed findings and skipped ones alike — a skipped fix
+        # (quote mismatch) is retryable once matching improves or the guide
+        # is corrected, so it must not be a dead end.
         results = {}
         for f in findings:
             if f.get('id') not in ids:
                 continue
-            if f.get('status') == 'dismissed':
+            if f.get('status') in ('dismissed', 'skipped'):
                 f['status'] = 'open'
                 f.pop('statusNote', None)
                 results[f['id']] = None
             else:
-                results[f['id']] = 'not dismissed'
+                results[f['id']] = 'not dismissed or skipped'
         aiscan_save(d, scan)
         return results
     path = os.path.join(PUBLIC, d, 'guide.json')
@@ -883,7 +886,7 @@ function render() {
   } else {
     html += SCAN.findings.map(f =>
       '<div class="finding">' +
-      (f.status === 'open' || f.status === 'dismissed'
+      (f.status !== 'applied'
         ? '<input type="checkbox" class="pick" value="' + esc(f.id) + '"> '
         : '') +
       '<b>' + esc(f.current) + ' &rarr; ' + esc(f.proposed) + '</b>' +
@@ -896,24 +899,25 @@ function render() {
       (f.fix ? ' &middot; fix: ' + esc(f.fix.op) : ' &middot; no mechanical fix — edit by hand') +
       (f.statusNote ? ' &middot; ' + esc(f.statusNote) : '') +
       '</div></div>').join('');
-    const dismissed = SCAN.findings.filter(f => f.status === 'dismissed');
+    const reopenable = SCAN.findings.filter(f =>
+      f.status === 'dismissed' || f.status === 'skipped');
     const buttons =
       (open.some(f => f.fix) ? '<button id="applysel">Apply selected</button>' : '') +
       (open.length ? '<button id="dismisssel" class="mini">Dismiss selected</button>' : '') +
-      (dismissed.length ? '<button id="undismisssel" class="mini">Undismiss selected</button>' : '');
+      (reopenable.length ? '<button id="undismisssel" class="mini">Reopen selected</button>' : '');
     if (buttons) html += '<p>' + buttons + ' <span id="applymsg"></span></p>';
   }
   html += '</div>';
   box.innerHTML = html;
   // mode: 'apply' acts on checked open findings with a fix, 'dismiss' on
-  // checked open findings, 'undismiss' on checked dismissed findings.
+  // checked open findings, 'undismiss' reopens checked dismissed/skipped.
   const act = mode => async () => {
     const byId = {};
     for (const f of SCAN.findings) byId[f.id] = f;
-    const want = mode === 'undismiss' ? 'dismissed' : 'open';
+    const want = mode === 'undismiss' ? ['dismissed', 'skipped'] : ['open'];
     const ids = [...document.querySelectorAll('.pick:checked')]
       .map(c => c.value)
-      .filter(id => byId[id] && byId[id].status === want &&
+      .filter(id => byId[id] && want.includes(byId[id].status) &&
                     (mode !== 'apply' || byId[id].fix));
     if (!ids.length) { $('applymsg').textContent = 'Nothing selected for this action.'; return; }
     $('applymsg').textContent = 'Working…';
@@ -1055,14 +1059,15 @@ function render() {
   $('groups').innerHTML = GROUPS.map((g, gi) => {
     const openFix = g.items.filter(i => i.status === 'open' && i.fixable).length;
     const open = g.items.filter(i => i.status === 'open').length;
-    const dismissed = g.items.filter(i => i.status === 'dismissed').length;
+    const reopenable = g.items.filter(i =>
+      i.status === 'dismissed' || i.status === 'skipped').length;
     const btn = (mode, label) =>
       '<button class="mini" data-gi="' + gi + '" data-mode="' + mode + '">' +
       label + '</button>';
     const buttons =
       (openFix ? btn('apply', 'Apply all open fixes (' + openFix + ')') : '') +
       (open ? btn('dismiss', 'Dismiss all open (' + open + ')') : '') +
-      (dismissed ? btn('undismiss', 'Undismiss (' + dismissed + ')') : '');
+      (reopenable ? btn('undismiss', 'Reopen (' + reopenable + ')') : '');
     return '<div class="group">' +
       '<b>' + esc(g.current) + ' &rarr; ' + esc(g.proposed) + '</b>' +
       ' <span class="meta">on ' + g.items.length + ' Sundays</span>' +
@@ -1081,13 +1086,13 @@ function render() {
 render();
 
 // mode: 'apply' (open findings with a fix), 'dismiss' (open findings),
-// 'undismiss' (dismissed findings back to open)
+// 'undismiss' (dismissed or skipped findings back to open)
 async function act(gi, mode) {
   const g = GROUPS[gi];
-  const want = mode === 'undismiss' ? 'dismissed' : 'open';
+  const want = mode === 'undismiss' ? ['dismissed', 'skipped'] : ['open'];
   const byDate = {};
   for (const i of g.items) {
-    if (i.status !== want || (mode === 'apply' && !i.fixable)) continue;
+    if (!want.includes(i.status) || (mode === 'apply' && !i.fixable)) continue;
     (byDate[i.date] = byDate[i.date] || []).push(i.id);
   }
   const items = Object.entries(byDate).map(([date, ids]) => ({date: date, ids: ids}));

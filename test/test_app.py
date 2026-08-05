@@ -66,7 +66,7 @@ def _canned(findings):
 
 def _fix(op, **kw):
     return {'op': op, 'orderIndex': None, 'blockIndex': None,
-            'annIndex': None, 'heading': None, **kw}
+            'annIndex': None, 'eventIndex': None, 'heading': None, **kw}
 
 
 def _fake_transport(payload, api_key):
@@ -115,6 +115,41 @@ assert [a['heading'] for a in _g2['announcements']] == ['Concert', 'Potluck'], \
     'furniture discarded, potluck moved — text preserved verbatim'
 assert _g2['announcements'][1]['text'] == 'The <b>potluck</b> is next Sunday at noon.'
 assert _g['order'][1]['kind'] == 'item', 'apply works on a copy'
+
+# verification is typography-tolerant: a quote in plain ASCII matches the
+# printed curly quotes/dashes — while the moved text keeps its typography.
+_g3 = {'order': [], 'welcome': {'heading': 'Welcome', 'who': None, 'body': [
+           {'type': 'para', 'text': 'Coffee with Pastor is Tuesday at 10 AM.'}]},
+       'announcements': [{'heading': None, 'kind': 'note',
+                          'text': 'Please stand — it’s “time”.'}],
+       'specialEvents': []}
+_g4, _res = aiscan.apply_findings(_g3, [
+    {'id': 'a1', 'quote': 'please stand - it\'s "time"', 'issue': 'x',
+     'current': 'announcement', 'proposed': 'stage', 'confidence': 'high',
+     'status': 'open', 'fix': _fix('announcement_to_stage', annIndex=0,
+                                   orderIndex=0)},
+    {'id': 'a2', 'quote': 'Coffee with Pastor', 'issue': 'x',
+     'current': 'content', 'proposed': 'announcement', 'confidence': 'high',
+     'status': 'open', 'fix': _fix('welcome_to_announcement', blockIndex=0,
+                                   heading='Coffee with Pastor')},
+], ['a1', 'a2'])
+assert _res == {'a1': None, 'a2': None}, _res
+assert _g4['order'] == [{'kind': 'stage', 'text': 'Please stand — it’s “time”.'}]
+assert _g4['welcome']['body'] == []
+assert _g4['announcements'] == [{'heading': 'Coffee with Pastor', 'kind': 'note',
+                                 'text': 'Coffee with Pastor is Tuesday at 10 AM.'}]
+
+_g5 = {'order': [], 'announcements': [], 'welcome': None,
+       'specialEvents': [{'heading': 'Duo Concert', 'paragraphs': ['At 3 PM.'],
+                          'note': None, 'sectionTitle': 'Coming Up'}]}
+_g6, _res = aiscan.apply_findings(_g5, [
+    {'id': 'e1', 'quote': 'Duo Concert', 'issue': 'x',
+     'current': 'announcement', 'proposed': 'announcement',
+     'confidence': 'high', 'status': 'open',
+     'fix': _fix('event_to_announcement', eventIndex=0)}], ['e1'])
+assert _res == {'e1': None} and _g6['specialEvents'] == []
+assert _g6['announcements'] == [{'heading': 'Duo Concert', 'kind': 'note',
+                                 'text': 'At 3 PM.'}]
 
 # a refusal from the safety classifiers is an error, not an empty scan
 try:
@@ -451,18 +486,26 @@ try:
             {'id': 'f2', 'path': 'welcome', 'quote': 'x', 'issue': 'flag only',
              'current': 'content', 'proposed': 'announcement',
              'confidence': 'low', 'status': 'open', 'fix': None},
+            {'id': 'f3', 'path': 'order[0]', 'quote': 'TEXT THAT IS NOT THERE',
+             'issue': 'stale quote must be skipped, then reopenable',
+             'current': 'content', 'proposed': 'stage',
+             'confidence': 'high', 'status': 'open',
+             'fix': {'op': 'item_to_stage', 'orderIndex': 0,
+                     'blockIndex': None, 'annIndex': None, 'eventIndex': None,
+                     'heading': None}},
         ],
     }
     json.dump(scan_fixture, open(os.path.join(ai_dir, 'aiscan.json'), 'w'))
     status, body = req('/admin', headers=COOKIE)
-    assert '🔎 2'.encode() in body, 'open-findings badge on the Sundays list'
-    assert b'2 open findings' in body, 'scanner card lists the flagged Sunday'
+    assert '🔎 3'.encode() in body, 'open-findings badge on the Sundays list'
+    assert b'3 open findings' in body, 'scanner card lists the flagged Sunday'
     status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'date': '2020-01-05', 'ids': ['f1']}).encode(),
+                       data=json.dumps({'date': '2020-01-05',
+                                        'ids': ['f1', 'f3']}).encode(),
                        headers={**COOKIE, 'Content-Type': 'application/json'})
     assert status == 200, (status, body)
     ap = json.loads(body)
-    assert ap['ok'] and ap['applied'] == ['f1'] and not ap['skipped'], ap
+    assert ap['ok'] and ap['applied'] == ['f1'] and list(ap['skipped']) == ['f3'], ap
     g_after = json.load(open(os.path.join(ai_dir, 'guide.json')))
     assert len(g_after['order']) == len(ai_guide['order']) - 1, 'item moved out'
     moved = g_after['announcements'][-1]
@@ -487,20 +530,23 @@ try:
         'scan page embeds the stored findings'
     assert b'"applied"' in body and b'"dismissed"' in body, 'statuses persisted'
 
-    # Dismissals are reversible: undismiss puts the finding back to open;
-    # a finding that isn't dismissed is refused, not silently touched.
+    # Dismissed and skipped findings are both reopenable; an applied finding
+    # is refused, not silently touched.
     status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'date': '2020-01-05', 'ids': ['f2'],
+                       data=json.dumps({'date': '2020-01-05',
+                                        'ids': ['f2', 'f3'],
                                         'undismiss': True}).encode(),
                        headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 200 and json.loads(body)['applied'] == ['f2'], body
+    assert status == 200 and json.loads(body)['applied'] == ['f2', 'f3'], body
     scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
     assert scan_after['findings'][1]['status'] == 'open', 'dismissal reversed'
+    assert scan_after['findings'][2]['status'] == 'open', 'skip reversed'
+    assert 'statusNote' not in scan_after['findings'][2], 'skip note cleared'
     status, body = req('/api/aiscan-apply',
                        data=json.dumps({'date': '2020-01-05', 'ids': ['f1'],
                                         'undismiss': True}).encode(),
                        headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert json.loads(body)['skipped'] == {'f1': 'not dismissed'}, body
+    assert json.loads(body)['skipped'] == {'f1': 'not dismissed or skipped'}, body
 
     # Matching findings across guides: the same quoted text flagged the same
     # way on several Sundays aggregates at /admin/aiscan, and one action
@@ -577,7 +623,7 @@ try:
         assert sc['findings'][-1]['status'] == 'dismissed', (d, sc['findings'][-1])
     status, body = req('/admin/aiscan', headers=COOKIE)
     assert status == 200 and b'RECURRING POSTER FRAGMENT' in body \
-        and b'Undismiss' in body, 'dismissed group offers undismiss'
+        and b'Reopen' in body, 'dismissed group offers reopen'
     status, body = req('/api/aiscan-apply',
                        data=json.dumps({'items': items, 'undismiss': True}).encode(),
                        headers={**COOKIE, 'Content-Type': 'application/json'})

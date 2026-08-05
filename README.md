@@ -49,8 +49,10 @@ becomes the front page.
   with the same reclassification on two or more guides (the weekly masthead
   filed as an announcement, a recurring page direction absorbed as content) —
   and applies or dismisses a whole group at once, each fix still verified
-  against its own Sunday's stored text. Dismissals are reversible — an
-  Undismiss button on the group (and per Sunday) puts findings back to open.
+  against its own Sunday's stored text (typography-tolerant: a plain-ASCII
+  quote matches the printed curly quotes and dashes). Dismissed and skipped
+  findings are both reversible — a Reopen button on the group (and per
+  Sunday) puts them back to open.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
 Every published Sunday links its printed original: the week-nav strip on a

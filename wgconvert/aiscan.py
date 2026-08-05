@@ -28,7 +28,8 @@ DEFAULT_MODEL = 'claude-opus-5'
 
 OPS = ('item_to_stage', 'stage_to_item', 'item_to_announcement',
        'para_to_announcement', 'para_to_stage', 'discard_announcement',
-       'announcement_to_event')
+       'announcement_to_event', 'announcement_to_stage',
+       'event_to_announcement', 'welcome_to_announcement')
 
 SYSTEM_PROMPT = """\
 You are the quality reviewer for a church worship-guide conversion pipeline.
@@ -60,8 +61,9 @@ Hard rules:
 - "quote" must be a verbatim excerpt (at most 120 characters) copied exactly
   from the misclassified text, including any <b>/<i>/<sup> markup, so the fix
   can be verified mechanically before it is applied.
-- Address text by the indices given in the JSON: "i" for order and
-  announcements entries, "j" for body blocks inside an order item.
+- Address text by the indices given in the JSON: "i" for order,
+  announcements, and specialEvents entries, "j" for body blocks inside an
+  order item and paragraphs of the welcome section.
 - Only these mechanical fixes exist:
   - item_to_stage(orderIndex): an order item that is really a page direction.
   - stage_to_item(orderIndex): a stage entry that is really worship content.
@@ -72,11 +74,19 @@ Hard rules:
   - para_to_stage(orderIndex, blockIndex): one body block that is really a
     page direction.
   - discard_announcement(annIndex): an announcements entry that is page
-    furniture / poster residue / a page direction fragment, not news.
+    furniture / poster residue / a duplicated fragment, not news.
   - announcement_to_event(annIndex, heading): an announcements entry that is
     really an upcoming special event.
-  If a problem fits none of these, still report it with op "none" so a human
-  can look. Unused fix fields are null.
+  - announcement_to_stage(annIndex, orderIndex): an announcements entry that
+    is really a page direction; it becomes a stage entry inserted at
+    orderIndex (null appends at the end of the order).
+  - event_to_announcement(eventIndex): a specialEvents entry that is really
+    an ordinary announcement.
+  - welcome_to_announcement(blockIndex, heading): one paragraph of the
+    welcome section that is really a standalone announcement.
+  Prefer a mechanical fix whenever one of these expresses the move — reach
+  for op "none" only when genuinely nothing fits (a human then edits by
+  hand). Unused fix fields are null.
 - confidence: "high" = clearly misclassified, safe to fix mechanically;
   "medium" = probably; "low" = worth a human look, do not auto-fix.
 - If everything is classified correctly, return an empty findings list.
@@ -108,10 +118,11 @@ FINDINGS_SCHEMA = {
                             'orderIndex': {'type': ['integer', 'null']},
                             'blockIndex': {'type': ['integer', 'null']},
                             'annIndex': {'type': ['integer', 'null']},
+                            'eventIndex': {'type': ['integer', 'null']},
                             'heading': {'type': ['string', 'null']},
                         },
                         'required': ['op', 'orderIndex', 'blockIndex',
-                                     'annIndex', 'heading'],
+                                     'annIndex', 'eventIndex', 'heading'],
                         'additionalProperties': False,
                     },
                 },
@@ -147,7 +158,8 @@ def guide_digest(guide):
         'dateISO': guide.get('dateISO'),
         'season': guide.get('season'),
         'welcome': ({'heading': welcome.get('heading'),
-                     'body': [b.get('text') for b in welcome.get('body') or []]}
+                     'body': [{'j': j, 'text': b.get('text')}
+                              for j, b in enumerate(welcome.get('body') or [])]}
                     if welcome else None),
         'order': order,
         'announcements': [
@@ -155,8 +167,9 @@ def guide_digest(guide):
              'text': a.get('text')}
             for i, a in enumerate(guide.get('announcements') or [])],
         'specialEvents': [
-            {'heading': ev.get('heading'), 'paragraphs': ev.get('paragraphs')}
-            for ev in guide.get('specialEvents') or []],
+            {'i': i, 'heading': ev.get('heading'),
+             'paragraphs': ev.get('paragraphs')}
+            for i, ev in enumerate(guide.get('specialEvents') or [])],
         'parserNotes': (guide.get('notes') or []) + (guide.get('warnings') or [])
                        + (guide.get('reviewedWarnings') or []),
     }
@@ -265,6 +278,22 @@ def _plain(s):
     return re.sub(r'\s+', ' ', s).strip()
 
 
+# The guides print typographic quotes, dashes, and spaces; the model often
+# quotes them back as plain ASCII. Verification compares canonical forms so
+# a straight apostrophe still matches the printed ’ — the guide text itself
+# is never touched.
+_CANON_MAP = str.maketrans({
+    '‘': "'", '’': "'", '“': '"', '”': '"',
+    '–': '-', '—': '-', '−': '-',
+    ' ': ' ', '…': '...',
+})
+
+
+def _canon(s):
+    s = _plain(s).translate(_CANON_MAP)
+    return re.sub(r'\s+', ' ', s).strip().casefold()
+
+
 def _item_text(item):
     parts = [item.get('label'), item.get('title'), item.get('who'),
              item.get('note')] + [b.get('text') for b in item.get('body') or []]
@@ -289,8 +318,8 @@ def _apply_one(g, fix, quote):
     anns = g.setdefault('announcements', [])
 
     def check(target_text):
-        q = _plain(quote)
-        if not q or q not in _plain(target_text):
+        q = _canon(quote)
+        if not q or q not in _canon(target_text):
             return 'quoted text not found where the fix points — skipped'
         return None
 
@@ -346,7 +375,8 @@ def _apply_one(g, fix, quote):
                                   'text': _plain(block.get('text'))})
         return None
 
-    if op in ('discard_announcement', 'announcement_to_event'):
+    if op in ('discard_announcement', 'announcement_to_event',
+              'announcement_to_stage'):
         i = fix.get('annIndex')
         if not isinstance(i, int) or not 0 <= i < len(anns):
             return f'announcement index {i!r} out of range'
@@ -360,6 +390,40 @@ def _apply_one(g, fix, quote):
                 'heading': fix.get('heading') or a.get('heading') or 'Coming Up',
                 'paragraphs': [a.get('text') or ''],
                 'note': None, 'sectionTitle': 'Coming Up'})
+        elif op == 'announcement_to_stage':
+            at = fix.get('orderIndex')
+            if not isinstance(at, int) or not 0 <= at <= len(order):
+                at = len(order)
+            order.insert(at, {'kind': 'stage', 'text': _plain(a.get('text'))})
+        return None
+
+    if op == 'event_to_announcement':
+        events = g.setdefault('specialEvents', [])
+        i = fix.get('eventIndex')
+        if not isinstance(i, int) or not 0 <= i < len(events):
+            return f'event index {i!r} out of range'
+        ev = events[i]
+        err = check((ev.get('heading') or '') + ' '
+                    + ' '.join(ev.get('paragraphs') or []))
+        if err:
+            return err
+        del events[i]
+        anns.append({'heading': ev.get('heading') or None, 'kind': 'note',
+                     'text': re.sub(r'\s+', ' ', ' '.join(
+                         ev.get('paragraphs') or [])).strip()})
+        return None
+
+    if op == 'welcome_to_announcement':
+        body = (g.get('welcome') or {}).get('body') or []
+        j = fix.get('blockIndex')
+        if not isinstance(j, int) or not 0 <= j < len(body):
+            return f'welcome block {j!r} out of range'
+        err = check(body[j].get('text'))
+        if err:
+            return err
+        block = body.pop(j)
+        anns.append({'heading': fix.get('heading') or None, 'kind': 'note',
+                     'text': block.get('text') or ''})
         return None
 
     return f'unknown fix op {op!r}'
@@ -374,13 +438,23 @@ def apply_findings(guide, findings, ids):
     chosen = [f for f in findings if f.get('id') in set(ids) and f.get('fix')]
 
     def sort_key(f):
-        fix = f['fix']
-        in_order = fix.get('op') not in ('discard_announcement',
-                                         'announcement_to_event')
-        idx = fix.get('orderIndex') if in_order else fix.get('annIndex')
-        blk = fix.get('blockIndex')
-        return (1 if in_order else 0,               # announcements ops first
-                -(idx if isinstance(idx, int) else 0),
+        # Order-array ops run first (their appends to announcements don't
+        # shift existing indices), then announcements ops (which may insert
+        # into the already-settled order), then welcome/event ops (append
+        # only). Within a group, highest index first so removals don't shift
+        # later targets.
+        op = f['fix'].get('op')
+        if op in ('discard_announcement', 'announcement_to_event',
+                  'announcement_to_stage'):
+            rank, idx = 1, f['fix'].get('annIndex')
+        elif op == 'welcome_to_announcement':
+            rank, idx = 2, f['fix'].get('blockIndex')
+        elif op == 'event_to_announcement':
+            rank, idx = 3, f['fix'].get('eventIndex')
+        else:
+            rank, idx = 0, f['fix'].get('orderIndex')
+        blk = f['fix'].get('blockIndex')
+        return (rank, -(idx if isinstance(idx, int) else 0),
                 -(blk if isinstance(blk, int) else 0))
 
     results = {}
