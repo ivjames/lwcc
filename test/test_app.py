@@ -261,6 +261,36 @@ def login(token, nxt='/admin'):
                headers={'Content-Type': 'application/x-www-form-urlencoded'})
 
 
+import re as re_mod  # noqa: E402
+import subprocess as sp_mod  # noqa: E402
+NODE = shutil.which('node')
+SCRIPT_RE = re_mod.compile(
+    rb'<script(?![^>]*type="application/json")[^>]*>(.*?)</script>', re_mod.S)
+
+
+def check_page_js(body, label):
+    """Syntax-check every inline <script> with node — Python string escaping
+    has silently broken page JS before (a \\' in a template collapsed to a
+    bare quote), and plain HTTP assertions can't see that."""
+    if not NODE:
+        print(f'  (node not installed — JS syntax check skipped for {label})',
+              file=sys.stderr)
+        return
+    for m in SCRIPT_RE.finditer(body):
+        src = m.group(1)
+        if not src.strip():
+            continue
+        with tempfile.NamedTemporaryFile(suffix='.js', delete=False) as fh:
+            fh.write(src)
+        try:
+            r = sp_mod.run([NODE, '--check', fh.name],
+                           capture_output=True, text=True)
+            assert r.returncode == 0, \
+                f'{label}: inline JS fails to parse:\n{r.stderr}'
+        finally:
+            os.unlink(fh.name)
+
+
 try:
     for _ in range(50):                      # wait for startup
         try:
@@ -558,6 +588,14 @@ try:
     for d in agg_dates:
         sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
         assert sc['findings'][-1]['status'] == 'open', 'group dismissal reversed'
+
+    # Every admin page's inline JS must actually parse (all scanner states
+    # are populated at this point: open, applied, dismissed, groups).
+    for js_path in ('/admin', '/admin/history', '/admin/aiscan',
+                    '/admin/aiscan/2020-01-05', '/admin/edit/2026-08-02'):
+        status, body = req(js_path, headers=COOKIE)
+        assert status == 200, (js_path, status)
+        check_page_js(body, js_path)
 
     out_dir = os.path.join(scratch, 'public', '2026-08-02')
     for f in ('index.html', 'guide.json', 'cover.jpg'):
