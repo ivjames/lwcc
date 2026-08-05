@@ -44,7 +44,12 @@ becomes the front page.
   run through their own durable server-side queue — up to `AISCAN_WORKERS`
   (default 10) at a time, markers in `queue/aiscan/` re-enqueued at startup —
   so an `lwcc redeploy` pauses in-flight scans rather than losing them, and
-  the admin pages just watch the queue until it drains.
+  the admin pages just watch the queue until it drains. `GET /admin/aiscan`
+  aggregates matching findings across Sundays — the same quoted text flagged
+  with the same reclassification on two or more guides (the weekly masthead
+  filed as an announcement, a recurring page direction absorbed as content) —
+  and applies or dismisses a whole group at once, each fix still verified
+  against its own Sunday's stored text.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
 Every published Sunday links its printed original: the week-nav strip on a

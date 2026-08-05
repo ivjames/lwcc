@@ -185,6 +185,29 @@ try:
     assert app_mod.AISCAN_Q.get() == '2026-01-11'
     assert sorted(os.listdir(app_mod.AISCAN_QUEUE_DIR)) == ['2026-01-11'], \
         'stale markers discarded, live one kept for the worker'
+
+    # Aggregation: findings match across guides on (quote, current, proposed)
+    # with markup/whitespace/case ignored; singletons don't form groups.
+    def _f(fid, quote, status='open', fix=True):
+        return {'id': fid, 'quote': quote, 'issue': 'recurring masthead',
+                'current': 'announcement', 'proposed': 'discard',
+                'confidence': 'high', 'status': status,
+                'fix': ({'op': 'discard_announcement', 'orderIndex': None,
+                         'blockIndex': None, 'annIndex': 0, 'heading': None}
+                        if fix else None)}
+    for d, fs in (('2026-01-04', [_f('f1', 'LEISURE  WORLD community church'),
+                                  _f('f2', 'one-off block', fix=False)]),
+                  ('2026-01-11', [_f('f1', '<b>Leisure World</b> Community Church',
+                                     status='applied')])):
+        open(os.path.join(app_mod.PUBLIC, d, 'index.html'), 'w').write('x')
+        json.dump({'findings': fs},
+                  open(os.path.join(app_mod.PUBLIC, d, 'aiscan.json'), 'w'))
+    agg = app_mod.aiscan_aggregate()
+    assert len(agg) == 1, agg
+    assert [i['date'] for i in agg[0]['items']] == ['2026-01-11', '2026-01-04'], \
+        'newest first, singleton excluded'
+    assert [i['status'] for i in agg[0]['items']] == ['applied', 'open']
+    assert agg[0]['current'] == 'announcement' and agg[0]['proposed'] == 'discard'
 finally:
     app_mod.AISCAN_JOBS.clear()
     for k, v in _saved.items():
@@ -433,6 +456,60 @@ try:
     assert status == 200 and b'misfiled as order-of-worship content' in body, \
         'scan page embeds the stored findings'
     assert b'"applied"' in body and b'"dismissed"' in body, 'statuses persisted'
+
+    # Matching findings across guides: the same quoted text flagged the same
+    # way on several Sundays aggregates at /admin/aiscan, and one action
+    # applies each Sunday's fix on its own guide.
+    import re as _re
+
+    def _mkquote(t):
+        return ' '.join(_re.sub(r'<[^>]+>', '', t).split()[:8])
+
+    agg_dates = ['2026-08-02', '2020-01-05']
+    for d in agg_dates:
+        gg = json.load(open(os.path.join(scratch, 'public', d, 'guide.json')))
+        json.dump(
+            {'at': '2026-08-05T10:05:00', 'model': 'claude-opus-5',
+             'summary': 'fixture', 'usage': {},
+             'findings': [{'id': 'g1', 'path': 'announcements[0]',
+                           'quote': _mkquote(gg['announcements'][0]['text']),
+                           'issue': 'recurring flowers blurb',
+                           'current': 'announcement', 'proposed': 'discard',
+                           'confidence': 'high', 'status': 'open',
+                           'fix': {'op': 'discard_announcement',
+                                   'orderIndex': None, 'blockIndex': None,
+                                   'annIndex': 0, 'heading': None}}]},
+            open(os.path.join(scratch, 'public', d, 'aiscan.json'), 'w'))
+    status, body = req('/admin/aiscan')
+    assert status == 401 and b'Admin Sign-in' in body, 'aggregate page gated'
+    status, body = req('/admin/aiscan', headers=COOKIE)
+    assert status == 200 and b'Matching Findings' in body
+    assert b'recurring flowers blurb' in body and b'2026-08-02' in body \
+        and b'2020-01-05' in body, 'both Sundays in the group'
+    before_counts = {
+        d: len(json.load(open(os.path.join(scratch, 'public', d,
+                                           'guide.json')))['announcements'])
+        for d in agg_dates}
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'items': [{'date': d, 'ids': ['g1']}
+                                                  for d in agg_dates]}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200, (status, body)
+    br = json.loads(body)
+    assert br['ok'] and all(br['results'][d]['applied'] == ['g1']
+                            for d in agg_dates), br
+    for d in agg_dates:
+        gg = json.load(open(os.path.join(scratch, 'public', d, 'guide.json')))
+        assert len(gg['announcements']) == before_counts[d] - 1, \
+            'recurring block discarded on each Sunday'
+        sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
+        assert sc['findings'][0]['status'] == 'applied'
+    status, body = req('/admin/aiscan', headers=COOKIE)
+    assert status == 200 and b'"applied"' in body, \
+        'aggregate reflects the applied statuses'
+    status, body = req('/admin', headers=COOKIE)
+    assert b'Matching findings across' in body, \
+        'admin card links the aggregate view'
 
     out_dir = os.path.join(scratch, 'public', '2026-08-02')
     for f in ('index.html', 'guide.json', 'cover.jpg'):

@@ -21,7 +21,9 @@ newest at /) and converts newly uploaded worship-guide PDFs in place:
                       up to AISCAN_WORKERS run concurrently, markers in
                       queue/aiscan/ survive restarts — GET /api/aiscan-status
                       reports live progress, POST /api/aiscan-apply
-                      applies/dismisses selected findings
+                      applies/dismisses selected findings (per Sunday, or a
+                      cross-guide batch), and GET /admin/aiscan aggregates
+                      matching findings across Sundays for bulk repair
     GET  /healthz     liveness for the platform health-check sweep
 
 Stdlib only, runs under pm2 behind the site's nginx vhost per lab980
@@ -735,6 +737,44 @@ def aiscan_snapshot():
                                if j['status'] == 'scanning')}
 
 
+def aiscan_group_key(f):
+    """Findings match across guides when they quote the same text (markup
+    and whitespace ignored) and propose the same reclassification — the
+    recurring-fixture case: the same masthead, poster blurb, or page
+    direction misfiled week after week."""
+    quote = re.sub(r'<[^>]+>', '', f.get('quote') or '')
+    quote = re.sub(r'\s+', ' ', quote).strip().lower()
+    return (quote, f.get('current'), f.get('proposed'))
+
+
+def aiscan_aggregate():
+    """Matching findings across all published Sundays, grouped: only groups
+    spanning two or more Sundays qualify (singletons stay on their own
+    Sunday's scan page). Sorted widest first."""
+    groups = {}
+    for d in published_dates():
+        for f in (aiscan_load(d) or {}).get('findings') or []:
+            key = aiscan_group_key(f)
+            if key[0]:
+                groups.setdefault(key, []).append((d, f))
+    out = []
+    for items in groups.values():
+        if len({d for d, _ in items}) < 2:
+            continue
+        rep = items[0][1]
+        out.append({
+            'quote': rep.get('quote'),
+            'issue': rep.get('issue'),
+            'current': rep.get('current'),
+            'proposed': rep.get('proposed'),
+            'items': [{'date': d, 'id': f.get('id'), 'status': f.get('status'),
+                       'confidence': f.get('confidence'),
+                       'fixable': bool(f.get('fix'))} for d, f in items],
+        })
+    out.sort(key=lambda g: (-len(g['items']), g['quote'] or ''))
+    return out
+
+
 def apply_aiscan(d, ids, dismiss=False):
     """Apply (or dismiss) selected findings; applied fixes rewrite guide.json
     and re-render the page. Returns per-finding results."""
@@ -940,6 +980,105 @@ def aiscan_page(d):
             .replace('__SCANDIS__', '' if key_set else 'disabled')
             .replace('__SCANLABEL__', 'Re-run AI scan' if scan else 'Run AI scan')
             .replace('__DATE__', d))
+
+
+AISCAN_AGG_PAGE = ("""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Scan — Matching Findings</title><style>__STYLE__
+  .group{border-top:1px dashed #d8d6c7;padding:12px 0;margin-top:12px}
+  .group blockquote{margin:6px 0;padding:6px 10px;background:#f1efe6;
+    border-left:3px solid #76a2bf;border-radius:4px;font-size:.92em}
+  .tag{font-family:Arial,Helvetica,sans-serif;font-size:.72em;border-radius:6px;
+    padding:2px 8px;color:#fff;background:#3f6b82;margin-left:6px}
+  .tag.high{background:#a20816}.tag.medium{background:#8a6410}.tag.low{background:#54574a}
+  .tag.applied{background:#1f7a44}.tag.dismissed{background:#54574a}
+  .tag.skipped{background:#8a6410}.tag.open{background:#3f6b82}
+  a.datechip{font-family:Arial,Helvetica,sans-serif;font-size:.82em;
+    background:#eaf1f5;border:1px solid #76a2bf;border-radius:6px;
+    padding:2px 8px;margin:2px 6px 2px 0;display:inline-block;
+    text-decoration:none;color:#054253}
+  .meta{color:#54574a;font-size:.88em}
+  button.mini{padding:4px 12px;font-size:.82em;margin-right:8px;background:#3f6b82}
+</style></head>
+<body>
+<h1>AI Article Scanner &mdash; Matching Findings</h1>
+<div class="card">
+  <p>Findings that recur across Sundays — the same quoted text flagged with
+  the same reclassification on two or more guides (the weekly masthead filed
+  as an announcement, the same page direction absorbed as content, &hellip;).
+  Apply or dismiss a whole group at once; each fix is still verified against
+  its own Sunday&#8217;s stored text before anything changes, and one-off
+  findings stay on their Sunday&#8217;s scan page.</p>
+  <div id="groups"></div>
+</div>
+<p><a href="/admin">Back to admin</a> &middot; <a href="/archive">Archive</a></p>
+<script id="agg-data" type="application/json">__GROUPS__</script>
+<script>
+const $ = id => document.getElementById(id);
+const GROUPS = JSON.parse($('agg-data').textContent);
+const esc = s => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function render() {
+  if (!GROUPS.length) {
+    $('groups').innerHTML = '<p>No matching findings across Sundays yet — ' +
+      'run AI scans from the <a href="/admin">admin panel</a> first.</p>';
+    return;
+  }
+  $('groups').innerHTML = GROUPS.map((g, gi) => {
+    const openFix = g.items.filter(i => i.status === 'open' && i.fixable).length;
+    const open = g.items.filter(i => i.status === 'open').length;
+    return '<div class="group">' +
+      '<b>' + esc(g.current) + ' &rarr; ' + esc(g.proposed) + '</b>' +
+      ' <span class="meta">on ' + g.items.length + ' Sundays</span>' +
+      '<div>' + esc(g.issue) + '</div>' +
+      '<blockquote>' + esc(g.quote) + '</blockquote>' +
+      '<div>' + g.items.map(i =>
+        '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '">' +
+        esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
+        esc(i.status) + '</span></a>').join('') + '</div>' +
+      (open ? '<p>' +
+        (openFix ? '<button class="mini" onclick="act(' + gi + ', false)">' +
+          'Apply all open fixes (' + openFix + ')</button>' : '') +
+        '<button class="mini" onclick="act(' + gi + ', true)">' +
+          'Dismiss all open (' + open + ')</button>' +
+        '<span id="msg' + gi + '"></span></p>' : '') +
+      '</div>';
+  }).join('');
+}
+render();
+
+async function act(gi, dismiss) {
+  const g = GROUPS[gi];
+  const byDate = {};
+  for (const i of g.items) {
+    if (i.status !== 'open' || (!dismiss && !i.fixable)) continue;
+    (byDate[i.date] = byDate[i.date] || []).push(i.id);
+  }
+  const items = Object.entries(byDate).map(([date, ids]) => ({date: date, ids: ids}));
+  if (!items.length) return;
+  $('msg' + gi).textContent = dismiss ? ' Dismissing…' : ' Applying…';
+  const res = await fetch('/api/aiscan-apply', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({items: items, dismiss: dismiss}),
+  });
+  if (res.status === 401) { location.reload(); return; }
+  const data = await res.json().catch(() => ({ok: false}));
+  if (!data.ok) { $('msg' + gi).textContent = ' Failed: ' + (data.error || res.status); return; }
+  location.reload();
+}
+</script>
+</body></html>
+""")
+
+
+def aiscan_aggregate_page():
+    groups_json = json.dumps(aiscan_aggregate(),
+                             ensure_ascii=False).replace('</', '<\\/')
+    return (AISCAN_AGG_PAGE
+            .replace('__STYLE__', PAGE_STYLE)
+            .replace('__GROUPS__', groups_json))
 
 
 PAGE_STYLE = """
@@ -1573,6 +1712,9 @@ def manage_html():
                'under the wrong class (announcements vs page directions vs '
                'worship content). Open each Sunday&#8217;s scan page from the '
                'list below to review and apply repairs.</p>'
+               '<p><a href="/admin/aiscan">Matching findings across '
+               'Sundays</a> — recurring misclassifications grouped, with '
+               'their fixes applied in bulk.</p>'
                + key_note + active + scan_all + ai_items + '</div>')
 
     rows = []
@@ -2188,6 +2330,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             else:
                 self.send_error(404, 'Not Found')
             return
+        if path == '/admin/aiscan':
+            if self.require_admin():
+                self.send_page(aiscan_aggregate_page(), cache='no-store')
+            return
         m = re.fullmatch(r'/admin/aiscan/(\d{4}-\d{2}-\d{2})', path)
         if m:
             if not self.require_admin():
@@ -2404,6 +2550,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                        'queued': len(queued),
                        **({'skipped': skipped} if skipped else {})})
             self.send_json({'ok': True, 'queued': queued, 'skipped': skipped})
+            return
+        if isinstance(data.get('items'), list):
+            # Cross-guide batch (the aggregate view): apply/dismiss matching
+            # findings on each of their own Sundays independently.
+            dismiss = bool(data.get('dismiss'))
+            results = {}
+            for entry in data['items'][:200]:
+                if not isinstance(entry, dict):
+                    continue
+                d = str(entry.get('date') or '')
+                ids = [str(i) for i in (entry.get('ids') or [])][:200]
+                if not ids:
+                    continue
+                if not DATE_DIR_RE.match(d) or \
+                        not os.path.exists(os.path.join(PUBLIC, d, 'guide.json')):
+                    results[d or '?'] = {'error': 'no published guide'}
+                    continue
+                try:
+                    r = apply_aiscan(d, ids, dismiss=dismiss)
+                    results[d] = {
+                        'applied': sorted(i for i, v in r.items() if v is None),
+                        'skipped': {i: v for i, v in r.items() if v is not None}}
+                except Exception as e:
+                    traceback.print_exc()
+                    results[d] = {'error': str(e)}
+            audit_log({'action': 'aiscan-dismiss' if dismiss else 'aiscan-apply',
+                       'ok': True, 'dates': sorted(results)})
+            self.send_json({'ok': True, 'results': results})
             return
         date = str(data.get('date') or '')
         if not DATE_DIR_RE.match(date) or \
