@@ -40,7 +40,11 @@ becomes the front page.
   them for hand-editing. Requires `ANTHROPIC_API_KEY` in `.env` (scanning
   fails closed without it; `AISCAN_MODEL` overrides the default model). The
   `/admin` panel links every Sunday's scan, badges open findings, and offers
-  a scan-all for the unscanned backlog (one API request per Sunday).
+  a scan-all for the unscanned backlog (one API request per Sunday). Scans
+  run through their own durable server-side queue — up to `AISCAN_WORKERS`
+  (default 10) at a time, markers in `queue/aiscan/` re-enqueued at startup —
+  so an `lwcc redeploy` pauses in-flight scans rather than losing them, and
+  the admin pages just watch the queue until it drains.
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
 Every published Sunday links its printed original: the week-nav strip on a
