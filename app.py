@@ -1101,11 +1101,15 @@ function render() {
     const open = g.items.filter(i => i.status === 'open').length;
     const reopenable = g.items.filter(i =>
       i.status === 'dismissed' || i.status === 'skipped').length;
+    const noFixDates = [...new Set(g.items
+      .filter(i => i.status === 'open' && !i.fixable).map(i => i.date))];
     const btn = (mode, label) =>
       '<button class="mini" data-gi="' + gi + '" data-mode="' + mode + '">' +
       label + '</button>';
     const buttons =
       (openFix ? btn('apply', 'Apply all open fixes (' + openFix + ')') : '') +
+      (noFixDates.length ? btn('rescan', 'Re-scan for fixes (' +
+        noFixDates.length + ' Sundays)') : '') +
       (open ? btn('dismiss', 'Dismiss all open (' + open + ')') : '') +
       (reopenable ? btn('undismiss', 'Reopen (' + reopenable + ')') : '');
     return '<div class="group">' +
@@ -1121,9 +1125,42 @@ function render() {
       '</div>';
   }).join('');
   document.querySelectorAll('#groups button[data-mode]').forEach(b =>
-    b.addEventListener('click', () => act(+b.dataset.gi, b.dataset.mode)));
+    b.addEventListener('click', () => b.dataset.mode === 'rescan'
+      ? rescan(+b.dataset.gi) : act(+b.dataset.gi, b.dataset.mode)));
 }
 render();
+
+// A group of flag-only findings can't be applied from the stored scan —
+// re-scan its Sundays (through the durable queue) so the model can pick a
+// mechanical fix now that the vocabulary covers it, then reload.
+async function rescan(gi) {
+  const g = GROUPS[gi];
+  const dates = [...new Set(g.items
+    .filter(i => i.status === 'open' && !i.fixable).map(i => i.date))];
+  if (!dates.length) return;
+  $('msg' + gi).textContent = ' Queueing re-scans…';
+  const res = await fetch('/api/aiscan', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({dates: dates}),
+  });
+  if (res.status === 401) { location.reload(); return; }
+  const data = await res.json().catch(() => ({ok: false}));
+  if (!data.ok) { $('msg' + gi).textContent = ' Failed: ' + (data.error || res.status); return; }
+  const poll = async () => {
+    try {
+      const r = await fetch('/api/aiscan-status');
+      if (r.status === 401) return;
+      const s = await r.json();
+      const busy = dates.filter(d => s.jobs[d] &&
+        (s.jobs[d].status === 'queued' || s.jobs[d].status === 'scanning'));
+      if (!busy.length) { location.reload(); return; }
+      $('msg' + gi).textContent = ' Re-scanning: ' + busy.length + ' of ' +
+        dates.length + ' Sundays left…';
+    } catch (e) { /* transient — keep polling */ }
+    setTimeout(poll, 3000);
+  };
+  poll();
+}
 
 // mode: 'apply' (open findings with a fix), 'dismiss' (open findings),
 // 'undismiss' (dismissed or skipped findings back to open)

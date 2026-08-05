@@ -27,9 +27,10 @@ API_URL = 'https://api.anthropic.com/v1/messages'
 DEFAULT_MODEL = 'claude-opus-5'
 
 OPS = ('item_to_stage', 'stage_to_item', 'item_to_announcement',
-       'para_to_announcement', 'para_to_stage', 'discard_announcement',
-       'announcement_to_event', 'announcement_to_stage',
-       'event_to_announcement', 'welcome_to_announcement')
+       'para_to_announcement', 'para_to_stage', 'discard_para',
+       'discard_announcement', 'announcement_to_event',
+       'announcement_to_stage', 'event_to_announcement',
+       'welcome_to_announcement')
 
 SYSTEM_PROMPT = """\
 You are the quality reviewer for a church worship-guide conversion pipeline.
@@ -73,6 +74,12 @@ Hard rules:
     an item that is really an announcement.
   - para_to_stage(orderIndex, blockIndex): one body block that is really a
     page direction.
+  - discard_para(orderIndex, blockIndex): one body block that is page
+    furniture — masthead/letterhead residue (church name and address lines,
+    phone numbers, fragmented banner words), poster fragments, or OCR junk
+    that is not text a reader should see. NEVER use it for worship text,
+    prayers, or anything a person wrote to be read; when unsure, prefer op
+    "none". File one finding per block.
   - discard_announcement(annIndex): an announcements entry that is page
     furniture / poster residue / a duplicated fragment, not news.
   - announcement_to_event(annIndex, heading): an announcements entry that is
@@ -324,7 +331,7 @@ def _apply_one(g, fix, quote):
         return None
 
     if op in ('item_to_stage', 'stage_to_item', 'item_to_announcement',
-              'para_to_announcement', 'para_to_stage'):
+              'para_to_announcement', 'para_to_stage', 'discard_para'):
         i = fix.get('orderIndex')
         if not isinstance(i, int) or not 0 <= i < len(order):
             return f'order index {i!r} out of range'
@@ -354,7 +361,7 @@ def _apply_one(g, fix, quote):
             anns.append({'heading': fix.get('heading') or entry.get('label'),
                          'kind': 'note', 'text': re.sub(r'\s+', ' ', text)})
             del order[i]
-        else:                               # para_to_announcement / para_to_stage
+        else:            # para_to_announcement / para_to_stage / discard_para
             if entry.get('kind') != 'item':
                 return 'target is not an item'
             j = fix.get('blockIndex')
@@ -368,11 +375,12 @@ def _apply_one(g, fix, quote):
             if op == 'para_to_announcement':
                 anns.append({'heading': fix.get('heading') or None,
                              'kind': 'note', 'text': block.get('text') or ''})
-            else:
+            elif op == 'para_to_stage':
                 # a direction at the head of a body reads before its item
                 at = i if j == 0 else i + 1
                 order.insert(at, {'kind': 'stage',
                                   'text': _plain(block.get('text'))})
+            # discard_para: page furniture — the block is simply dropped
         return None
 
     if op in ('discard_announcement', 'announcement_to_event',
@@ -460,6 +468,12 @@ def apply_findings(guide, findings, ids):
     results = {}
     for f in sorted(chosen, key=sort_key):
         results[f['id']] = _apply_one(g, f['fix'], f.get('quote') or '')
+    if any(r is None for r in results.values()):
+        # an untitled item whose body was entirely moved/discarded is an
+        # empty husk — drop it rather than render a blank entry
+        g['order'] = [o for o in g.get('order') or []
+                      if not (o.get('kind') == 'item' and not o.get('label')
+                              and not o.get('title') and not o.get('body'))]
     for f in findings:
         if f.get('id') in set(ids) and not f.get('fix'):
             results[f['id']] = 'no mechanical fix for this finding'

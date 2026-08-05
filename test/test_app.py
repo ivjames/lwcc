@@ -151,6 +151,34 @@ assert _res == {'e1': None} and _g6['specialEvents'] == []
 assert _g6['announcements'] == [{'heading': 'Duo Concert', 'kind': 'note',
                                  'text': 'At 3 PM.'}]
 
+# discard_para drops page-furniture body blocks (masthead/letterhead
+# residue); an untitled item emptied by the discards is pruned, not left as
+# a blank entry.
+_g7 = {'order': [
+        {'kind': 'item', 'type': 'plain', 'label': None, 'title': None,
+         'titleQuoted': False, 'who': None, 'note': None,
+         'body': [{'type': 'para',
+                   'text': 'Seal Beach, CA 90740-5307 (562) 431-2503'},
+                  {'type': 'para', 'text': '« COMMUNITY he CHURCH Word'}]},
+        {'kind': 'item', 'type': 'plain', 'label': 'Welcome', 'title': None,
+         'titleQuoted': False, 'who': None, 'note': None,
+         'body': [{'type': 'para', 'text': 'Good morning and welcome.'}]},
+    ], 'announcements': [], 'specialEvents': [], 'welcome': None}
+_g8, _res = aiscan.apply_findings(_g7, [
+    {'id': 'p1', 'quote': 'Seal Beach, CA 90740-5307', 'issue': 'letterhead',
+     'current': 'content', 'proposed': 'discard', 'confidence': 'high',
+     'status': 'open',
+     'fix': _fix('discard_para', orderIndex=0, blockIndex=0)},
+    {'id': 'p2', 'quote': '« COMMUNITY he CHURCH Word',
+     'issue': 'banner residue', 'current': 'content', 'proposed': 'discard',
+     'confidence': 'high', 'status': 'open',
+     'fix': _fix('discard_para', orderIndex=0, blockIndex=1)},
+], ['p1', 'p2'])
+assert _res == {'p1': None, 'p2': None}, _res
+assert len(_g8['order']) == 1 and _g8['order'][0]['label'] == 'Welcome', \
+    'furniture dropped and the emptied untitled item pruned'
+assert _g8['order'][0]['body'][0]['text'] == 'Good morning and welcome.'
+
 # a refusal from the safety classifiers is an error, not an empty scan
 try:
     aiscan.scan_guide(_g, 'test-key', transport=lambda p, k: {
