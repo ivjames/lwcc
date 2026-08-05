@@ -767,10 +767,20 @@ def aiscan_aggregate():
     def item_view(d, f, full=False):
         v = {'date': d, 'id': f.get('id'), 'status': f.get('status'),
              'confidence': f.get('confidence'), 'fixable': bool(f.get('fix'))}
+        if f.get('statusNote'):
+            v['note'] = f['statusNote']       # e.g. why a fix was skipped
         if full:
             v['quote'] = f.get('quote')
             v['issue'] = f.get('issue')
         return v
+
+    # actionable first: open findings lead, then skipped (retryable),
+    # dismissed, applied — so settled work sinks to the bottom of every list
+    status_rank = {'open': 0, 'skipped': 1, 'dismissed': 2, 'applied': 3}
+
+    def item_sort(items):
+        items.sort(key=lambda df: df[0], reverse=True)      # newest first…
+        items.sort(key=lambda df: status_rank.get(df[1].get('status'), 4))
 
     exact = {}
     for d, f in all_items:
@@ -783,6 +793,7 @@ def aiscan_aggregate():
         if len({d for d, _ in items}) < 2:
             continue
         rep = items[0][1]
+        item_sort(items)
         out.append({
             'kind': 'exact',
             'quote': rep.get('quote'),
@@ -804,13 +815,16 @@ def aiscan_aggregate():
                                          key=lambda kv: str(kv[0])):
         if len(items) < 2:
             continue
-        items.sort(key=lambda df: df[0], reverse=True)
+        item_sort(items)
         out.append({
             'kind': 'similar', 'op': op,
             'current': cur, 'proposed': prop,
             'items': [item_view(d, f, full=True) for d, f in items],
         })
+    # groups with anything still open lead; fully-settled ones sink
     out.sort(key=lambda g: (0 if g['kind'] == 'exact' else 1,
+                            0 if any(i['status'] == 'open'
+                                     for i in g['items']) else 1,
                             -len(g['items']), g.get('quote') or ''))
     return out
 
@@ -940,7 +954,12 @@ function render() {
   if (!SCAN.findings.length) {
     html += '<p class="ok">No misclassifications found.</p>';
   } else {
-    html += SCAN.findings.map(f =>
+    // actionable first: open, then skipped (retryable), dismissed, applied
+    const rank = {open: 0, skipped: 1, dismissed: 2, applied: 3};
+    const sorted = SCAN.findings.map((f, i) => [f, i]).sort((a, b) =>
+      ((rank[a[0].status] ?? 4) - (rank[b[0].status] ?? 4)) || (a[1] - b[1]))
+      .map(p => p[0]);
+    html += sorted.map(f =>
       '<div class="finding">' +
       (f.status !== 'applied'
         ? '<input type="checkbox" class="pick" value="' + esc(f.id) + '"> '
@@ -966,6 +985,14 @@ function render() {
       (settled ? '<button id="archiveall" class="mini">Clear resolved (' +
         settled + ')</button>' : '');
     if (buttons) html += '<p>' + buttons + ' <span id="applymsg"></span></p>';
+  }
+  if (SCAN.findings.some(f => f.status === 'skipped')) {
+    html += '<p class="meta"><b>Skipped?</b> Before a fix is applied, its ' +
+      'quoted text is re-checked against this Sunday&#8217;s stored guide; ' +
+      'a skip means the check failed — usually because the guide changed ' +
+      'after the scan (earlier fixes, a hand-edit, or a re-convert). The ' +
+      'reason is noted on each skipped finding. Reopen retries as-is; ' +
+      're-running the scan refreshes stale positions.</p>';
   }
   const archived = (SCAN.resolvedFindings || []).length;
   if (archived) {
@@ -1160,23 +1187,26 @@ function groupHtml(g, gi) {
     ' <span class="meta">' + g.items.length + ' finding' +
     (g.items.length > 1 ? 's' : '') + ' on ' + dates + ' Sunday' +
     (dates > 1 ? 's' : '') + '</span>';
+  const chip = i =>
+    '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '"' +
+    (i.note ? ' title="' + esc(i.note) + '"' : '') + '>' +
+    esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
+    esc(i.status) + '</span></a>';
   let body;
   if (g.kind === 'exact') {
     body = '<div>' + esc(g.issue) + '</div>' +
       '<blockquote>' + esc(g.quote) + '</blockquote>' +
-      '<div>' + g.items.map(i =>
-        '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '">' +
-        esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
-        esc(i.status) + '</span></a>').join('') + '</div>';
+      '<div>' + g.items.map(chip).join('') + '</div>';
   } else {
     body = g.items.map(i =>
       '<div class="itemrow" title="' + esc(i.issue) + '">' +
-      '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '">' +
-      esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
-      esc(i.status) + '</span></a> ' +
+      chip(i) + ' ' +
       '<span class="meta">&#8220;' + esc(cut(i.quote, 100)) + '&#8221;</span>' +
       '<span class="tag ' + esc(i.confidence) + '">' + esc(i.confidence) +
-      '</span></div>').join('');
+      '</span>' +
+      (i.note ? '<div class="meta" style="margin-left:12px">&#8627; ' +
+        esc(i.note) + '</div>' : '') +
+      '</div>').join('');
   }
   return '<div class="group">' + head + body +
     (buttons ? '<p>' + buttons + '<span id="msg' + gi + '"></span></p>' : '') +
@@ -1193,12 +1223,21 @@ function render() {
     ['exact', 'Identical text across Sundays'],
     ['similar', 'Same error, varying text'],
   ];
-  $('groups').innerHTML = sections.map(([kind, title]) => {
+  let html = sections.map(([kind, title]) => {
     const withIdx = GROUPS.map((g, gi) => [g, gi]).filter(p => p[0].kind === kind);
     if (!withIdx.length) return '';
     return '<h2 class="sec">' + title + '</h2>' +
       withIdx.map(p => groupHtml(p[0], p[1])).join('');
   }).join('');
+  if (GROUPS.some(g => g.items.some(i => i.status === 'skipped'))) {
+    html += '<p class="meta"><b>Skipped?</b> Before a fix is applied, its ' +
+      'quoted text is re-checked against that Sunday&#8217;s stored guide. ' +
+      'A skip means the check failed — usually because the guide changed ' +
+      'after the scan (earlier fixes applied, a hand-edit, or a re-convert ' +
+      'moved the text). Each skipped finding carries its reason. Reopen ' +
+      'retries as-is; re-scanning the Sunday refreshes stale positions.</p>';
+  }
+  $('groups').innerHTML = html;
   document.querySelectorAll('#groups button[data-mode]').forEach(b =>
     b.addEventListener('click', () => b.dataset.mode === 'rescan'
       ? rescan(+b.dataset.gi) : act(+b.dataset.gi, b.dataset.mode)));
