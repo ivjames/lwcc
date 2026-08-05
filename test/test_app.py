@@ -124,6 +124,73 @@ try:
 except RuntimeError as e:
     assert 'declined' in str(e)
 
+# --- AI scan queue: durable markers, dedupe, worker outcomes, and restart
+# rescan — exercised in-process against scratch dirs with run_aiscan stubbed
+# (no key or network), so a redeploy provably pauses scans instead of losing
+# them.
+_qscratch = tempfile.mkdtemp(prefix='lwcc-aiscanq-')
+_saved = {k: getattr(app_mod, k) for k in
+          ('PUBLIC', 'QUEUE_DIR', 'AISCAN_QUEUE_DIR', 'run_aiscan', 'audit_log')}
+try:
+    app_mod.PUBLIC = os.path.join(_qscratch, 'public')
+    app_mod.QUEUE_DIR = os.path.join(_qscratch, 'queue')
+    app_mod.AISCAN_QUEUE_DIR = os.path.join(app_mod.QUEUE_DIR, 'aiscan')
+    app_mod.audit_log = lambda entry: None
+    for d in ('2026-01-04', '2026-01-11'):
+        os.makedirs(os.path.join(app_mod.PUBLIC, d))
+        json.dump({}, open(os.path.join(app_mod.PUBLIC, d, 'guide.json'), 'w'))
+
+    assert app_mod.aiscan_workers() == 10, 'default concurrency is 10'
+    app_mod.ENV['AISCAN_WORKERS'] = '3'
+    assert app_mod.aiscan_workers() == 3
+    app_mod.ENV['AISCAN_WORKERS'] = '99'
+    assert app_mod.aiscan_workers() == 10, 'cap holds'
+    del app_mod.ENV['AISCAN_WORKERS']
+
+    assert app_mod.aiscan_enqueue('2026-01-04') is True
+    assert app_mod.aiscan_enqueue('2026-01-04') is False, 'queued date deduped'
+    assert os.path.exists(os.path.join(app_mod.AISCAN_QUEUE_DIR, '2026-01-04')), \
+        'durable marker written — the request survives a restart'
+    snap = app_mod.aiscan_snapshot()
+    assert snap['waiting'] == 1 and snap['scanning'] == [], snap
+
+    app_mod.run_aiscan = lambda d: {'findings': [1, 2]}
+    app_mod.aiscan_process_one(app_mod.AISCAN_Q.get())
+    snap = app_mod.aiscan_snapshot()
+    assert snap['jobs']['2026-01-04'] == {'status': 'ok', 'findings': 2}, snap
+    assert not os.path.exists(os.path.join(app_mod.AISCAN_QUEUE_DIR, '2026-01-04')), \
+        'marker cleared once the scan settles'
+    assert app_mod.aiscan_enqueue('2026-01-04') is True, 're-scan allowed after done'
+    app_mod.aiscan_process_one(app_mod.AISCAN_Q.get())   # settle it again
+
+    def _boom(d):
+        raise RuntimeError('rate limited')
+    app_mod.run_aiscan = _boom
+    app_mod.aiscan_enqueue('2026-01-11')
+    app_mod.aiscan_process_one(app_mod.AISCAN_Q.get())
+    snap = app_mod.aiscan_snapshot()
+    assert snap['jobs']['2026-01-11'] == {'status': 'failed', 'error': 'rate limited'}
+
+    # restart simulation: markers on disk re-enqueue; stale markers (Sunday
+    # unpublished meanwhile, junk names) are discarded.
+    app_mod.AISCAN_JOBS.clear()
+    while not app_mod.AISCAN_Q.empty():
+        app_mod.AISCAN_Q.get()
+    open(os.path.join(app_mod.AISCAN_QUEUE_DIR, '2026-01-11'), 'w').close()
+    open(os.path.join(app_mod.AISCAN_QUEUE_DIR, '1999-01-01'), 'w').close()
+    open(os.path.join(app_mod.AISCAN_QUEUE_DIR, 'junk'), 'w').close()
+    app_mod.aiscan_rescan()
+    snap = app_mod.aiscan_snapshot()
+    assert list(snap['jobs']) == ['2026-01-11'] and snap['waiting'] == 1, snap
+    assert app_mod.AISCAN_Q.get() == '2026-01-11'
+    assert sorted(os.listdir(app_mod.AISCAN_QUEUE_DIR)) == ['2026-01-11'], \
+        'stale markers discarded, live one kept for the worker'
+finally:
+    app_mod.AISCAN_JOBS.clear()
+    for k, v in _saved.items():
+        setattr(app_mod, k, v)
+    shutil.rmtree(_qscratch, ignore_errors=True)
+
 PORT = 8972
 BASE = f'http://127.0.0.1:{PORT}'
 TOKEN = 'test-token-123'
@@ -298,6 +365,13 @@ try:
     status, body = req('/api/aiscan', data=json.dumps({'date': '2026-08-02'}).encode(),
                        headers={'Content-Type': 'application/json'})
     assert status == 401, 'aiscan API needs the admin token'
+    status, body = req('/api/aiscan-status')
+    assert status == 401, 'scan-queue status gated like /api/status'
+    status, body = req('/api/aiscan-status', headers=COOKIE)
+    assert status == 200, (status, body)
+    ss = json.loads(body)
+    assert ss['ok'] and ss['jobs'] == {} and ss['waiting'] == 0 \
+        and ss['scanning'] == [], ss
     status, body = req('/admin', headers=COOKIE)
     assert b'AI article scanner' in body and b'/admin/aiscan/2026-08-02' in body, \
         'admin page carries the scanner card and per-Sunday links'

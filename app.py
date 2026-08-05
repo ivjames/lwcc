@@ -16,9 +16,12 @@ newest at /) and converts newly uploaded worship-guide PDFs in place:
     GET  /admin/aiscan/YYYY-MM-DD   AI article scanner: review a Sunday for
                       OCR misclassifications (announcements vs page directions
                       vs content) and apply verified, text-preserving repairs;
-                      POST /api/aiscan runs a scan (needs ANTHROPIC_API_KEY
-                      in .env), POST /api/aiscan-apply applies/dismisses
-                      selected findings
+                      POST /api/aiscan queues scans (one date or a batch;
+                      needs ANTHROPIC_API_KEY in .env) on a durable queue —
+                      up to AISCAN_WORKERS run concurrently, markers in
+                      queue/aiscan/ survive restarts — GET /api/aiscan-status
+                      reports live progress, POST /api/aiscan-apply
+                      applies/dismisses selected findings
     GET  /healthz     liveness for the platform health-check sweep
 
 Stdlib only, runs under pm2 behind the site's nginx vhost per lab980
@@ -636,6 +639,102 @@ def run_aiscan(d):
     return scan
 
 
+# Scans run through their own durable queue: each request drops a marker in
+# queue/aiscan/<date>, a pool of worker threads runs up to AISCAN_WORKERS
+# scans concurrently, and markers found at startup are re-enqueued — so an
+# `lwcc redeploy` (pm2 restart) pauses scans rather than losing them. Scans
+# are idempotent (re-running just rewrites aiscan.json), so the one that was
+# mid-flight when the restart hit simply runs again.
+AISCAN_QUEUE_DIR = os.path.join(QUEUE_DIR, 'aiscan')
+AISCAN_JOBS = {}
+AISCAN_LOCK = threading.Lock()
+AISCAN_Q = queue.Queue()
+
+
+def aiscan_workers():
+    configured = (ENV.get('AISCAN_WORKERS') or '').strip()
+    if configured.isdigit() and 0 < int(configured) <= 10:
+        return int(configured)
+    return 10
+
+
+def aiscan_enqueue(d):
+    """Queue one Sunday for scanning. A date already waiting or scanning is
+    never queued twice; the marker file makes the request survive restarts."""
+    with AISCAN_LOCK:
+        if (AISCAN_JOBS.get(d) or {}).get('status') in ('queued', 'scanning'):
+            return False
+        os.makedirs(AISCAN_QUEUE_DIR, exist_ok=True)
+        with open(os.path.join(AISCAN_QUEUE_DIR, d), 'w'):
+            pass
+        AISCAN_JOBS[d] = {'status': 'queued'}
+    AISCAN_Q.put(d)
+    return True
+
+
+def aiscan_process_one(d):
+    """Run one queued scan: update the in-memory job state for the polling
+    UIs, record the outcome in the audit log, clear the durable marker."""
+    with AISCAN_LOCK:
+        if (AISCAN_JOBS.get(d) or {}).get('status') != 'queued':
+            return
+        AISCAN_JOBS[d] = {'status': 'scanning'}
+    try:
+        scan = run_aiscan(d)
+        with AISCAN_LOCK:
+            AISCAN_JOBS[d] = {'status': 'ok',
+                              'findings': len(scan['findings'])}
+        audit_log({'action': 'aiscan', 'date': d, 'ok': True,
+                   'findings': len(scan['findings'])})
+    except Exception as e:
+        if not isinstance(e, RuntimeError):
+            traceback.print_exc()
+        with AISCAN_LOCK:
+            AISCAN_JOBS[d] = {'status': 'failed', 'error': str(e)}
+        audit_log({'action': 'aiscan', 'date': d, 'ok': False,
+                   'error': str(e)})
+    finally:
+        try:
+            os.unlink(os.path.join(AISCAN_QUEUE_DIR, d))
+        except OSError:
+            pass
+
+
+def aiscan_worker():
+    while True:
+        aiscan_process_one(AISCAN_Q.get())
+
+
+def aiscan_rescan():
+    """Re-enqueue scan markers found at startup (requests a restart
+    interrupted). Markers for Sundays that are no longer published are
+    discarded."""
+    if not os.path.isdir(AISCAN_QUEUE_DIR):
+        return
+    for name in sorted(os.listdir(AISCAN_QUEUE_DIR)):
+        if DATE_DIR_RE.match(name) and \
+                os.path.exists(os.path.join(PUBLIC, name, 'guide.json')):
+            with AISCAN_LOCK:
+                AISCAN_JOBS[name] = {'status': 'queued'}
+            AISCAN_Q.put(name)
+        else:
+            try:
+                os.unlink(os.path.join(AISCAN_QUEUE_DIR, name))
+            except OSError:
+                pass
+
+
+def aiscan_snapshot():
+    """Live scan-queue state for the polling UIs: per-date job outcomes plus
+    how many wait and which dates are scanning right now."""
+    with AISCAN_LOCK:
+        jobs = {d: dict(j) for d, j in AISCAN_JOBS.items()}
+    return {'jobs': jobs,
+            'waiting': sum(1 for j in jobs.values() if j['status'] == 'queued'),
+            'scanning': sorted(d for d, j in jobs.items()
+                               if j['status'] == 'scanning')}
+
+
 def apply_aiscan(d, ids, dismiss=False):
     """Apply (or dismiss) selected findings; applied fixes rewrite guide.json
     and re-render the page. Returns per-finding results."""
@@ -769,9 +868,43 @@ function render() {
 }
 render();
 
+// Scans run from the server-side queue (up to 10 concurrently) and survive
+// app restarts; this page just watches the queue until this date settles.
+let watching = false;
+async function pollScan() {
+  let job = null, data = null;
+  try {
+    const res = await fetch('/api/aiscan-status');
+    if (res.status === 401) return;          // signed out — stop quietly
+    data = await res.json();
+    job = (data.jobs || {})['__DATE__'];
+  } catch (e) {
+    if (watching) setTimeout(pollScan, 2000);
+    return;
+  }
+  if (job && (job.status === 'queued' || job.status === 'scanning')) {
+    watching = true;
+    $('scan').disabled = true;
+    $('scanmsg').textContent = job.status === 'scanning'
+      ? 'Scanning — one Claude request, may take a minute…'
+      : 'Queued (' + data.scanning.length + ' scanning, ' + data.waiting + ' waiting)…';
+    setTimeout(pollScan, 2000);
+    return;
+  }
+  if (!watching) return;
+  watching = false;
+  if (job && job.status === 'failed') {
+    $('scanmsg').textContent = 'Scan failed: ' + (job.error || 'unknown error');
+    $('scan').disabled = false;
+  } else {
+    location.reload();
+  }
+}
+pollScan();      // a scan may already be queued or running for this date
+
 $('scan').addEventListener('click', async () => {
   $('scan').disabled = true;
-  $('scanmsg').textContent = 'Scanning — one Claude request, may take a minute…';
+  $('scanmsg').textContent = 'Queueing…';
   try {
     const res = await fetch('/api/aiscan', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -779,7 +912,8 @@ $('scan').addEventListener('click', async () => {
     });
     const data = await res.json().catch(() => ({ok: false, error: 'HTTP ' + res.status}));
     if (!data.ok) throw new Error(data.error || res.statusText);
-    location.reload();
+    watching = true;
+    pollScan();
   } catch (e) {
     $('scanmsg').textContent = 'Failed: ' + e.message;
     $('scan').disabled = false;
@@ -1212,27 +1346,45 @@ for (const _id of ['reconvertall', 'reconverteverything']) {
   });
 }
 
+// AI scans run from a server-side queue (up to 10 at a time) that survives
+// restarts — queue the batch, then watch until it drains.
+const _ab = document.getElementById('aiscanbanner');
 const _as = document.getElementById('aiscanall');
+async function pollAiscan() {
+  try {
+    const res = await fetch('/api/aiscan-status');
+    if (res.status === 401) return;          // signed out — stop quietly
+    const data = await res.json();
+    if (!data.waiting && !data.scanning.length) { location.reload(); return; }
+    const txt = data.scanning.length + ' scanning, ' + data.waiting + ' waiting…';
+    if (_ab) _ab.textContent = 'AI scans in progress: ' + txt;
+    if (_as && _as.disabled) _as.textContent = 'AI scans: ' + txt;
+  } catch (e) { /* transient — keep polling */ }
+  setTimeout(pollAiscan, 3000);
+}
+if (_ab) pollAiscan();
+
 if (_as) _as.addEventListener('click', async () => {
   const dates = _as.dataset.dates.split(' ').filter(Boolean);
   if (!confirm('AI-scan ' + dates.length + ' Sundays? This runs one Claude ' +
-               'API request per Sunday and may take a while.')) return;
+               'API request per Sunday, up to 10 at a time.')) return;
   _as.disabled = true;
-  let done = 0, failed = 0;
-  for (const d of dates) {
-    _as.textContent = 'Scanning ' + (++done) + '/' + dates.length + ': ' + d + '…';
-    try {
-      const res = await fetch('/api/aiscan', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({date: d}),
-      });
-      const data = await res.json().catch(() => ({ok: false}));
-      if (!data.ok) failed++;
-    } catch (e) { failed++; }
+  _as.textContent = 'Queueing ' + dates.length + ' scans…';
+  try {
+    const res = await fetch('/api/aiscan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dates: dates}),
+    });
+    const data = await res.json().catch(() => ({ok: false}));
+    if (!data.ok) throw new Error(data.error || res.statusText);
+    // The server queue takes it from here — scans survive restarts and this
+    // page can be closed; results land in each Sunday's scan page.
+    pollAiscan();
+  } catch (e) {
+    alert('Could not queue AI scans: ' + e.message);
+    _as.disabled = false;
   }
-  if (failed) alert(failed + ' of ' + dates.length + ' scans failed — see the upload history.');
-  location.reload();
 });
 
 async function retryFailed(btn) {
@@ -1408,12 +1560,20 @@ def manage_html():
                 '<p class="warn">Scanning is disabled: set '
                 '<code>ANTHROPIC_API_KEY</code> in <code>.env</code> and '
                 'restart.</p>')
+    snap = aiscan_snapshot()
+    active = ''
+    if snap['waiting'] or snap['scanning']:
+        active = (f'<p class="warn"><span id="aiscanbanner">AI scans in '
+                  f'progress: {len(snap["scanning"])} scanning, '
+                  f'{snap["waiting"]} waiting…</span> — the queue survives '
+                  f'restarts and this page can be closed; it reloads when '
+                  f'the scans finish.</p>')
     out.append('<div class="card"><p><b>AI article scanner</b> — reviews each '
                'Sunday&#8217;s parsed guide for text the OCR pipeline filed '
                'under the wrong class (announcements vs page directions vs '
                'worship content). Open each Sunday&#8217;s scan page from the '
                'list below to review and apply repairs.</p>'
-               + key_note + scan_all + ai_items + '</div>')
+               + key_note + active + scan_all + ai_items + '</div>')
 
     rows = []
     year = None
@@ -1989,6 +2149,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             if k != 'path'} for i in ids}
             self.send_json({'ok': True, 'jobs': jobs, 'queue': queue_snapshot()})
             return
+        if path == '/api/aiscan-status':
+            expected = ENV.get('UPLOAD_TOKEN', '')
+            got = self.headers.get('X-Upload-Token') or self.cookie_token()
+            if not expected or not hmac.compare_digest(got, expected):
+                self.send_json({'ok': False, 'error': 'bad upload token'}, status=401)
+                return
+            self.send_json({'ok': True, **aiscan_snapshot()})
+            return
         if path == '/archive':
             self.send_page(archive_page())
             return
@@ -2197,50 +2365,70 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         'alreadyQueued': already})
 
     def handle_aiscan(self, path, body):
-        """Run an AI misclassification scan on one Sunday, or apply/dismiss
-        selected findings from a stored scan."""
+        """Queue AI misclassification scans (one date or a batch — they run
+        from the durable scan queue, up to AISCAN_WORKERS at a time), or
+        apply/dismiss selected findings from a stored scan."""
         try:
             data = json.loads(body or b'{}')
-            date = str(data.get('date') or '')
         except ValueError:
             self.send_json({'ok': False, 'error': 'invalid JSON body'}, status=400)
             return
+        if path == '/api/aiscan':
+            if not ENV.get('ANTHROPIC_API_KEY'):
+                self.send_json({'ok': False, 'error':
+                                'AI scanner disabled: set ANTHROPIC_API_KEY in '
+                                '.env and restart'}, status=503)
+                return
+            dates = [str(d) for d in (data.get('dates') or [])]
+            if data.get('date'):
+                dates.insert(0, str(data.get('date')))
+            dates = list(dict.fromkeys(dates))[:500]
+            if not dates:
+                self.send_json({'ok': False, 'error': 'no dates given'}, status=400)
+                return
+            queued, skipped = [], {}
+            for d in dates:
+                if not DATE_DIR_RE.match(d) or \
+                        not os.path.exists(os.path.join(PUBLIC, d, 'guide.json')):
+                    skipped[d] = 'no published guide'
+                elif aiscan_enqueue(d):
+                    queued.append(d)
+                else:
+                    skipped[d] = 'already queued or scanning'
+            if not queued and any(v == 'no published guide' for v in skipped.values()):
+                self.send_json({'ok': False, 'error':
+                                'no published guide for the requested date(s)',
+                                'skipped': skipped}, status=404)
+                return
+            audit_log({'action': 'aiscan-queue', 'ok': True,
+                       'queued': len(queued),
+                       **({'skipped': skipped} if skipped else {})})
+            self.send_json({'ok': True, 'queued': queued, 'skipped': skipped})
+            return
+        date = str(data.get('date') or '')
         if not DATE_DIR_RE.match(date) or \
                 not os.path.exists(os.path.join(PUBLIC, date, 'guide.json')):
             self.send_json({'ok': False, 'error': f'no published guide for {date!r}'},
                            status=404)
             return
-        if path == '/api/aiscan' and not ENV.get('ANTHROPIC_API_KEY'):
-            self.send_json({'ok': False, 'error':
-                            'AI scanner disabled: set ANTHROPIC_API_KEY in '
-                            '.env and restart'}, status=503)
-            return
         try:
-            if path == '/api/aiscan':
-                scan = run_aiscan(date)
-                audit_log({'action': 'aiscan', 'date': date, 'ok': True,
-                           'findings': len(scan['findings'])})
-                self.send_json({'ok': True, 'date': date,
-                                'findings': len(scan['findings']),
-                                'summary': scan['summary']})
-            else:
-                ids = [str(i) for i in (data.get('ids') or [])][:200]
-                dismiss = bool(data.get('dismiss'))
-                results = apply_aiscan(date, ids, dismiss=dismiss)
-                applied = sorted(i for i, r in results.items() if r is None)
-                skipped = {i: r for i, r in results.items() if r is not None}
-                audit_log({'action': 'aiscan-dismiss' if dismiss else 'aiscan-apply',
-                           'date': date, 'ok': True, 'ids': ids,
-                           **({'skipped': skipped} if skipped else {})})
-                self.send_json({'ok': True, 'date': date,
-                                'applied': applied, 'skipped': skipped})
+            ids = [str(i) for i in (data.get('ids') or [])][:200]
+            dismiss = bool(data.get('dismiss'))
+            results = apply_aiscan(date, ids, dismiss=dismiss)
+            applied = sorted(i for i, r in results.items() if r is None)
+            skipped = {i: r for i, r in results.items() if r is not None}
+            audit_log({'action': 'aiscan-dismiss' if dismiss else 'aiscan-apply',
+                       'date': date, 'ok': True, 'ids': ids,
+                       **({'skipped': skipped} if skipped else {})})
+            self.send_json({'ok': True, 'date': date,
+                            'applied': applied, 'skipped': skipped})
         except RuntimeError as e:
-            audit_log({'action': 'aiscan', 'date': date, 'ok': False,
+            audit_log({'action': 'aiscan-apply', 'date': date, 'ok': False,
                        'error': str(e)})
             self.send_json({'ok': False, 'error': str(e)}, status=502)
         except Exception as e:
             traceback.print_exc()
-            audit_log({'action': 'aiscan', 'date': date, 'ok': False,
+            audit_log({'action': 'aiscan-apply', 'date': date, 'ok': False,
                        'error': str(e)})
             self.send_json({'ok': False, 'error': str(e)}, status=500)
 
@@ -2368,6 +2556,13 @@ def main():
                          name=f'convert-worker-{i + 1}').start()
     print(f'conversion workers: {workers} '
           f'(set CONVERT_WORKERS in .env to override)', flush=True)
+    aiscan_rescan()
+    scan_workers = aiscan_workers()
+    for i in range(scan_workers):
+        threading.Thread(target=aiscan_worker, daemon=True,
+                         name=f'aiscan-worker-{i + 1}').start()
+    print(f'AI scan workers: {scan_workers} '
+          f'(set AISCAN_WORKERS in .env to override, max 10)', flush=True)
     server = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
     token = 'set' if ENV.get('UPLOAD_TOKEN') else 'NOT SET (uploads disabled)'
     print(f'lwcc serving {PUBLIC} on http://{args.host}:{args.port} — upload token {token}',
