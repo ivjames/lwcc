@@ -548,6 +548,22 @@ try:
                        headers={**COOKIE, 'Content-Type': 'application/json'})
     assert json.loads(body)['skipped'] == {'f1': 'not dismissed or skipped'}, body
 
+    # "Clear resolved" archives settled findings (no re-scan needed): out of
+    # the working list, kept as history, open findings untouched.
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'date': '2020-01-05',
+                                        'archive': True}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body)['applied'] == ['f1'], body
+    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
+    assert [f['id'] for f in scan_after['findings']] == ['f2', 'f3'], \
+        'settled finding out of the way, open ones untouched'
+    assert [f['id'] for f in scan_after['resolvedFindings']] == ['f1'], \
+        'archived into history, not deleted'
+    status, body = req('/admin/aiscan/2020-01-05', headers=COOKIE)
+    assert status == 200 and b'"resolvedFindings"' in body, \
+        'scan page carries the archive'
+
     # Matching findings across guides: the same quoted text flagged the same
     # way on several Sundays aggregates at /admin/aiscan, and one action
     # applies each Sunday's fix on its own guide.
@@ -634,6 +650,23 @@ try:
     for d in agg_dates:
         sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
         assert sc['findings'][-1]['status'] == 'open', 'group dismissal reversed'
+
+    # The admin card offers clear-resolved across Sundays; the batch archive
+    # sweeps each Sunday's settled findings without needing ids.
+    status, body = req('/admin', headers=COOKIE)
+    assert b'id="aiscanclear"' in body \
+        and b'Clear resolved findings (2)' in body, 'clear-all offered'
+    status, body = req('/api/aiscan-apply',
+                       data=json.dumps({'items': [{'date': d} for d in agg_dates],
+                                        'archive': True}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body)['ok'], (status, body)
+    for d in agg_dates:
+        sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
+        assert [f['id'] for f in sc['findings']] == ['g2'], (d, sc['findings'])
+        assert [f['id'] for f in sc['resolvedFindings']] == ['g1']
+    status, body = req('/admin', headers=COOKIE)
+    assert b'id="aiscanclear"' not in body, 'nothing settled left to clear'
 
     # Every admin page's inline JS must actually parse (all scanner states
     # are populated at this point: open, applied, dismissed, groups).

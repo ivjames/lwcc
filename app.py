@@ -637,6 +637,10 @@ def run_aiscan(d):
     model = ENV.get('AISCAN_MODEL') or aiscan.DEFAULT_MODEL
     scan = aiscan.scan_guide(guide, api_key, model=model)
     scan['at'] = datetime.datetime.now().isoformat(timespec='seconds')
+    # a re-scan rebuilds the working findings but keeps the archive
+    resolved = (aiscan_load(d) or {}).get('resolvedFindings')
+    if resolved:
+        scan['resolvedFindings'] = resolved
     aiscan_save(d, scan)
     return scan
 
@@ -790,6 +794,22 @@ def apply_aiscan(d, ids, action='apply'):
                 f['status'] = 'dismissed'
         aiscan_save(d, scan)
         return {i: None for i in ids}
+    if action == 'archive':
+        # "Clear resolved": settled findings (applied, dismissed) move out of
+        # the working list into resolvedFindings — off the pages and out of
+        # the aggregate groups, but kept as history. Empty ids = all settled.
+        keep, moved = [], []
+        for f in findings:
+            if f.get('status') in ('applied', 'dismissed') \
+                    and (not ids or f.get('id') in ids):
+                moved.append(f)
+            else:
+                keep.append(f)
+        scan['findings'] = keep
+        if moved:
+            scan['resolvedFindings'] = (scan.get('resolvedFindings') or []) + moved
+            aiscan_save(d, scan)
+        return {f.get('id'): None for f in moved}
     if action == 'undismiss':
         # Reopens dismissed findings and skipped ones alike — a skipped fix
         # (quote mismatch) is retryable once matching improves or the guide
@@ -901,11 +921,20 @@ function render() {
       '</div></div>').join('');
     const reopenable = SCAN.findings.filter(f =>
       f.status === 'dismissed' || f.status === 'skipped');
+    const settled = SCAN.findings.filter(f =>
+      f.status === 'applied' || f.status === 'dismissed').length;
     const buttons =
       (open.some(f => f.fix) ? '<button id="applysel">Apply selected</button>' : '') +
       (open.length ? '<button id="dismisssel" class="mini">Dismiss selected</button>' : '') +
-      (reopenable.length ? '<button id="undismisssel" class="mini">Reopen selected</button>' : '');
+      (reopenable.length ? '<button id="undismisssel" class="mini">Reopen selected</button>' : '') +
+      (settled ? '<button id="archiveall" class="mini">Clear resolved (' +
+        settled + ')</button>' : '');
     if (buttons) html += '<p>' + buttons + ' <span id="applymsg"></span></p>';
+  }
+  const archived = (SCAN.resolvedFindings || []).length;
+  if (archived) {
+    html += '<p class="meta">' + archived + ' resolved finding' +
+      (archived > 1 ? 's' : '') + ' archived (kept in aiscan.json).</p>';
   }
   html += '</div>';
   box.innerHTML = html;
@@ -935,6 +964,17 @@ function render() {
   if (ap) ap.addEventListener('click', act('apply'));
   if (di) di.addEventListener('click', act('dismiss'));
   if (un) un.addEventListener('click', act('undismiss'));
+  const ar = $('archiveall');
+  if (ar) ar.addEventListener('click', async () => {
+    ar.disabled = true;
+    const res = await fetch('/api/aiscan-apply', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({date: '__DATE__', archive: true}),
+    });
+    const data = await res.json().catch(() => ({ok: false}));
+    if (!data.ok) { $('applymsg').textContent = 'Failed: ' + (data.error || res.status); return; }
+    location.reload();
+  });
 }
 render();
 
@@ -1543,6 +1583,25 @@ async function pollAiscan() {
 }
 if (_ab) pollAiscan();
 
+const _ac = document.getElementById('aiscanclear');
+if (_ac) _ac.addEventListener('click', async () => {
+  const dates = _ac.dataset.dates.split(' ').filter(Boolean);
+  _ac.disabled = true;
+  try {
+    const res = await fetch('/api/aiscan-apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({items: dates.map(d => ({date: d})), archive: true}),
+    });
+    const data = await res.json().catch(() => ({ok: false}));
+    if (!data.ok) throw new Error(data.error || res.statusText);
+    location.reload();
+  } catch (e) {
+    alert('Could not clear resolved findings: ' + e.message);
+    _ac.disabled = false;
+  }
+});
+
 if (_as) _as.addEventListener('click', async () => {
   const dates = _as.dataset.dates.split(' ').filter(Boolean);
   if (!confirm('AI-scan ' + dates.length + ' Sundays? This runs one Claude ' +
@@ -1739,6 +1798,19 @@ def manage_html():
                 '<p class="warn">Scanning is disabled: set '
                 '<code>ANTHROPIC_API_KEY</code> in <code>.env</code> and '
                 'restart.</p>')
+    settled_dates = [d for d in dates
+                     if any(f.get('status') in ('applied', 'dismissed')
+                            for f in (scans[d] or {}).get('findings') or [])]
+    settled_total = sum(1 for d in settled_dates
+                        for f in scans[d].get('findings') or []
+                        if f.get('status') in ('applied', 'dismissed'))
+    clear_all = ''
+    if settled_total:
+        clear_all = (f'<p><button class="mini" id="aiscanclear" '
+                     f'data-dates="{" ".join(settled_dates)}">Clear resolved '
+                     f'findings ({settled_total})</button> — archives applied '
+                     f'and dismissed findings into each Sunday&#8217;s scan '
+                     f'history (kept in aiscan.json).</p>')
     snap = aiscan_snapshot()
     active = ''
     if snap['waiting'] or snap['scanning']:
@@ -1755,7 +1827,7 @@ def manage_html():
                '<p><a href="/admin/aiscan">Matching findings across '
                'Sundays</a> — recurring misclassifications grouped, with '
                'their fixes applied in bulk.</p>'
-               + key_note + active + scan_all + ai_items + '</div>')
+               + key_note + active + scan_all + clear_all + ai_items + '</div>')
 
     rows = []
     year = None
@@ -2591,7 +2663,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                        **({'skipped': skipped} if skipped else {})})
             self.send_json({'ok': True, 'queued': queued, 'skipped': skipped})
             return
-        action = ('undismiss' if data.get('undismiss')
+        action = ('archive' if data.get('archive')
+                  else 'undismiss' if data.get('undismiss')
                   else 'dismiss' if data.get('dismiss') else 'apply')
         if isinstance(data.get('items'), list):
             # Cross-guide batch (the aggregate view): apply/dismiss/undismiss
@@ -2602,8 +2675,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     continue
                 d = str(entry.get('date') or '')
                 ids = [str(i) for i in (entry.get('ids') or [])][:200]
-                if not ids:
-                    continue
+                if not ids and action != 'archive':
+                    continue      # archive with no ids = all settled findings
                 if not DATE_DIR_RE.match(d) or \
                         not os.path.exists(os.path.join(PUBLIC, d, 'guide.json')):
                     results[d or '?'] = {'error': 'no published guide'}
