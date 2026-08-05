@@ -259,10 +259,11 @@ try:
                          'blockIndex': None, 'annIndex': 0, 'heading': None}
                         if fix else None)}
 
-    def _ev(fid, quote):
+    def _ev(fid, quote, status='open', note=None):
         return {'id': fid, 'quote': quote, 'issue': 'event misfiled',
                 'current': 'announcement', 'proposed': 'event',
-                'confidence': 'medium', 'status': 'open',
+                'confidence': 'medium', 'status': status,
+                **({'statusNote': note} if note else {}),
                 'fix': {'op': 'announcement_to_event', 'orderIndex': None,
                         'blockIndex': None, 'annIndex': 1, 'eventIndex': None,
                         'heading': None}}
@@ -271,18 +272,24 @@ try:
                                   _ev('f3', 'Concert this Sunday at 3 PM')]),
                   ('2026-01-11', [_f('f1', '<b>Leisure World</b> Community Church',
                                      status='applied'),
-                                  _ev('f3', 'Church picnic next Saturday')])):
+                                  _ev('f3', 'Church picnic next Saturday',
+                                      status='skipped',
+                                      note='quoted text not found')])):
         open(os.path.join(app_mod.PUBLIC, d, 'index.html'), 'w').write('x')
         json.dump({'findings': fs},
                   open(os.path.join(app_mod.PUBLIC, d, 'aiscan.json'), 'w'))
     agg = app_mod.aiscan_aggregate()
     assert [g['kind'] for g in agg] == ['exact', 'similar'], agg
-    assert [i['date'] for i in agg[0]['items']] == ['2026-01-11', '2026-01-04'], \
-        'newest first, singleton category excluded'
-    assert [i['status'] for i in agg[0]['items']] == ['applied', 'open']
+    assert [i['status'] for i in agg[0]['items']] == ['open', 'applied'], \
+        'open findings lead, settled sink; singleton category excluded'
+    assert [i['date'] for i in agg[0]['items']] == ['2026-01-04', '2026-01-11']
     assert agg[0]['current'] == 'announcement' and agg[0]['proposed'] == 'discard'
     sim = agg[1]
     assert sim['op'] == 'announcement_to_event' and len(sim['items']) == 2, sim
+    assert [i['status'] for i in sim['items']] == ['open', 'skipped'], \
+        'skipped rows sort below open ones'
+    assert sim['items'][1]['note'] == 'quoted text not found', \
+        'skip reason carried to the aggregate view'
     assert {i['quote'] for i in sim['items']} == \
         {'Concert this Sunday at 3 PM', 'Church picnic next Saturday'}, \
         'varying-text findings grouped by error category, quotes carried'
