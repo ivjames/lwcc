@@ -31,6 +31,16 @@ becomes the front page.
   Failed conversions keep their PDF in `queue/failed/` and show on `/admin`
   with a Retry button (optionally pinned to a date) — after a parser fix,
   no re-upload is needed. Fails closed when no token is configured.
+- `GET /admin/aiscan/<YYYY-MM-DD>` — the AI article scanner: reviews a
+  Sunday's parsed guide with Claude for text the OCR pipeline filed under the
+  wrong class (announcements vs page directions vs worship content) and
+  offers verified, text-preserving repairs — nothing is rewritten, findings
+  are moves only, each checked against the stored text before it is applied.
+  Findings persist in `public/<date>/aiscan.json`; apply, dismiss, or leave
+  them for hand-editing. Requires `ANTHROPIC_API_KEY` in `.env` (scanning
+  fails closed without it; `AISCAN_MODEL` overrides the default model). The
+  `/admin` panel links every Sunday's scan, badges open findings, and offers
+  a scan-all for the unscanned backlog (one API request per Sunday).
 - `GET /healthz` — liveness for the platform `health-check` sweep
 
 Every published Sunday links its printed original: the week-nav strip on a
