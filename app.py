@@ -65,6 +65,7 @@ ADMIN_NEXT_RE = re.compile(r'/admin(/edit/\d{4}-\d{2}-\d{2})?')
 sys.path.insert(0, ROOT)
 from wgconvert import aiscan, extract, parse, render  # noqa: E402
 from wgconvert.extract import render_page_image  # noqa: E402
+from wgconvert.merge import merge_guides  # noqa: E402
 
 
 def audit_log(entry):
@@ -230,11 +231,14 @@ def filename_matches_date(fname, date_iso):
     return any(re.search(p, fname) for p in pats)
 
 
-def convert_pdf(pdf_path, date_override=None, source_name=None):
+def convert_pdf(pdf_path, date_override=None, source_name=None, keep_edits=False):
     """Run the wgconvert pipeline and publish into public/<dateISO>/.
     date_override (YYYY-MM-DD) wins over whatever the parser finds — for
     memorial programs whose printed dates are not the service date.
-    source_name (the uploaded filename) corroborates OCR-read dates."""
+    source_name (the uploaded filename) corroborates OCR-read dates.
+    keep_edits: merge into the published guide.json instead of replacing it
+    — hand edits win, the fresh conversion contributes markup/accents and
+    the page-image inventory (see wgconvert.merge)."""
     church = load_church()
     work_dir = tempfile.mkdtemp(prefix='wg-upload-')
     try:
@@ -253,6 +257,10 @@ def convert_pdf(pdf_path, date_override=None, source_name=None):
         with PUBLISH_LOCK:
             out_dir = os.path.join(PUBLIC, guide['dateISO'])
             replaced = os.path.exists(os.path.join(out_dir, 'index.html'))
+            guide_path = os.path.join(out_dir, 'guide.json')
+            if keep_edits and os.path.exists(guide_path):
+                with open(guide_path, encoding='utf-8') as fh:
+                    guide, _ = merge_guides(json.load(fh), guide)
             os.makedirs(out_dir, exist_ok=True)
             cover_dest = None
             if extracted.cover_path and not guide.get('suppressCover'):
@@ -348,12 +356,14 @@ def convert_worker():
         path, fname = job['path'], job.get('file')
         override = job.get('dateOverride')
         keep = job.get('keep')          # re-convert jobs point at a stored
-        extra = {**({'file': fname} if fname else {}),  # source.pdf — never
-                 **({'dateOverride': override} if override else {}),  # consumed
-                 **({'reconvert': True} if keep else {})}
+        merge = job.get('merge')        # source.pdf — never consumed
+        extra = {**({'file': fname} if fname else {}),
+                 **({'dateOverride': override} if override else {}),
+                 **({'reconvert': True} if keep else {}),
+                 **({'merge': True} if merge else {})}
         job_update(jid, status='converting')
         try:
-            guide, replaced = convert_pdf(path, override, fname)
+            guide, replaced = convert_pdf(path, override, fname, keep_edits=merge)
             audit_log({'ok': True, **extra, 'dateISO': guide['dateISO'],
                        'replaced': replaced, 'warnings': guide['warnings'],
                        **({'notes': guide['notes']} if guide.get('notes') else {})})
@@ -1768,20 +1778,25 @@ if (_rv) _rv.addEventListener('click', async () => {
   location.reload();
 });
 
-for (const _id of ['reconvertall', 'reconverteverything']) {
+for (const _id of ['reconvertall', 'reconverteverything', 'refresheverything']) {
   const _btn = document.getElementById(_id);
   if (!_btn) continue;
+  const _merge = _id === 'refresheverything';
   _btn.addEventListener('click', async () => {
     const dates = _btn.dataset.dates.split(' ').filter(Boolean);
-    if (!confirm('Re-convert ' + dates.length + ' Sundays from their stored PDFs? ' +
-                 'Hand-edits to them will be overwritten.')) return;
+    const ask = _merge
+      ? 'Re-convert ' + dates.length + ' Sundays from their stored PDFs, merging? ' +
+        'Hand-edits are kept; unedited text gains the latest markup and accent colors.'
+      : 'Re-convert ' + dates.length + ' Sundays from their stored PDFs? ' +
+        'Hand-edits to them will be overwritten.';
+    if (!confirm(ask)) return;
     _btn.disabled = true;
     _btn.textContent = 'Queueing ' + dates.length + ' re-conversions…';
     try {
       const res = await fetch('/api/reconvert-batch', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({dates: dates}),
+        body: JSON.stringify(_merge ? {dates: dates, merge: true} : {dates: dates}),
       });
       const data = await res.json().catch(() => ({ok: false}));
       if (!data.ok) throw new Error(data.error || res.statusText);
@@ -1873,6 +1888,7 @@ async function retryFailed(btn) {
 async function adminAction(action, date) {
   if (action === 'unpublish' && !confirm('Unpublish ' + date + '? The folder is set aside, not deleted.')) return;
   if (action === 'reconvert' && !confirm('Re-convert ' + date + ' from its stored PDF? Hand-edits to this Sunday will be overwritten.')) return;
+  if (action === 'reconvert-merge' && !confirm('Re-convert ' + date + ' from its stored PDF and merge? Hand-edits are kept; unedited text gains the latest markup and accent colors.')) return;
   const res = await fetch('/api/' + action, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -2073,7 +2089,9 @@ def manage_html():
         title = esc(m['title']) if m and m['title'] else ''
         reconvert = ''
         if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf')):
-            reconvert = (f'<button class="mini" onclick="adminAction(\'reconvert\', '
+            reconvert = (f'<button class="mini" onclick="adminAction(\'reconvert-merge\', '
+                         f'\'{d}\')">Re-convert, keep edits</button>'
+                         f'<button class="mini" onclick="adminAction(\'reconvert\', '
                          f'\'{d}\')">Re-convert</button>')
         n_open = aiscan_open_count(scans[d])
         ai_badge = (f' <span class="warn" style="font-size:.85em">🔎 {n_open}'
@@ -2093,14 +2111,23 @@ def manage_html():
                  if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf'))]
     sweep = ''
     if src_dates:
-        sweep = (f'<p><button class="mini" id="reconverteverything"{busy} '
+        sweep = (f'<p><button class="mini" id="refresheverything"{busy} '
+                 f'data-dates="{" ".join(src_dates)}">Refresh every Sunday, '
+                 f'keep edits ({len(src_dates)})</button> — merge re-convert '
+                 f'through the server queue: hand-edits kept, unedited text '
+                 f'gains the converter&#8217;s latest markup and accent '
+                 f'colors.</p>'
+                 f'<p><button class="mini" id="reconverteverything"{busy} '
                  f'data-dates="{" ".join(src_dates)}">Re-convert every Sunday '
                  f'({len(src_dates)})</button> — full sweep through the server '
-                 f'queue after a converter fix, flagged or not.</p>')
+                 f'queue after a converter fix, flagged or not '
+                 f'(discards hand-edits).</p>')
     out.append('<div class="card"><p><b>Published Sundays</b> — re-render '
                'rebuilds the page from its guide.json (after hand-edits); '
                're-convert re-runs the converter on the stored source PDF '
                '(picks up parser upgrades, discards hand-edits); '
+               're-convert-keep-edits does the same but merges: hand-edits '
+               'win, everything else gains the latest markup and colors; '
                'unpublish sets the folder aside without deleting it.</p>'
                + sweep +
                '<div style="overflow-x:auto"><table class="pub"><tbody>'
@@ -2163,7 +2190,9 @@ def history_rows(entries):
             detail = ''
         if e.get('replaced'):
             status_html += ' <span class="warn">(replaced existing)</span>'
-        if e.get('dateOverride'):
+        if e.get('merge'):
+            status_html += ' <span class="ok">(merged — hand-edits kept)</span>'
+        if e.get('dateOverride') and not e.get('merge'):
             status_html += ' <span class="warn">(date set manually)</span>'
         if e.get('notes'):
             detail += ('<ul class="notes">'
@@ -2783,7 +2812,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.handle_login(body)
             return
         if path not in ('/api/upload', '/api/retry', '/api/review', '/api/rerender',
-                        '/api/reconvert', '/api/reconvert-batch',
+                        '/api/reconvert', '/api/reconvert-merge',
+                        '/api/reconvert-batch',
                         '/api/reconvert-clear', '/api/unpublish', '/api/save',
                         '/api/aiscan', '/api/aiscan-apply'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
@@ -2875,6 +2905,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             data = json.loads(body or b'{}')
             dates = data.get('dates') or []
+            merge = bool(data.get('merge'))
         except ValueError:
             self.send_json({'ok': False, 'error': 'invalid JSON body'}, status=400)
             return
@@ -2895,10 +2926,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             pending.add(fname)
             jid = (datetime.datetime.now().strftime('%Y%m%d%H%M%S')
                    + '-' + os.urandom(4).hex())
-            job_update(jid, status='queued', file=fname, path=src, keep=True)
+            # Merge jobs pin the date so the refresh lands on this Sunday's
+            # guide even if the parser would read the date differently.
+            job_update(jid, status='queued', file=fname, path=src, keep=True,
+                       **({'merge': True, 'dateOverride': date} if merge else {}))
             CONVERT_Q.put(jid)
             queued.append(date)
         audit_log({'action': 'reconvert-batch', 'ok': True,
+                   **({'merge': True} if merge else {}),
                    'queued': len(queued),
                    **({'skipped': skipped} if skipped else {}),
                    **({'alreadyQueued': len(already)} if already else {})})
@@ -3063,7 +3098,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                            status=404)
             return
         try:
-            if action == 'reconvert':
+            if action in ('reconvert', 'reconvert-merge'):
+                merge = action == 'reconvert-merge'
                 src = os.path.join(PUBLIC, date, 'source.pdf')
                 if not os.path.exists(src):
                     self.send_json({'ok': False, 'error':
@@ -3071,11 +3107,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                     'uploaded before retention; re-upload it once'},
                                    status=404)
                     return
-                guide, replaced = convert_pdf(src, None, f'{date}/source.pdf')
+                # Merges pin the date so the refresh lands on this Sunday's
+                # guide even if the parser would read the date differently.
+                guide, replaced = convert_pdf(src, date if merge else None,
+                                              f'{date}/source.pdf', keep_edits=merge)
                 # No 'action' key: reconversions are conversions, so they
                 # belong in the /admin/history record.
                 audit_log({'ok': True, 'file': f'{date}/source.pdf',
-                           'reconvert': True, 'dateISO': guide['dateISO'],
+                           'reconvert': True,
+                           **({'merge': True} if merge else {}),
+                           'dateISO': guide['dateISO'],
                            'replaced': replaced, 'warnings': guide['warnings'],
                            **({'notes': guide['notes']} if guide.get('notes') else {})})
                 self.send_json({'ok': True, 'date': guide['dateISO'],

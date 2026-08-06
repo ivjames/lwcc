@@ -5,6 +5,7 @@ Run:  python3 test/test_app.py
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -313,6 +314,58 @@ _vg4, _res = aiscan.apply_findings(_vg, [
     ['x2'])
 assert _res == {'x2': None}, _res
 assert '<sup>14</sup> When he went ashore' in _vg4['order'][1]['body'][1]['text']
+
+# --- merge re-convert: the published (hand-edited) guide is the skeleton;
+# a fresh conversion contributes markup/accents for canonically identical
+# text, heading accents, and the page-image inventory. Edited text has no
+# canonical match and passes through untouched; ambiguous matches are
+# never guessed at.
+from wgconvert.merge import merge_guides  # noqa: E402
+
+_cur = {'welcome': None, 'order': [
+            {'kind': 'item', 'type': 'prayer', 'label': 'Blessing', 'title': None,
+             'titleQuoted': False, 'who': None, 'note': None,
+             'body': [{'type': 'prayer', 'text': 'Go in peace. Amen.'}]}],
+        'announcements': [
+            {'heading': 'Coffee', 'kind': 'note', 'text': 'Same words here.', 'color': None},
+            {'heading': 'Picnic', 'kind': 'note', 'text': 'dup', 'color': None},
+            {'heading': 'Edited', 'kind': 'note', 'text': 'Rewritten by hand.',
+             'color': 'blue'}],
+        'specialEvents': [], 'prayerRequests': [],
+        'flyers': [{'page': 9, 'image': 'flyer-9.jpg'}], 'notes': [], 'dateISO': '2026-01-04'}
+_frs = {'welcome': None, 'order': [
+            {'kind': 'item', 'type': 'prayer', 'label': 'Blessing', 'title': None,
+             'titleQuoted': False, 'who': None, 'note': None,
+             'body': [{'type': 'prayer', 'text': 'Go in peace.  Amen.'}]}],
+        'announcements': [
+            {'heading': 'Coffee', 'kind': 'note',
+             'text': '<span class="fc-maroon">Same words</span> here.', 'color': 'maroon'},
+            {'heading': 'Picnic', 'kind': 'note', 'text': '<b>dup</b>', 'color': 'green'},
+            {'heading': 'Picnic', 'kind': 'note', 'text': '<i>dup</i>', 'color': 'gold'},
+            {'heading': 'Edited', 'kind': 'note', 'text': 'The original printed text.',
+             'color': 'purple'}],
+        'specialEvents': [], 'prayerRequests': [],
+        'flyers': [], 'notes': ['fresh-parse note (not adopted)'], 'dateISO': '2026-01-04'}
+_m, _st = merge_guides(_cur, _frs)
+assert _m['announcements'][0]['text'] == '<span class="fc-maroon">Same words</span> here.', \
+    'canonically identical text adopts the fresh markup'
+assert _m['announcements'][0]['color'] == 'maroon', 'heading accent adopted'
+assert _m['announcements'][1]['text'] == 'dup', 'ambiguous canonical match left alone'
+assert _m['announcements'][1]['color'] is None, 'ambiguous accent left alone'
+assert _m['announcements'][2]['text'] == 'Rewritten by hand.', 'hand edit kept'
+assert _m['announcements'][2]['color'] == 'blue', 'hand-set accent kept'
+assert _m['order'][0]['body'][0]['text'] == 'Go in peace.  Amen.', \
+    'whitespace-only drift still counts as canonically identical'
+assert _m['flyers'] == [], 'page-image inventory follows the fresh conversion'
+assert _st == {'texts': 2, 'accents': 1}, _st
+assert any('refreshed from the printed PDF (hand edits kept)' in n for n in _m['notes'])
+assert 'fresh-parse note (not adopted)' not in _m['notes']
+_m2, _st2 = merge_guides(_cur, {'welcome': None, 'order': [], 'announcements': [],
+                                'specialEvents': [], 'prayerRequests': [],
+                                'flyers': [], 'dateISO': '2026-01-04'})
+assert _st2 == {'texts': 0, 'accents': 0} and _m2['notes'] == [], \
+    'a no-change merge adds no note'
+assert _m2['announcements'] == _cur['announcements'], 'nothing to adopt → untouched'
 
 # --- AI scan queue: durable markers, dedupe, worker outcomes, and restart
 # rescan — exercised in-process against scratch dirs with run_aiscan stubbed
@@ -1121,6 +1174,69 @@ try:
     os.remove(os.path.join(scratch, 'public', '2026-08-09', 'source.pdf'))
     status, body = action('reconvert', '2026-08-09')
     assert status == 404, 'no stored source -> not found, with guidance'
+
+    # Merge re-convert: hand edits kept, everything unedited gains the
+    # latest markup and accent colors from a fresh conversion of the PDF.
+    status, body = req('/admin', headers=COOKIE)
+    assert b'reconvert-merge' in body and b'id="refresheverything"' in body, \
+        'admin offers the keep-edits re-convert, per Sunday and as a sweep'
+    mgj = os.path.join(out_dir, 'guide.json')
+    g = json.load(open(mgj))
+    # Simulate a pre-color, hand-edited Sunday: strip every accent, rewrite
+    # one announcement by hand, and add one that never came from the PDF.
+    for a in g['announcements']:
+        a['color'] = None
+        a['text'] = re.sub(r'</?span[^>]*>', '', a['text'])
+    for ev in g['specialEvents']:
+        ev['color'] = None
+        ev['paragraphs'] = [re.sub(r'</?span[^>]*>', '', p) for p in ev['paragraphs']]
+    g['announcements'][0]['text'] = 'Rewritten by hand — no longer the printed text.'
+    g['announcements'].append({'heading': 'Hand Added', 'kind': 'note',
+                               'text': 'Stays after the merge.', 'color': None})
+    json.dump(g, open(mgj, 'w'))
+    status, body = action('reconvert-merge', '2026-08-02')
+    assert status == 200 and json.loads(body)['ok'], body
+    merged = json.load(open(mgj))
+    assert merged['announcements'][0]['text'] == \
+        'Rewritten by hand — no longer the printed text.', 'hand edit kept'
+    assert any(a.get('heading') == 'Hand Added' for a in merged['announcements']), \
+        'operator-added announcement kept'
+    by_head = {a.get('heading'): a for a in merged['announcements']}
+    assert by_head['Coffee with Pastor']['color'] == 'maroon', 'heading accent restored'
+    assert '<span class="fc-' in by_head['August Communion Sunday']['text'] \
+        or by_head['August Communion Sunday']['color'] == 'gold', 'accents restored'
+    assert merged['specialEvents'][0]['color'] == 'purple'
+    assert '<span class="fc-purple">' in merged['specialEvents'][0]['paragraphs'][0], \
+        'markup restored where the text was not edited'
+    assert any('refreshed from the printed PDF (hand edits kept)' in n
+               for n in merged['notes'])
+    page = open(os.path.join(out_dir, 'index.html'), 'rb').read()
+    assert b'Rewritten by hand' in page and b'fc-purple' in page, \
+        'merge re-rendered with edits and colors together'
+    entries = [json.loads(l) for l in open(log_path)]
+    assert any(e.get('merge') and e.get('reconvert') and e.get('ok')
+               for e in entries), 'merge audited as a merged re-conversion'
+
+    # The batch endpoint carries the merge flag through the worker queue.
+    g = json.load(open(mgj))
+    g['specialEvents'][0]['color'] = None
+    json.dump(g, open(mgj, 'w'))
+    status, body = req('/api/reconvert-batch',
+                       data=json.dumps({'dates': ['2026-08-02'], 'merge': True}).encode(),
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body)['queued'] == 1, body
+    for _ in range(240):
+        status, body = req('/api/status?ids=', headers=COOKIE)
+        qs = json.loads(body)['queue']
+        if not qs['waiting'] and not qs['converting']:
+            break
+        time.sleep(0.5)
+    merged = json.load(open(mgj))
+    assert merged['specialEvents'][0]['color'] == 'purple', \
+        'batch merge refreshed the accent'
+    assert merged['announcements'][0]['text'] == \
+        'Rewritten by hand — no longer the printed text.', \
+        'batch merge kept the hand edit'
 
     # Guide <-> original PDF navigation: the week-nav links to /DATE/original
     # when a source is stored; the viewer page links back and embeds the PDF.

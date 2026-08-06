@@ -79,6 +79,16 @@ converter server-side — no re-upload needed. Sundays uploaded before
 retention existed have no stored source; re-upload those once. Re-convert
 discards hand-edits to that Sunday (it re-parses the PDF from scratch).
 
+**Re-convert, keep edits** merges instead (`wgconvert/merge.py`): the
+published guide stays the skeleton — the operator's text, structure, and
+classifications win — while any field whose text still matches the printed
+PDF (canonically: tags stripped, typography normalized) adopts the fresh
+conversion's markup and accent colors, headings with no accent set adopt the
+detected one, and the flyer/cover inventory follows the fresh conversion.
+Edited text simply has no canonical match and passes through untouched. A
+"Refresh every Sunday, keep edits" sweep runs the same merge across the
+backlog through the server queue.
+
 Batch the backlog from a terminal:
 
 ```
