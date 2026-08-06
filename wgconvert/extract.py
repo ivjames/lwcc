@@ -200,8 +200,31 @@ def _finish_line(cluster, page):
                 text = ' ' + text
             run = Run(text=text, b=r.b, i=r.i, sup=sup, color=it['font'].color)
             if runs and runs[-1].b == run.b and runs[-1].i == run.i \
-                    and runs[-1].sup == run.sup and runs[-1].color == run.color:
-                runs[-1].text += run.text
+                    and runs[-1].sup == run.sup:
+                prev = runs[-1]
+                if prev.color == run.color:
+                    prev.text += run.text
+                elif prev.text and not prev.text[-1:].isspace() \
+                        and not run.text[:1].isspace():
+                    # A color change mid-word (rainbow display lettering,
+                    # punctuation in a different ink, hues straddling a
+                    # palette boundary) renders as a jarring multi-color
+                    # word. Absorb the word-part into the open word, colored
+                    # by whichever side has more letters; everything after
+                    # the first space keeps its own ink.
+                    hm = re.match(r'(\S+)([\s\S]*)$', run.text)
+                    head, rest = hm.group(1), hm.group(2)
+                    prev_word = (prev.text.split() or [''])[-1]
+                    if sum(c.isalnum() for c in head) \
+                            > sum(c.isalnum() for c in prev_word) \
+                            and ' ' not in prev.text.strip():
+                        prev.color = run.color
+                    prev.text += head
+                    if rest:
+                        runs.append(Run(text=rest, b=run.b, i=run.i,
+                                        sup=run.sup, color=run.color))
+                else:
+                    runs.append(run)
             else:
                 runs.append(run)
             prev_right = it['left'] + it['width']
@@ -296,10 +319,15 @@ def _load_ppm(path):
 def _ink_color(img, left, top, width, height):
     """Median color of the dark (ink) pixels inside a word's box — the median
     defeats the white paper and the anti-aliased edge blend, recovering the
-    printed ink. None when the box holds too little ink to judge."""
+    printed ink. None when the box holds too little ink to judge, or when
+    most of its ink pixels carry no chroma of their own: genuinely colored
+    print is colored through the strokes (measured ≥0.65 on real accents),
+    while black text on a noisy scan only picks up color on the JPEG fringe
+    — calling that colored is how black words end up randomly accented."""
     w, h, px = img
     left, top = max(0, left), max(0, top)
     rs, gs, bs = [], [], []
+    colored = 0
     for y in range(top, min(h, top + height)):
         base = (y * w + left) * 3
         for x in range(min(width, w - left)):
@@ -308,7 +336,9 @@ def _ink_color(img, left, top, width, height):
                 rs.append(r)
                 gs.append(g)
                 bs.append(b)
-    if len(rs) < 12:
+                if max(r, g, b) - min(r, g, b) > 40:
+                    colored += 1
+    if len(rs) < 12 or colored < len(rs) * 0.5:
         return None
     rs.sort()
     gs.sort()
