@@ -234,6 +234,29 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None, flye
     </div>
   </section>''')
 
+    # -- interstitial photos ------------------------------------------------
+    figs = []
+    for im in guide.get('images') or []:
+        if not im.get('image') or not flyer_dir:
+            continue
+        path = os.path.join(flyer_dir, im['image'])
+        if not os.path.exists(path):
+            continue
+        caption = im.get('caption')
+        alt = caption or f'Photo from the printed guide (page {im["page"]})'
+        cap_html = f'\n      <figcaption>{esc(caption)}</figcaption>' if caption else ''
+        figs.append(f'''    <figure class="photo">
+      <img src="{data_uri(path)}" alt="{esc(alt)}">{cap_html}
+    </figure>''')
+    if figs:
+        toc.append(('#photos', 'Photos'))
+        joined = '\n'.join(figs)
+        sections.append(f'''
+  <section id="photos">
+    <h2 class="sec">Photos</h2>
+{joined}
+  </section>''')
+
     # -- flyers / inserts ---------------------------------------------------
     flyer_imgs = []
     for fl in guide.get('flyers') or []:

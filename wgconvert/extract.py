@@ -55,6 +55,8 @@ class Page:
     width: int
     height: int
     lines: list = field(default_factory=list)
+    images: list = field(default_factory=list)  # placed-image boxes from the
+                                # XML: {'top','left','width','height'}
     ocr_text: str | None = None
     ocr_rich: list | None = None  # per ocr_text line: [(word, ink hex|None)]
     engraved: bool = False      # a sheet-music score page — deliberately
@@ -139,8 +141,14 @@ def _parse_xml(xml):
                 'font': fonts.get(tm.group(5), Font()),
                 'runs': _parse_runs(tm.group(6)),
             })
+        images = [
+            {'top': int(im.group(1)), 'left': int(im.group(2)),
+             'width': int(im.group(3)), 'height': int(im.group(4))}
+            for im in re.finditer(
+                r'<image top="(-?\d+)" left="(-?\d+)" width="(-?\d+)" height="(-?\d+)"',
+                pm.group(2))]
         pages.append({'number': attr('number'), 'width': attr('width'),
-                      'height': attr('height'), 'items': items})
+                      'height': attr('height'), 'items': items, 'images': images})
     return pages
 
 
@@ -301,6 +309,31 @@ def render_page_image(pdf_path, page_num, dest):
     os.replace(os.path.join(out_dir, produced), dest)
 
 
+# pdftohtml's XML coordinates are page pixels at its default 1.5 zoom, i.e.
+# 108 dpi; rendering a crop at twice that makes every XML unit two pixels.
+XML_DPI = 108
+
+
+def render_page_region(pdf_path, page_num, box, dest):
+    """Render one image's region of a page to a JPEG (interstitial photos on
+    text pages). Cropping the rendered page — rather than pulling the
+    embedded stream — keeps the printed appearance: soft masks, rotations,
+    and color spaces all come out exactly as on paper."""
+    out_dir = os.path.dirname(dest) or '.'
+    prefix = os.path.join(out_dir, f'.photo-tmp-{page_num}')
+    scale = 2
+    _run(['pdftoppm', '-jpeg', '-r', str(XML_DPI * scale),
+          '-f', str(page_num), '-l', str(page_num),
+          '-x', str(max(0, box['left']) * scale), '-y', str(max(0, box['top']) * scale),
+          '-W', str(box['width'] * scale), '-H', str(box['height'] * scale),
+          pdf_path, prefix])
+    produced = next((f for f in os.listdir(out_dir)
+                     if f.startswith(f'.photo-tmp-{page_num}-') and f.endswith('.jpg')), None)
+    if not produced:
+        raise RuntimeError(f'pdftoppm produced no image for page {page_num}')
+    os.replace(os.path.join(out_dir, produced), dest)
+
+
 def _has_tesseract():
     return shutil.which('tesseract') is not None
 
@@ -403,14 +436,16 @@ def extract(pdf_path, work_dir, ocr=True):
     os.makedirs(work_dir, exist_ok=True)
     xml_path = os.path.join(work_dir, 'wg.xml')
     warnings = []
-    # -i: ignore images; -q: quiet
-    _run(['pdftohtml', '-xml', '-i', '-q', pdf_path, xml_path])
+    # No -i: the <image> boxes locate interstitial photos on text pages (the
+    # extracted image files themselves are ignored — photos are re-rendered
+    # from the page, see render_page_region — and vanish with work_dir).
+    _run(['pdftohtml', '-xml', '-q', pdf_path, xml_path])
     with open(xml_path, encoding='utf-8') as fh:
         xml = fh.read()
     pages = []
     for p in _parse_xml(xml):
         page = Page(number=p['number'], width=p['width'], height=p['height'],
-                    lines=_build_lines(p))
+                    lines=_build_lines(p), images=p['images'])
         if page_is_engraved(p['items'], page.lines):
             page.engraved = True
             page.lines = []          # credits/title residue goes with the score

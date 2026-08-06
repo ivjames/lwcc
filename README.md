@@ -84,7 +84,8 @@ published guide stays the skeleton — the operator's text, structure, and
 classifications win — while any field whose text still matches the printed
 PDF (canonically: tags stripped, typography normalized) adopts the fresh
 conversion's markup and accent colors, headings with no accent set adopt the
-detected one, and the flyer/cover inventory follows the fresh conversion.
+detected one, and the flyer/photo/cover inventory follows the fresh
+conversion (photo captions the operator has set win over the fresh parse's).
 Edited text simply has no canonical match and passes through untouched. A
 "Refresh every Sunday, keep edits" sweep runs the same merge across the
 backlog through the server queue.
@@ -180,7 +181,15 @@ A scan that is mostly art publishes as a facsimile of page images.
    worship (labels, titles, speakers, prayers with their line structure,
    scripture with verse-number superscripts, congregation refrains, stage
    directions), music team, prayer requests, announcements, special events,
-   and the prayer journal. Nothing is silently dropped; findings are
+   and the prayer journal. Interstitial photos — images set between the
+   prose on otherwise-textual pages, which are neither the cover nor a
+   full-page flyer — are kept too (`images` in guide.json): the placed-image
+   boxes `pdftohtml` reports are filtered down to content-shaped ones (icons,
+   off-page background art, full-page backdrops, and panels with text printed
+   on them are not photos), the caption printed under a photo is claimed for
+   it rather than leaking into the surrounding section, and each photo is
+   published as a crop of its rendered page (`photo-<page>-<n>.jpg`) in a
+   Photos section. Nothing is silently dropped; findings are
    two-tier: **warnings** mean content may be lost or wrong (missing
    sections in a text guide, an uncorroborated OCR date — these flag the
    review panel and exit code 1) while **notes** mean content was kept but

@@ -777,6 +777,78 @@ def parse_journal(ocr_text):
     return None
 
 
+# --- interstitial photos ---------------------------------------------------
+# pdftohtml reports every placed image's box. Text pages carry the occasional
+# photo set between their prose blocks — event photos, seasonal art — which
+# is neither the cover nor a full-page flyer and was historically dropped.
+# Keep the ones shaped like content and claim the caption printed under them.
+
+PHOTO_MIN_DIM = 60      # XML units: anything smaller is an icon or a rule
+PHOTO_MAX_AREA = 0.85   # of the page — bigger is a backdrop, not a photo
+PHOTO_EDGE_SLACK = 8    # tolerance for boxes flush with the page edge
+CAPTION_GAP = 40        # a caption starts within this of the photo's bottom
+
+
+def page_photos(page):
+    """Content photos on a text page: big enough to matter, fully on the page
+    (background art bleeds off it), and not page furniture with text printed
+    inside (panel/box graphics behind the words)."""
+    photos = []
+    for im in page.images:
+        w, h = im['width'], im['height']
+        if w < PHOTO_MIN_DIM or h < PHOTO_MIN_DIM:
+            continue                    # icons, emoji glyph art, hairlines
+        if im['top'] < -PHOTO_EDGE_SLACK or im['left'] < -PHOTO_EDGE_SLACK \
+                or im['top'] + h > page.height + PHOTO_EDGE_SLACK \
+                or im['left'] + w > page.width + PHOTO_EDGE_SLACK:
+            continue                    # bleeds off the page: background art
+        if w * h > PHOTO_MAX_AREA * page.width * page.height:
+            continue                    # a full-page backdrop behind the text
+        inside = sum(1 for l in page.lines
+                     if im['top'] <= (l.top + l.bottom) / 2 <= im['top'] + h
+                     and im['left'] - PHOTO_EDGE_SLACK <= l.left <= im['left'] + w)
+        if inside >= 2:
+            continue                    # a panel with text on it, not a photo
+        photos.append(im)
+    return sorted(photos, key=lambda im: (im['top'], im['left']))
+
+
+def _italic_line(l):
+    return any(r.text.strip() for r in l.runs) \
+        and all(r.i or not r.text.strip() for r in l.runs)
+
+
+def claim_caption(page, im):
+    """The caption printed under a photo: italic line(s) — or one short,
+    isolated plain line — starting just below its bottom edge, inside its
+    horizontal span. Claimed lines leave the page's text flow (they belong
+    to the photo); returns the caption text or None."""
+    bottom = im['top'] + im['height']
+    below = [l for l in page.lines
+             if l.top >= bottom - 4
+             and im['left'] - PHOTO_EDGE_SLACK <= l.left <= im['left'] + im['width']]
+    if not below or below[0].top > bottom + CAPTION_GAP \
+            or BOX_CREDITS_RE.search(below[0].text):
+        return None
+    cap = [below[0]]
+    for l in below[1:]:
+        if not _italic_line(l) or l.top - cap[-1].top > cap[-1].height * 1.6:
+            break
+        cap.append(l)
+    if not _italic_line(cap[0]):
+        # A plain line is a caption only when it stands alone: short, not a
+        # label or heading, and not the first line of a flowing paragraph.
+        l = cap[0]
+        follower = next((n for n in below[1:] if n.top > l.top), None)
+        if (len(cap) > 1 or len(l.text) > 90 or match_label(l)
+                or BOX_CREDITS_RE.search(l.text)
+                or (l.runs and l.runs[0].b)
+                or (follower is not None and follower.top - l.top <= l.height * 1.6)):
+            return None
+    page.lines = [l for l in page.lines if l not in cap]
+    return tidy_prose(' '.join(l.text for l in cap)) or None
+
+
 # --- main ------------------------------------------------------------------
 
 def parse(extracted, opts=None):
@@ -790,12 +862,26 @@ def parse(extracted, opts=None):
         'series': None, 'coverAlt': None,
         'welcome': None, 'order': [],
         'musicTeam': [], 'prayerRequests': [], 'announcements': [],
-        'specialEvents': [], 'flyers': [], 'journal': None,
+        'specialEvents': [], 'images': [], 'flyers': [], 'journal': None,
         'warnings': warnings,
         'notes': notes,
     }
 
     text_pages = [p for p in extracted.pages if p.lines]
+
+    # -- interstitial photos on text pages ----------------------------------
+    # Claimed before the text flow is assembled, so a photo's caption rides
+    # with the photo instead of leaking into the surrounding section. Page 1
+    # belongs to the cover pipeline; scans publish whole pages as facsimiles.
+    for p in text_pages:
+        if p.number == 1:
+            continue
+        for im in page_photos(p):
+            guide['images'].append({
+                'page': p.number, 'top': im['top'], 'left': im['left'],
+                'width': im['width'], 'height': im['height'],
+                'image': None, 'caption': claim_caption(p, im)})
+
     if not text_pages:
         # A typed bulletin scanned without a text layer: the categories are
         # all there — read them. Structure the pages whose OCR reads as
@@ -1118,4 +1204,5 @@ def parse(extracted, opts=None):
     if not guide['order'] and text_pages:
         warnings.append('no order-of-worship items found')
     guide['flyers'].sort(key=lambda f: f['page'])
+    guide['images'].sort(key=lambda im: (im['page'], im['top']))
     return guide

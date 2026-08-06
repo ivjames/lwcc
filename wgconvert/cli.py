@@ -9,7 +9,7 @@ import shutil
 import sys
 import tempfile
 
-from .extract import extract, render_page_image
+from .extract import extract, render_page_image, render_page_region
 from .parse import parse
 from .render import render
 
@@ -52,6 +52,18 @@ def materialize_flyers(pdf, guide, out_dir):
             os.unlink(os.path.join(out_dir, f))
 
 
+def materialize_photos(pdf, guide, out_dir):
+    """Interstitial photos, cropped from their pages like flyers are rendered
+    from theirs; stale crops from a previous conversion are dropped."""
+    for n, im in enumerate(guide.get('images') or [], 1):
+        im['image'] = f"photo-{im['page']}-{n}.jpg"
+        render_page_region(pdf, im['page'], im, os.path.join(out_dir, im['image']))
+    current = {im['image'] for im in guide.get('images') or []}
+    for f in os.listdir(out_dir):
+        if re.fullmatch(r'photo-\d+-\d+\.jpg', f) and f not in current:
+            os.unlink(os.path.join(out_dir, f))
+
+
 def convert_one(pdf, args, church, render_html=True):
     work_dir = tempfile.mkdtemp(prefix='wg-')
     try:
@@ -67,6 +79,7 @@ def convert_one(pdf, args, church, render_html=True):
                 out_dir, 'cover' + os.path.splitext(extracted.cover_path)[1])
             shutil.copyfile(extracted.cover_path, cover_dest)
         materialize_flyers(pdf, guide, out_dir)
+        materialize_photos(pdf, guide, out_dir)
         write_guide(guide, out_dir)
 
         if render_html:

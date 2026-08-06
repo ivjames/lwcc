@@ -12,8 +12,9 @@ conversion wherever that cannot conflict with an edit:
   old converter never produced;
 - announcement/special-event headings with no accent set adopt the accent
   the fresh conversion detected for the same (canonical) heading;
-- the page-image inventory (flyers, cover suppression) follows the fresh
-  conversion, because that is what the re-conversion just wrote to disk.
+- the page-image inventory (flyers, interstitial photos, cover suppression)
+  follows the fresh conversion, because that is what the re-conversion just
+  wrote to disk — except photo captions the operator has set, which win.
 
 Text the operator changed has no canonical match and passes through
 untouched. Ambiguous matches (the same canonical text appearing with
@@ -86,7 +87,17 @@ def merge_guides(current, fresh):
                 accents += 1
 
     # The re-conversion just (re)wrote the page images — the inventory must
-    # match the disk, not the old guide.
+    # match the disk, not the old guide. Photo captions are operator-editable
+    # text, though: a caption set on the published guide wins over (or fills
+    # in for) whatever the fresh parse read for the same photo box.
+    kept_captions = {
+        (im.get('page'), im.get('top'), im.get('left')): im['caption']
+        for im in current.get('images') or [] if im.get('caption')}
+    merged['images'] = copy.deepcopy(fresh.get('images') or [])
+    for im in merged['images']:
+        cur = kept_captions.get((im.get('page'), im.get('top'), im.get('left')))
+        if cur:
+            im['caption'] = cur
     merged['flyers'] = fresh.get('flyers') or []
     if fresh.get('suppressCover'):
         merged['suppressCover'] = True
