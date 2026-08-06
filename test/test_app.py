@@ -330,6 +330,75 @@ _vg4, _res = aiscan.apply_findings(_vg, [
 assert _res == {'x2': None}, _res
 assert '<sup>14</sup> When he went ashore' in _vg4['order'][1]['body'][1]['text']
 
+# OCR-garbled verse numbers — the backlog's dominant failure: the printed
+# superscript digits misread as apostrophes, degree signs, or letters fused
+# onto the next word. fix_verse restores the printed <sup>N</sup> and
+# touches nothing else; insert_verse re-inserts a number OCR dropped
+# entirely, anchored at the verse's first words.
+_gg = {
+    'dateISO': '2023-01-22', 'welcome': None,
+    'order': [
+        {'kind': 'item', 'type': 'scripture', 'label': 'Scripture',
+         'title': None, 'titleQuoted': False, 'who': None, 'note': None,
+         'body': [
+            {'type': 'ref', 'text': 'Matthew 4:18-22'},
+            {'type': 'verse', 'text':
+             "'8As he walked by the Sea of Galilee, he saw two brothers. "
+             '7°lmmediately they left their nets and followed him. '
+             'Sand they were baptized by him in the river Jordan. '
+             'at <sup>1!</sup> On the way to Jerusalem. '
+             'You have multiplied the nation, you have increased its joy.'},
+         ]},
+    ], 'announcements': [], 'specialEvents': []}
+
+
+def _vf(op, **kw):
+    return {'op': op, 'orderIndex': 0, 'blockIndex': 1, 'number': None,
+            'garbled': None, **kw}
+
+
+_gg2, _res = aiscan.apply_findings(_gg, [
+    {'id': 'g1', 'quote': "'8As he walked by the Sea", 'issue': 'x',
+     'current': 'garbled', 'proposed': 'superscript', 'confidence': 'high',
+     'status': 'open', 'fix': _vf('fix_verse', number=18, garbled="'8")},
+    {'id': 'g2', 'quote': '7°lmmediately they left', 'issue': 'x',
+     'current': 'garbled', 'proposed': 'superscript', 'confidence': 'high',
+     'status': 'open', 'fix': _vf('fix_verse', number=20, garbled='7°')},
+    {'id': 'g3', 'quote': 'Sand they were baptized', 'issue': 'x',
+     'current': 'garbled', 'proposed': 'superscript', 'confidence': 'high',
+     'status': 'open', 'fix': _vf('fix_verse', number=6, garbled='S')},
+    {'id': 'g4', 'quote': 'at <sup>1!</sup> On the way', 'issue': 'x',
+     'current': 'garbled', 'proposed': 'superscript', 'confidence': 'high',
+     'status': 'open', 'fix': _vf('fix_verse', number=11,
+                                  garbled='<sup>1!</sup>')},
+    {'id': 'g5', 'quote': 'You have multiplied the nation', 'issue': 'x',
+     'current': 'missing', 'proposed': 'superscript', 'confidence': 'high',
+     'status': 'open', 'fix': _vf('insert_verse', number=3)},
+    {'id': 'g6', 'quote': 'baptized by him in the river Jordan', 'issue': 'x',
+     'current': 'garbled', 'proposed': 'superscript', 'confidence': 'high',
+     'status': 'open', 'fix': _vf('fix_verse', number=9, garbled='baptized')},
+], ['g1', 'g2', 'g3', 'g4', 'g5', 'g6'])
+_gt = _gg2['order'][0]['body'][1]['text']
+assert _res['g1'] is None and '<sup>18</sup> As he walked' in _gt, (_res, _gt)
+assert _res['g2'] is None and '<sup>20</sup> lmmediately' in _gt, \
+    'the number is restored; the misread word next to it is left for a human'
+assert _res['g3'] is None and '<sup>6</sup> and they were baptized' in _gt, \
+    'a letter fused from the misread number is peeled off the intact word'
+assert _res['g4'] is None and 'at <sup>11</sup> On the way' in _gt, \
+    'garbled digits inside an existing <sup> are corrected in place'
+assert _res['g5'] is None \
+    and '<sup>3</sup> You have multiplied the nation' in _gt
+assert 'looks like a word' in _res['g6'], \
+    'a real word is never consumed as a garbled number'
+
+# repair ops survive the response-parse gate like the markup-only ones
+_vscan2 = aiscan.scan_verses(_vg, 'test-key', transport=lambda p, k: _canned([
+    {'path': 'x', 'quote': "'8As he walked", 'issue': 'garbled',
+     'current': 'garbled', 'proposed': 'superscript', 'confidence': 'high',
+     'fix': {'op': 'fix_verse', 'orderIndex': 1, 'blockIndex': 1,
+             'number': 18, 'garbled': "'8"}}]))
+assert _vscan2['findings'][0]['fix']['op'] == 'fix_verse'
+
 # --- merge re-convert: the published (hand-edited) guide is the skeleton;
 # a fresh conversion contributes markup/accents for canonically identical
 # text, heading accents, and the page-image inventory. Edited text has no
