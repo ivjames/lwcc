@@ -97,6 +97,10 @@
   .fc-blue,.co-note .blk b.fc-blue,.co-concert h3.fc-blue{color:var(--blue)}
   .fc-purple,.co-note .blk b.fc-purple,.co-concert h3.fc-purple{color:var(--purple)}
 
+  figure.photo{margin:14px auto;max-width:640px;text-align:center}
+  figure.photo img{width:100%;height:auto;border-radius:10px;box-shadow:0 4px 14px rgba(0,0,0,.12)}
+  figure.photo figcaption{font-style:italic;color:var(--muted);font-size:.9rem;margin-top:6px}
+
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   @media(max-width:560px){.grid{grid-template-columns:1fr}}
   .music{font-size:1rem}

@@ -64,7 +64,7 @@ ADMIN_NEXT_RE = re.compile(r'/admin(/edit/\d{4}-\d{2}-\d{2})?')
 
 sys.path.insert(0, ROOT)
 from wgconvert import aiscan, extract, parse, render  # noqa: E402
-from wgconvert.extract import render_page_image  # noqa: E402
+from wgconvert.extract import render_page_image, render_page_region  # noqa: E402
 from wgconvert.merge import merge_guides  # noqa: E402
 
 # Every timestamp the app stamps or shows is Pacific wall-clock — the
@@ -300,13 +300,19 @@ def convert_pdf(pdf_path, date_override=None, source_name=None, keep_edits=False
             for fl in guide.get('flyers') or []:
                 fl['image'] = f"flyer-{fl['page']}.jpg"
                 render_page_image(pdf_path, fl['page'], os.path.join(out_dir, fl['image']))
-            # Re-conversions can produce fewer flyers (e.g. a page
+            for n, im in enumerate(guide.get('images') or [], 1):
+                im['image'] = f"photo-{im['page']}-{n}.jpg"
+                render_page_region(pdf_path, im['page'], im,
+                                   os.path.join(out_dir, im['image']))
+            # Re-conversions can produce fewer flyers or photos (e.g. a page
             # reclassified as engraved music) — drop images the new guide no
             # longer references, and stale covers when the guide suppresses
             # one (else a later re-render would resurrect it from disk).
-            current = {fl['image'] for fl in guide.get('flyers') or []}
+            current = {fl['image'] for fl in guide.get('flyers') or []} \
+                | {im['image'] for im in guide.get('images') or []}
             for f in os.listdir(out_dir):
-                if re.fullmatch(r'flyer-\d+\.jpg', f) and f not in current:
+                if (re.fullmatch(r'flyer-\d+\.jpg', f)
+                        or re.fullmatch(r'photo-\d+-\d+\.jpg', f)) and f not in current:
                     os.unlink(os.path.join(out_dir, f))
                 elif guide.get('suppressCover') and re.fullmatch(r'cover\.(jpe?g|png|webp)', f):
                     os.unlink(os.path.join(out_dir, f))
@@ -650,6 +656,15 @@ def sanitize_guide(sub, existing):
         if (existing.get('journal') or {}).get('fromOcr'):
             g['journal']['fromOcr'] = True
 
+    # The photo inventory mirrors the crops on disk, so it always comes from
+    # the existing file — but captions are operator text: a submission that
+    # carries images (positionally) may edit them.
+    g['images'] = existing.get('images') or []
+    sub_images = sub.get('images') if isinstance(sub.get('images'), list) else None
+    if sub_images is not None:
+        for i, im in enumerate(g['images']):
+            if i < len(sub_images) and isinstance(sub_images[i], dict):
+                im['caption'] = clean_plain(sub_images[i].get('caption')) or None
     g['flyers'] = existing.get('flyers') or []
     g['warnings'] = existing.get('warnings') or []
     g['notes'] = existing.get('notes') or []

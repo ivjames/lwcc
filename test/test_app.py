@@ -416,7 +416,13 @@ _cur = {'welcome': None, 'order': [
             {'heading': 'Edited', 'kind': 'note', 'text': 'Rewritten by hand.',
              'color': 'blue'}],
         'specialEvents': [], 'prayerRequests': [],
-        'flyers': [{'page': 9, 'image': 'flyer-9.jpg'}], 'notes': [], 'dateISO': '2026-01-04'}
+        'flyers': [{'page': 9, 'image': 'flyer-9.jpg'}],
+        'images': [
+            {'page': 5, 'top': 100, 'left': 50, 'width': 400, 'height': 300,
+             'image': 'photo-5-1.jpg', 'caption': 'Hand-written caption.'},
+            {'page': 7, 'top': 200, 'left': 50, 'width': 400, 'height': 300,
+             'image': 'photo-7-2.jpg', 'caption': None}],
+        'notes': [], 'dateISO': '2026-01-04'}
 _frs = {'welcome': None, 'order': [
             {'kind': 'item', 'type': 'prayer', 'label': 'Blessing', 'title': None,
              'titleQuoted': False, 'who': None, 'note': None,
@@ -429,7 +435,13 @@ _frs = {'welcome': None, 'order': [
             {'heading': 'Edited', 'kind': 'note', 'text': 'The original printed text.',
              'color': 'purple'}],
         'specialEvents': [], 'prayerRequests': [],
-        'flyers': [], 'notes': ['fresh-parse note (not adopted)'], 'dateISO': '2026-01-04'}
+        'flyers': [],
+        'images': [
+            {'page': 5, 'top': 100, 'left': 50, 'width': 400, 'height': 300,
+             'image': None, 'caption': 'Freshly parsed caption.'},
+            {'page': 7, 'top': 200, 'left': 50, 'width': 400, 'height': 300,
+             'image': None, 'caption': 'Caption the old parse missed.'}],
+        'notes': ['fresh-parse note (not adopted)'], 'dateISO': '2026-01-04'}
 _m, _st = merge_guides(_cur, _frs)
 assert _m['announcements'][0]['text'] == '<span class="fc-maroon">Same words</span> here.', \
     'canonically identical text adopts the fresh markup'
@@ -441,6 +453,11 @@ assert _m['announcements'][2]['color'] == 'blue', 'hand-set accent kept'
 assert _m['order'][0]['body'][0]['text'] == 'Go in peace.  Amen.', \
     'whitespace-only drift still counts as canonically identical'
 assert _m['flyers'] == [], 'page-image inventory follows the fresh conversion'
+assert [im['caption'] for im in _m['images']] == \
+    ['Hand-written caption.', 'Caption the old parse missed.'], \
+    'operator captions win; fresh captions fill photos that had none'
+assert [im['image'] for im in _m['images']] == [None, None], \
+    'photo inventory (like flyers) follows the fresh conversion'
 assert _st == {'texts': 2, 'accents': 1}, _st
 assert any('refreshed from the printed PDF (hand edits kept)' in n for n in _m['notes'])
 assert 'fresh-parse note (not adopted)' not in _m['notes']

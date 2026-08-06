@@ -193,6 +193,55 @@ assert not poster_residue(['If you wish to attend, but are unable to pay '
                            'for a ticket, contact the church office.'])
 assert not poster_residue(['presents'] * 4)
 
+# Interstitial photos on text pages: content-shaped placed images are kept
+# (icons, off-page background art, full-page backdrops, and panels with text
+# printed on them are not), and the caption printed under a photo is claimed
+# for the photo — leaving the page's text flow.
+from wgconvert.parse import page_photos, claim_caption  # noqa: E402
+
+
+def _pline(text, top, left=100, italic=False, bold=False):
+    return Line(page=5, top=top, bottom=top + 12, left=left, height=12,
+                runs=[Run(text=text, i=italic, b=bold)], text=text)
+
+
+_photo = {'top': 300, 'left': 100, 'width': 400, 'height': 300}
+_ppage = Page(number=5, width=918, height=1188, lines=[], images=[
+    _photo,
+    {'top': 100, 'left': 50, 'width': 21, 'height': 21},        # icon/emoji
+    {'top': -70, 'left': -14, 'width': 959, 'height': 1266},    # bleeds off-page
+    {'top': 10, 'left': 5, 'width': 905, 'height': 1150},       # full-page backdrop
+])
+assert page_photos(_ppage) == [_photo], page_photos(_ppage)
+_panel = {'top': 700, 'left': 60, 'width': 800, 'height': 300}
+_ppage.images.append(_panel)
+_ppage.lines = [_pline('GROW', 750), _pline('PRAY', 800)]       # text on the panel
+assert page_photos(_ppage) == [_photo], 'panel behind text is not a photo'
+
+# italic caption lines directly under the photo: claimed and removed
+_ppage.lines = [_pline('Body text above the photo.', 250),
+                _pline('The choir at the spring concert,', 610, italic=True),
+                _pline('with our joyful hearts.', 628, italic=True),
+                _pline('NEXT SECTION: More news here.', 720, bold=True)]
+assert claim_caption(_ppage, _photo) == \
+    'The choir at the spring concert, with our joyful hearts.'
+assert [l.top for l in _ppage.lines] == [250, 720], 'caption left the text flow'
+
+# a short plain line standing alone under the photo is a caption too
+_ppage.lines = [_pline('Our new fellowship hall', 612), _pline('Unrelated text.', 720)]
+assert claim_caption(_ppage, _photo) == 'Our new fellowship hall'
+# ...but the first line of a flowing paragraph is not
+_ppage.lines = [_pline('This paragraph just happens to sit', 612),
+                _pline('below the photo and keeps flowing.', 630)]
+assert claim_caption(_ppage, _photo) is None and len(_ppage.lines) == 2
+# nor are hymn credits, labels, or far-away text
+_ppage.lines = [_pline('Music by Sy Miller, arr. D. Albulario', 612, italic=True)]
+assert claim_caption(_ppage, _photo) is None, 'credits are not a caption'
+_ppage.lines = [_pline('HYMN: “Amazing Grace”', 612, bold=True)]
+assert claim_caption(_ppage, _photo) is None, 'a label is not a caption'
+_ppage.lines = [_pline('Too far below the photo.', 700)]
+assert claim_caption(_ppage, _photo) is None, 'caption must hug the photo'
+
 # Printed accent inks: detected per-run, mapped onto the site palette, and
 # carried as <span class="fc-…"> markup; black, the engraving near-black,
 # greys, and white stay ordinary ink.
@@ -367,6 +416,8 @@ try:
         print('  (journal missing — tesseract not installed?)', file=sys.stderr)
 
     assert extracted.cover_path, 'cover image extracted'
+    assert g['images'] == [], \
+        'no interstitial photos in the 2026 sample (backgrounds/icons/panels filtered)'
 
     # Render smoke test: valid, self-contained, both images inlined.
     with open(os.path.join(ROOT, 'config', 'church.json'), encoding='utf-8') as fh:
@@ -416,6 +467,27 @@ try:
         'text-layer Prayer Journal parsed without OCR'
     assert not g2['specialEvents'], 'journal midday note not misread as an event'
     assert g2['warnings'] == [], g2['warnings']
+
+    # The photo set into the credits page (no printed caption) is kept as an
+    # interstitial image; materialized as a crop of its page and rendered as
+    # a captioned figure in its own Photos section.
+    assert [(im['page'], im['caption']) for im in g2['images']] == [(10, None)], g2['images']
+    from wgconvert.cli import materialize_photos  # noqa: E402
+    photo_dir = work_dir + '-photos'
+    os.makedirs(photo_dir, exist_ok=True)
+    open(os.path.join(photo_dir, 'photo-99-9.jpg'), 'wb').close()   # stale crop
+    materialize_photos(os.path.join(ROOT, 'samples', 'WG_2025_09_07.pdf'), g2, photo_dir)
+    assert g2['images'][0]['image'] == 'photo-10-1.jpg'
+    assert os.path.getsize(os.path.join(photo_dir, 'photo-10-1.jpg')) > 10000, \
+        'photo crop rendered from the page'
+    assert not os.path.exists(os.path.join(photo_dir, 'photo-99-9.jpg')), \
+        'stale photo crops are dropped'
+    g2['images'][0]['caption'] = 'Sunset over the shore.'
+    html2 = render(g2, church, flyer_dir=photo_dir)
+    assert '<figure class="photo">' in html2 and 'id="photos"' in html2
+    assert '<figcaption>Sunset over the shore.</figcaption>' in html2
+    assert re.search(r'<img src="data:image/jpeg;base64,[^"]+" '
+                     r'alt="Sunset over the shore\."', html2), 'caption doubles as alt text'
 
     # ---- scanned bulletin, end to end: pages of the 2025 sample rendered
     # to JPEG and wrapped into an image-only PDF. Scans have no boldness, so
@@ -501,4 +573,5 @@ try:
 finally:
     shutil.rmtree(work_dir, ignore_errors=True)
     shutil.rmtree(work_dir + '-2', ignore_errors=True)
+    shutil.rmtree(work_dir + '-photos', ignore_errors=True)
     shutil.rmtree(work_dir + '-scan', ignore_errors=True)
