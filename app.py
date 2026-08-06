@@ -67,11 +67,41 @@ from wgconvert import aiscan, extract, parse, render  # noqa: E402
 from wgconvert.extract import render_page_image  # noqa: E402
 from wgconvert.merge import merge_guides  # noqa: E402
 
+# Every timestamp the app stamps or shows is Pacific wall-clock — the
+# church's time — no matter what timezone the server itself runs in. New
+# stamps carry the UTC offset so they stay unambiguous in the logs.
+try:
+    from zoneinfo import ZoneInfo
+    PACIFIC = ZoneInfo('America/Los_Angeles')
+except Exception:                       # no tzdata on this host
+    PACIFIC = None
+
+
+def now_pacific():
+    return (datetime.datetime.now(PACIFIC) if PACIFIC
+            else datetime.datetime.now())
+
+
+def fmt_at(s):
+    """A stored timestamp, for display: offset-stamped entries show as
+    Pacific wall-clock with a PT label; older stamps from the server's own
+    clock have no offset recorded and pass through unlabeled."""
+    s = str(s or '')
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return s
+    if dt.tzinfo is None:
+        return s
+    if PACIFIC:
+        dt = dt.astimezone(PACIFIC)
+    return dt.strftime('%Y-%m-%dT%H:%M:%S') + ' PT'
+
 
 def audit_log(entry):
     """Append one JSON line per upload to uploads.log — the durable record of
     every conversion, including failures that publish nothing."""
-    entry = {'at': datetime.datetime.now().isoformat(timespec='seconds'), **entry}
+    entry = {'at': now_pacific().isoformat(timespec='seconds'), **entry}
     try:
         with open(os.path.join(ROOT, 'uploads.log'), 'a', encoding='utf-8') as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + '\n')
@@ -331,7 +361,7 @@ def job_update(jid, **kw):
 
 def spool_upload(body, fname, date_override=None):
     os.makedirs(QUEUE_DIR, exist_ok=True)
-    jid = (datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+    jid = (now_pacific().strftime('%Y%m%d%H%M%S')
            + '-' + os.urandom(4).hex())
     safe = re.sub(r'[^A-Za-z0-9._-]+', '_', fname or 'upload.pdf')[:80]
     path = os.path.join(QUEUE_DIR, f'{jid}__{safe}')
@@ -477,7 +507,7 @@ def rerender_all():
 def unpublish_date(d):
     """Take a Sunday off the site without destroying it: the folder is renamed
     aside (restore by renaming it back and re-uploading is never needed)."""
-    ts = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+    ts = now_pacific().strftime('%Y%m%d%H%M%S')
     os.rename(os.path.join(PUBLIC, d),
               os.path.join(PUBLIC, f'.unpublished-{d}-{ts}'))
 
@@ -689,7 +719,7 @@ def run_aiscan(d):
             b = (verses.get('usage') or {}).get(k)
             if a is not None or b is not None:
                 scan.setdefault('usage', {})[k] = (a or 0) + (b or 0)
-    scan['at'] = datetime.datetime.now().isoformat(timespec='seconds')
+    scan['at'] = now_pacific().isoformat(timespec='seconds')
     # a re-scan rebuilds the working findings but keeps the archive
     resolved = (aiscan_load(d) or {}).get('resolvedFindings')
     if resolved:
@@ -1025,7 +1055,10 @@ function render() {
   const box = $('results');
   if (!SCAN) { box.innerHTML = ''; return; }
   const open = SCAN.findings.filter(f => f.status === 'open');
-  let html = '<div class="card"><p><b>Scan from ' + esc(SCAN.at) + '</b>' +
+  // offset-stamped scan times are Pacific; show them as such
+  const fmtAt = s => String(s == null ? '' : s)
+    .replace(/[+-]\d{2}:\d{2}$/, ' PT').replace('T', ' ');
+  let html = '<div class="card"><p><b>Scan from ' + esc(fmtAt(SCAN.at)) + '</b>' +
     ' <span class="meta">(' + esc(SCAN.model) + ')</span></p>' +
     '<p>' + esc(SCAN.summary) + '</p>';
   if (!SCAN.findings.length) {
@@ -2249,7 +2282,7 @@ def upload_history(limit=None, status=None):
 def history_rows(entries):
     rows = []
     for e in entries:
-        when = esc(e.get('at') or '').replace('T', '<br>')
+        when = esc(fmt_at(e.get('at'))).replace('T', '<br>', 1)
         d = e.get('dateISO')
         sunday = f'<a href="/{esc(d)}/">{esc(d)}</a>' if d else '—'
         st = upload_status(e)
@@ -3013,7 +3046,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 already.append(date)     # a re-convert of this Sunday is
                 continue                 # queued or running — don't stack
             pending.add(fname)
-            jid = (datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+            jid = (now_pacific().strftime('%Y%m%d%H%M%S')
                    + '-' + os.urandom(4).hex())
             # Merge jobs pin the date so the refresh lands on this Sunday's
             # guide even if the parser would read the date differently.
