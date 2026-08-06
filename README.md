@@ -160,7 +160,10 @@ A scan that is mostly art publishes as a facsimile of page images.
    (invisible glyphs, opacity 0) are dropped too. `pdfimages` pulls the weekly
    cover art (largest photo-shaped image on page 1). Pages with no text layer
    — the GPS notes card and the Prayer Journal are flattened screenshots — are
-   OCR'd with tesseract at 300 dpi.
+   OCR'd with tesseract at 300 dpi; each recognized word's ink color is
+   sampled from the rendered page (median of the dark pixels in its box), so
+   scanned bulletins keep the colored text some sections rely on — scans have
+   no boldness, so accent-ink headings are their only structural marker.
 
 2. **parse** (`wgconvert/parse.py`) — classifies the extracted lines into a
    structured `guide.json`: date/season, message series, welcome, the order of
