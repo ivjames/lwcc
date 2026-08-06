@@ -2,6 +2,12 @@
 misclassifications — worship content vs page/stage directions vs
 announcements — and repair them with text-preserving moves.
 
+A second, dedicated agent (scan_verses) reads the scripture section: it
+works out from each passage reference which verse numbers the text must
+carry and checks every one is labeled with its superscript <sup>N</sup>
+marker. Its fixes are markup-only — wrap a bare verse number, unwrap a
+wrongly superscripted one — never text edits.
+
 The printed PDF is the source of truth, so the scanner never rewrites text.
 Claude reports findings that each quote the misfiled text verbatim and name
 one mechanical fix (reclassify an order item as a stage direction, move a
@@ -32,6 +38,9 @@ OPS = ('item_to_stage', 'stage_to_item', 'item_to_announcement',
        'announcement_to_stage', 'event_to_announcement',
        'welcome_to_announcement')
 
+# the scripture verse-number agent's markup-only fixes
+VERSE_OPS = ('sup_verse', 'unsup_verse')
+
 SYSTEM_PROMPT = """\
 You are the quality reviewer for a church worship-guide conversion pipeline.
 A printed Sunday worship guide PDF was OCR'd and parsed into structured JSON.
@@ -60,7 +69,7 @@ Hard rules:
 - The printed page is the source of truth. Never rewrite, correct, or
   paraphrase text. Every fix is a move/reclassification of existing text.
 - "quote" must be a verbatim excerpt (at most 120 characters) copied exactly
-  from the misclassified text, including any <b>/<i>/<sup> markup, so the fix
+  from the misclassified text, including any <b>/<i>/<sup>/<span> markup, so the fix
   can be verified mechanically before it is applied.
 - Address text by the indices given in the JSON: "i" for order,
   announcements, and specialEvents entries, "j" for body blocks inside an
@@ -145,6 +154,96 @@ FINDINGS_SCHEMA = {
 }
 
 
+VERSE_SYSTEM_PROMPT = """\
+You are the scripture verse-number checker for a church worship-guide
+conversion pipeline. A printed Sunday worship guide PDF was OCR'd and parsed
+into structured JSON. Scripture passages print each verse number as a small
+superscript, which the JSON marks up as <sup>N</sup>. The PDF's superscript
+detection sometimes misses: a verse number is left as a bare digit in the
+running text ("13 Now when Jesus heard…"), was dropped by OCR entirely, or a
+number that is not a verse number got wrapped in <sup> by mistake.
+
+Read every scripture item below. Each "ref" block names a passage
+(book chapter:verse-range); the "verse" blocks after it carry that passage's
+text. From the reference, work out exactly which verse numbers the text must
+carry (Romans 9:1-5 → 1 2 3 4 5; a ref with no verse range, like Psalm 121,
+covers the whole chapter starting at verse 1), then check each expected
+number off in order against the <sup> markers in the text.
+
+Report ONLY verse-number labeling problems:
+- bare: the verse number's digits are present at the verse boundary but not
+  wrapped in <sup></sup> → fix sup_verse.
+- superscripted (wrongly): a <sup>-wrapped number that is not one of this
+  passage's verse numbers — a time, a chapter number stuck mid-text, page
+  furniture → fix unsup_verse.
+- missing: the expected number appears nowhere in the text (OCR dropped it)
+  → op "none"; never invent text. Also use "none" for any other verse
+  problem no markup-only fix expresses.
+
+Hard rules:
+- The printed page is the source of truth. Never rewrite, reorder, correct,
+  or paraphrase text. The only fixes are markup-only: wrapping an existing
+  bare number in <sup></sup>, or unwrapping a wrongly wrapped one.
+- Do NOT flag numbers that belong to the scripture prose itself (counts,
+  measures, years, times) — they are only a problem when wrongly inside
+  <sup>.
+- Translation section headings printed inside the text ("The Cost of
+  Discipleship", "A Song of Ascents.") are normal and never a finding.
+- "quote" must be a verbatim excerpt (at most 120 characters) copied exactly
+  from the verse text — the number in question plus the first words of its
+  verse — so the fix can be located and verified mechanically even when the
+  same digits occur elsewhere in the passage.
+- Address text by the indices given in the JSON: "i" for the order item,
+  "j" for the body block; "number" is the verse number itself.
+- confidence: "high" = certain, safe to fix mechanically; "medium" =
+  probably; "low" = worth a human look, do not auto-fix.
+- If every passage is fully and correctly labeled, return an empty findings
+  list. Do not invent problems.
+"""
+
+VERSE_FINDINGS_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'findings': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'path': {'type': 'string'},
+                    'quote': {'type': 'string'},
+                    'issue': {'type': 'string'},
+                    'current': {'type': 'string',
+                                'enum': ['bare', 'superscripted', 'missing']},
+                    'proposed': {'type': 'string',
+                                 'enum': ['superscript', 'plain', 'flag']},
+                    'confidence': {'type': 'string',
+                                   'enum': ['high', 'medium', 'low']},
+                    'fix': {
+                        'type': 'object',
+                        'properties': {
+                            'op': {'type': 'string',
+                                   'enum': list(VERSE_OPS) + ['none']},
+                            'orderIndex': {'type': ['integer', 'null']},
+                            'blockIndex': {'type': ['integer', 'null']},
+                            'number': {'type': ['integer', 'null']},
+                        },
+                        'required': ['op', 'orderIndex', 'blockIndex',
+                                     'number'],
+                        'additionalProperties': False,
+                    },
+                },
+                'required': ['path', 'quote', 'issue', 'current', 'proposed',
+                             'confidence', 'fix'],
+                'additionalProperties': False,
+            },
+        },
+        'summary': {'type': 'string'},
+    },
+    'required': ['findings', 'summary'],
+    'additionalProperties': False,
+}
+
+
 def guide_digest(guide):
     """The slice of guide.json the reviewer needs, with explicit indices so
     fixes can address entries unambiguously."""
@@ -182,22 +281,51 @@ def guide_digest(guide):
     }
 
 
-def build_request(guide, model=DEFAULT_MODEL):
+def verse_digest(guide):
+    """The scripture items only — refs and verse text with their raw
+    <sup>/<b>/… markup intact, indexed so fixes can address blocks."""
+    items = []
+    for i, o in enumerate(guide.get('order') or []):
+        if o.get('kind') != 'item':
+            continue
+        body = o.get('body') or []
+        if o.get('type') != 'scripture' and \
+                not any(b.get('type') in ('ref', 'verse') for b in body):
+            continue
+        items.append({
+            'i': i, 'type': o.get('type'), 'label': o.get('label'),
+            'title': o.get('title'),
+            'body': [{'j': j, 'type': b.get('type'), 'text': b.get('text')}
+                     for j, b in enumerate(body)],
+        })
+    return {'dateISO': guide.get('dateISO'), 'scripture': items}
+
+
+def _request(digest, system, schema, model):
     return {
         'model': model,
         'max_tokens': 8192,
-        'system': SYSTEM_PROMPT,
+        'system': system,
         'messages': [{
             'role': 'user',
-            'content': json.dumps(guide_digest(guide), ensure_ascii=False, indent=1),
+            'content': json.dumps(digest, ensure_ascii=False, indent=1),
         }],
         'output_config': {'format': {'type': 'json_schema',
-                                     'schema': FINDINGS_SCHEMA}},
+                                     'schema': schema}},
         # Opus 5's safety classifiers can decline a request outright; the
         # server-side fallback re-runs it on Anthropic's recommended model
         # instead of failing the scan.
         'fallbacks': 'default',
     }
+
+
+def build_request(guide, model=DEFAULT_MODEL):
+    return _request(guide_digest(guide), SYSTEM_PROMPT, FINDINGS_SCHEMA, model)
+
+
+def build_verse_request(guide, model=DEFAULT_MODEL):
+    return _request(verse_digest(guide), VERSE_SYSTEM_PROMPT,
+                    VERSE_FINDINGS_SCHEMA, model)
 
 
 def http_transport(payload, api_key, timeout=600):
@@ -230,10 +358,25 @@ def http_transport(payload, api_key, timeout=600):
 
 
 def scan_guide(guide, api_key, model=DEFAULT_MODEL, transport=None):
-    """Run one review. Returns {'model', 'summary', 'usage', 'findings'};
-    findings carry ids (f1, f2, …) and status 'open'."""
+    """Run one classification review. Returns {'model', 'summary', 'usage',
+    'findings'}; findings carry ids (f1, f2, …) and status 'open'."""
     transport = transport or http_transport
     response = transport(build_request(guide, model), api_key)
+    return _parse_scan(response, model, prefix='f', ops=OPS)
+
+
+def scan_verses(guide, api_key, model=DEFAULT_MODEL, transport=None):
+    """Run the scripture verse-number agent over the guide's scripture
+    items. Returns the same shape as scan_guide with ids v1, v2, … — or
+    None (no API call) when the guide has no scripture to read."""
+    if not verse_digest(guide)['scripture']:
+        return None
+    transport = transport or http_transport
+    response = transport(build_verse_request(guide, model), api_key)
+    return _parse_scan(response, model, prefix='v', ops=VERSE_OPS)
+
+
+def _parse_scan(response, model, prefix, ops):
     stop = response.get('stop_reason')
     if stop == 'refusal':
         raise RuntimeError('the model declined to review this guide '
@@ -253,10 +396,10 @@ def scan_guide(guide, api_key, model=DEFAULT_MODEL, transport=None):
         if not isinstance(f, dict) or not str(f.get('quote') or '').strip():
             continue
         fix = f.get('fix') if isinstance(f.get('fix'), dict) else None
-        if fix and fix.get('op') not in OPS:
+        if fix and fix.get('op') not in ops:
             fix = None                      # "none" or unknown: flag-only
         findings.append({
-            'id': f'f{n}',
+            'id': f'{prefix}{n}',
             'path': str(f.get('path') or ''),
             'quote': str(f.get('quote'))[:200],
             'issue': str(f.get('issue') or ''),
@@ -315,6 +458,71 @@ def _plain_item(text):
     return {'kind': 'item', 'type': 'plain', 'label': None, 'title': None,
             'titleQuoted': False, 'who': None, 'note': None,
             'body': [{'type': 'para', 'text': text}]}
+
+
+# A verse number can also occur in the passage prose ("crowd of 14 people"),
+# so a fix is located by the finding's quote: the plain text around the
+# number in the quote must match the text around the candidate occurrence.
+# Zero or several surviving candidates refuse, never guess.
+
+def _pick_span(text, spans, n, quote):
+    if len(spans) > 1 and quote:
+        q = _canon(quote)
+        m = re.search(r'(?<!\d)' + re.escape(n) + r'(?!\d)', q)
+        if m:
+            before = q[:m.start()].strip()[-24:]
+            after = q[m.end():].strip()[:24]
+            if after:
+                spans = [sp for sp in spans
+                         if _canon(text[sp[1]:sp[1] + 200]).startswith(after)] \
+                        or spans
+            if len(spans) > 1 and before:
+                spans = [sp for sp in spans
+                         if _canon(text[max(0, sp[0] - 200):sp[0]])
+                         .endswith(before)] or spans
+    if not spans:
+        return None, f'verse number {n} not found where the fix points — skipped'
+    if len(spans) > 1:
+        return None, (f'verse number {n} matches {len(spans)} places — '
+                      'ambiguous, fix by hand')
+    return spans[0], None
+
+
+def _sup_verse_text(text, number, quote):
+    """Wrap a bare verse number in <sup></sup>; returns (new_text, None) or
+    (None, reason)."""
+    if not isinstance(number, int) or number < 1:
+        return None, f'bad verse number {number!r}'
+    n = str(number)
+    spans = []
+    for m in re.finditer(r'(?<!\d)' + re.escape(n) + r'(?!\d)', text):
+        s = m.start()
+        if text.rfind('<', 0, s) > text.rfind('>', 0, s):
+            continue                        # inside a tag
+        if text.rfind('<sup>', 0, s) > text.rfind('</sup>', 0, s):
+            continue                        # already superscripted
+        spans.append((s, m.end()))
+    span, reason = _pick_span(text, spans, n, quote)
+    if reason:
+        return None, reason
+    s, e = span
+    return text[:s] + '<sup>' + n + '</sup>' + text[e:], None
+
+
+def _unsup_verse_text(text, number, quote):
+    """Unwrap a wrongly superscripted number; returns (new_text, None) or
+    (None, reason)."""
+    if not isinstance(number, int) or number < 0:
+        return None, f'bad number {number!r}'
+    n = str(number)
+    spans = [(m.start(), m.end())
+             for m in re.finditer(r'<sup>\s*' + re.escape(n) + r'\s*</sup>',
+                                  text)]
+    span, reason = _pick_span(text, spans, n, quote)
+    if reason:
+        return None, reason
+    s, e = span
+    return text[:s] + n + text[e:], None
 
 
 def _apply_one(g, fix, quote):
@@ -421,6 +629,28 @@ def _apply_one(g, fix, quote):
                          ev.get('paragraphs') or [])).strip()})
         return None
 
+    if op in VERSE_OPS:
+        i = fix.get('orderIndex')
+        if not isinstance(i, int) or not 0 <= i < len(order):
+            return f'order index {i!r} out of range'
+        entry = order[i]
+        if entry.get('kind') != 'item':
+            return 'target is not an item'
+        j = fix.get('blockIndex')
+        body = entry.get('body') or []
+        if not isinstance(j, int) or not 0 <= j < len(body):
+            return f'body block {j!r} out of range'
+        err = check(body[j].get('text'))
+        if err:
+            return err
+        wrap = _sup_verse_text if op == 'sup_verse' else _unsup_verse_text
+        new_text, reason = wrap(body[j].get('text') or '',
+                                fix.get('number'), quote)
+        if reason:
+            return reason
+        body[j]['text'] = new_text
+        return None
+
     if op == 'welcome_to_announcement':
         body = (g.get('welcome') or {}).get('body') or []
         j = fix.get('blockIndex')
@@ -454,7 +684,8 @@ def _relocate(g, op, quote):
     elif op == 'stage_to_item':
         cands = [{'orderIndex': i} for i, o in enumerate(order)
                  if o.get('kind') == 'stage' and q in _canon(o.get('text'))]
-    elif op in ('para_to_announcement', 'para_to_stage', 'discard_para'):
+    elif op in ('para_to_announcement', 'para_to_stage', 'discard_para',
+                'sup_verse', 'unsup_verse'):
         cands = [{'orderIndex': i, 'blockIndex': j}
                  for i, o in enumerate(order) if o.get('kind') == 'item'
                  for j, b in enumerate(o.get('body') or [])

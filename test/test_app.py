@@ -215,6 +215,105 @@ try:
 except RuntimeError as e:
     assert 'declined' in str(e)
 
+# --- scripture verse-number agent: a dedicated pass reads the scripture
+# section against each passage reference and fixes labeling with markup-only
+# moves — wrap a bare verse number in <sup>, unwrap a wrong one. Same
+# injected transport, no key or network.
+_vg = {
+    'dateISO': '2026-08-02', 'season': None, 'welcome': None,
+    'order': [
+        {'kind': 'stage', 'text': 'please stand as you are able'},
+        {'kind': 'item', 'type': 'scripture', 'label': 'Scripture',
+         'title': None, 'titleQuoted': False, 'who': None, 'note': None,
+         'body': [
+            {'type': 'ref', 'text': 'Matthew 14:13-15'},
+            {'type': 'verse', 'text':
+             '<sup>13</sup> Now when Jesus heard this, he withdrew. '
+             '14 When he went ashore, he saw a crowd of 14 people. '
+             '<sup>15</sup> When it was evening, at <sup>3</sup>:00 '
+             'the disciples came to him.'},
+         ]},
+    ],
+    'announcements': [], 'specialEvents': [], 'notes': [], 'warnings': [],
+}
+_vd = aiscan.verse_digest(_vg)
+assert [it['i'] for it in _vd['scripture']] == [1], 'scripture items only'
+assert _vd['scripture'][0]['body'][0]['text'] == 'Matthew 14:13-15'
+assert '<sup>13</sup>' in _vd['scripture'][0]['body'][1]['text'], \
+    'raw markup reaches the agent'
+
+# a guide with no scripture is skipped without an API call
+assert aiscan.scan_verses(_g, 'test-key', transport=lambda p, k: (
+    (_ for _ in ()).throw(AssertionError('must not call the API')))) is None
+
+
+def _vfix(op, **kw):
+    return {'op': op, 'orderIndex': None, 'blockIndex': None,
+            'number': None, **kw}
+
+
+def _verse_transport(payload, api_key):
+    assert api_key == 'test-key'
+    assert payload['model'] == 'claude-opus-5'
+    assert payload['fallbacks'] == 'default'
+    assert 'verse-number checker' in payload['system']
+    assert payload['output_config']['format']['type'] == 'json_schema'
+    assert 'Now when Jesus heard' in payload['messages'][0]['content']
+    assert 'please stand' not in payload['messages'][0]['content'], \
+        'the verse agent reads the scripture section only'
+    return _canned([
+        {'path': 'order[1].body[1]', 'quote': '14 When he went ashore',
+         'issue': 'verse 14 is bare, not superscripted', 'current': 'bare',
+         'proposed': 'superscript', 'confidence': 'high',
+         'fix': _vfix('sup_verse', orderIndex=1, blockIndex=1, number=14)},
+        {'path': 'order[1].body[1]', 'quote': 'at <sup>3</sup>:00',
+         'issue': 'a clock time superscripted as if a verse',
+         'current': 'superscripted', 'proposed': 'plain',
+         'confidence': 'high',
+         'fix': _vfix('unsup_verse', orderIndex=1, blockIndex=1, number=3)},
+        {'path': 'order[1].body[1]', 'quote': '<sup>15</sup> When it was evening',
+         'issue': 'verse 16 dropped by OCR — no markup-only fix',
+         'current': 'missing', 'proposed': 'flag', 'confidence': 'low',
+         'fix': _vfix('none')},
+    ])
+
+
+_vscan = aiscan.scan_verses(_vg, 'test-key', transport=_verse_transport)
+assert [f['id'] for f in _vscan['findings']] == ['v1', 'v2', 'v3'], \
+    'verse ids never collide with the classifier pass'
+assert _vscan['findings'][2]['fix'] is None, 'missing number is flag-only'
+_vg2, _res = aiscan.apply_findings(_vg, _vscan['findings'], ['v1', 'v2'])
+assert _res == {'v1': None, 'v2': None}, _res
+_vt = _vg2['order'][1]['body'][1]['text']
+assert '<sup>14</sup> When he went ashore' in _vt, _vt
+assert 'crowd of 14 people' in _vt, \
+    'the prose 14 untouched — the quote context picks the verse boundary'
+assert 'at 3:00 the disciples' in _vt, _vt
+assert '<sup>13</sup>' in _vt and '<sup>15</sup>' in _vt, \
+    'correct labels untouched'
+assert _vg['order'][1]['body'][1]['text'].count('<sup>') == 3, \
+    'apply works on a copy'
+
+# a quote without disambiguating context refuses between equal matches
+_vg3, _res = aiscan.apply_findings(_vg, [
+    {'id': 'x1', 'quote': '14', 'issue': 'x', 'current': 'bare',
+     'proposed': 'superscript', 'confidence': 'high', 'status': 'open',
+     'fix': _vfix('sup_verse', orderIndex=1, blockIndex=1, number=14)}],
+    ['x1'])
+assert 'ambiguous' in _res['x1'], _res
+assert _vg3['order'][1]['body'][1]['text'] == \
+    _vg['order'][1]['body'][1]['text'], 'nothing changed on ambiguity'
+
+# a stale block index relocates by quote, like every other fix
+_vg4, _res = aiscan.apply_findings(_vg, [
+    {'id': 'x2', 'quote': '14 When he went ashore', 'issue': 'x',
+     'current': 'bare', 'proposed': 'superscript', 'confidence': 'high',
+     'status': 'open',
+     'fix': _vfix('sup_verse', orderIndex=0, blockIndex=5, number=14)}],
+    ['x2'])
+assert _res == {'x2': None}, _res
+assert '<sup>14</sup> When he went ashore' in _vg4['order'][1]['body'][1]['text']
+
 # --- AI scan queue: durable markers, dedupe, worker outcomes, and restart
 # rescan — exercised in-process against scratch dirs with run_aiscan stubbed
 # (no key or network), so a redeploy provably pauses scans instead of losing
@@ -327,6 +426,35 @@ try:
         {'Concert this Sunday at 3 PM', 'Church picnic next Saturday'}, \
         'varying-text findings grouped by error category, quotes carried'
     assert all(i['fixable'] for i in sim['items'])
+
+    # run_aiscan runs both agents — the classifier and the scripture
+    # verse-number checker — and merges their findings (distinct id
+    # prefixes) with summed usage; a guide with no scripture merges nothing.
+    _scanstubs = (aiscan.scan_guide, aiscan.scan_verses)
+    _had_key = 'ANTHROPIC_API_KEY' in app_mod.ENV
+    try:
+        app_mod.ENV['ANTHROPIC_API_KEY'] = 'test-key'
+        aiscan.scan_guide = lambda g, k, model=None: {
+            'model': 'm', 'summary': 'classes look right',
+            'usage': {'input': 10, 'output': 4},
+            'findings': [{'id': 'f1', 'status': 'open'}]}
+        aiscan.scan_verses = lambda g, k, model=None: {
+            'model': 'm', 'summary': 'one bare verse number',
+            'usage': {'input': 7, 'output': 3},
+            'findings': [{'id': 'v1', 'status': 'open'}]}
+        merged = _saved['run_aiscan']('2026-01-04')
+        assert [f['id'] for f in merged['findings']] == ['f1', 'v1'], merged
+        assert merged['usage'] == {'input': 17, 'output': 7}, merged
+        assert merged['summary'] == \
+            'classes look right — Scripture verses: one bare verse number'
+        aiscan.scan_verses = lambda g, k, model=None: None
+        merged = _saved['run_aiscan']('2026-01-04')
+        assert [f['id'] for f in merged['findings']] == ['f1'] \
+            and merged['usage'] == {'input': 10, 'output': 4}, merged
+    finally:
+        aiscan.scan_guide, aiscan.scan_verses = _scanstubs
+        if not _had_key:
+            app_mod.ENV.pop('ANTHROPIC_API_KEY', None)
 finally:
     app_mod.AISCAN_JOBS.clear()
     for k, v in _saved.items():
@@ -1022,6 +1150,12 @@ try:
     g['dateISO'] = '1999-01-01'                            # protected: ignored
     g['warnings'] = ['forged']                             # protected: ignored
     g['bogusKey'] = {'x': 1}                               # unknown: dropped
+    g['announcements'][1]['text'] = (
+        'Accent <span class="fc-purple">kept</span> '
+        '<span class="fc-hack">rogue class</span> '
+        '<span onclick="x()" class="fc-gold">attributes</span>')
+    g['announcements'][1]['color'] = 'purple'              # accent: whitelisted
+    g['announcements'][2]['color'] = 'hotpink'             # off-palette: dropped
     status, body = req('/api/save',
                        data=json.dumps({'date': '2026-08-09', 'guide': g}).encode(),
                        headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/json'})
@@ -1033,6 +1167,13 @@ try:
     assert saved['dateISO'] == '2026-08-02', 'dateISO from file (fixture is a copy), forge ignored'
     assert saved['warnings'] == [], 'warnings come from the file, not the form'
     assert 'bogusKey' not in saved
+    assert '<span class="fc-purple">kept</span>' in saved['announcements'][1]['text'], \
+        'palette accent span survives the sanitizer'
+    assert '<span class="fc-hack">' not in saved['announcements'][1]['text'] \
+        and '<span onclick' not in saved['announcements'][1]['text'], \
+        'off-vocabulary spans neutralized'
+    assert saved['announcements'][1]['color'] == 'purple'
+    assert saved['announcements'][2]['color'] is None, 'off-palette accent dropped'
     page = open(os.path.join(scratch, 'public', '2026-08-09', 'index.html')).read()
     assert 'Edited welcome <b>kept</b>' in page, 'save re-rendered the page'
     assert 'alert(1)' not in page or '<script>alert' not in page

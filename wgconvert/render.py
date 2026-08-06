@@ -18,9 +18,19 @@ def esc(s):
 
 
 # Body strings in guide.json are pre-escaped with a small trusted markup
-# vocabulary (<b>, <i>, <sup>) produced by the parser — insert verbatim.
+# vocabulary (<b>, <i>, <sup>, <span class="fc-…"> accent colors) produced by
+# the parser — insert verbatim.
 def rich(s):
     return str(s)
+
+
+# Heading accents detected from the printed ink (announcements, special
+# events) — only these class names ever reach the HTML.
+ACCENT_NAMES = ('maroon', 'gold', 'green', 'blue', 'purple')
+
+
+def accent_class(name):
+    return f' class="fc-{name}"' if name in ACCENT_NAMES else ''
 
 
 def sup_ordinals(s):
@@ -188,7 +198,8 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None, flye
         toc.append(('#news', 'Announcements'))
         blks = []
         for a in guide['announcements']:
-            head = f'<b>{announcement_emoji(a["heading"])}{esc(a["heading"])}</b>' if a.get('heading') else ''
+            head = (f'<b{accent_class(a.get("color"))}>'
+                    f'{announcement_emoji(a["heading"])}{esc(a["heading"])}</b>') if a.get('heading') else ''
             if a.get('kind') == 'attendance':
                 att = re.sub(r'\s*\|\s*', ' &nbsp;|&nbsp; ', rich(a['text']))
                 blks.append(f'''      <div class="blk">{head}
@@ -217,7 +228,7 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None, flye
   <section id="{eid}">
     <h2 class="sec">{esc(ev.get('sectionTitle') or 'Coming Up')}</h2>
     <div class="callout co-concert">
-      <h3>{event_emoji(ev['heading'])}{esc(ev['heading'])}</h3>
+      <h3{accent_class(ev.get('color'))}>{event_emoji(ev['heading'])}{esc(ev['heading'])}</h3>
 {paras}
       {note}
     </div>

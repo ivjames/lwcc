@@ -35,6 +35,7 @@ class Run:
     b: bool = False
     i: bool = False
     sup: bool = False
+    color: str = '#000000'   # printed ink color from the fontspec
 
 
 @dataclass
@@ -55,6 +56,7 @@ class Page:
     height: int
     lines: list = field(default_factory=list)
     ocr_text: str | None = None
+    ocr_rich: list | None = None  # per ocr_text line: [(word, ink hex|None)]
     engraved: bool = False      # a sheet-music score page — deliberately
                                 # not reproduced: no OCR, no flyer image
 
@@ -196,8 +198,9 @@ def _finish_line(cluster, page):
                     and not runs[-1].text.endswith((' ', '\t', '\n'))
                     and not text[:1].isspace()):
                 text = ' ' + text
-            run = Run(text=text, b=r.b, i=r.i, sup=sup)
-            if runs and runs[-1].b == run.b and runs[-1].i == run.i and runs[-1].sup == run.sup:
+            run = Run(text=text, b=r.b, i=r.i, sup=sup, color=it['font'].color)
+            if runs and runs[-1].b == run.b and runs[-1].i == run.i \
+                    and runs[-1].sup == run.sup and runs[-1].color == run.color:
                 runs[-1].text += run.text
             else:
                 runs.append(run)
@@ -279,22 +282,84 @@ def _has_tesseract():
     return shutil.which('tesseract') is not None
 
 
+def _load_ppm(path):
+    """A pdftoppm P6 image as (width, height, raw RGB bytes) — stdlib-only
+    pixel access for ink-color sampling."""
+    with open(path, 'rb') as fh:
+        data = fh.read()
+    m = re.match(rb'P6\s+(?:#[^\n]*\s+)*(\d+)\s+(\d+)\s+(\d+)\s', data)
+    if not m or int(m.group(3)) != 255:
+        return None
+    return int(m.group(1)), int(m.group(2)), data[m.end():]
+
+
+def _ink_color(img, left, top, width, height):
+    """Median color of the dark (ink) pixels inside a word's box — the median
+    defeats the white paper and the anti-aliased edge blend, recovering the
+    printed ink. None when the box holds too little ink to judge."""
+    w, h, px = img
+    left, top = max(0, left), max(0, top)
+    rs, gs, bs = [], [], []
+    for y in range(top, min(h, top + height)):
+        base = (y * w + left) * 3
+        for x in range(min(width, w - left)):
+            r, g, b = px[base + 3 * x:base + 3 * x + 3]
+            if r + g + b < 480:
+                rs.append(r)
+                gs.append(g)
+                bs.append(b)
+    if len(rs) < 12:
+        return None
+    rs.sort()
+    gs.sort()
+    bs.sort()
+    mid = len(rs) // 2
+    return f'#{rs[mid]:02x}{gs[mid]:02x}{bs[mid]:02x}'
+
+
 def _ocr_page(pdf_path, page_num, work_dir):
     """Some pages (GPS notes card, Prayer Journal) are flattened screenshots
     with no text layer. OCR them so the parser can still read the journal
-    prayers."""
+    prayers. Sections of scanned bulletins rely on colored text (accent-ink
+    headings, colored refrains), which plain OCR text loses — so tesseract's
+    TSV word boxes are sampled against the rendered page for each word's ink
+    color. Returns (text, rich): rich aligns 1:1 with text's lines, each a
+    list of (word, ink hex or None)."""
     prefix = os.path.join(work_dir, f'ocr-{page_num}')
     _run(['pdftoppm', '-f', str(page_num), '-l', str(page_num), '-r', '300',
-          '-png', pdf_path, prefix])
-    png = next((f for f in os.listdir(work_dir)
-                if f.startswith(f'ocr-{page_num}-') and f.endswith('.png')), None)
-    if not png:
-        return None
-    _run(['tesseract', os.path.join(work_dir, png), prefix])
-    with open(prefix + '.txt', encoding='utf-8') as fh:
-        text = fh.read()
-    # Common OCR slip on this material: standalone "I" read as a pipe.
-    return re.sub(r'(^|\s)\|(?=\s)', r'\1I', text)
+          pdf_path, prefix])
+    ppm = next((f for f in os.listdir(work_dir)
+                if f.startswith(f'ocr-{page_num}-') and f.endswith('.ppm')), None)
+    if not ppm:
+        return None, None
+    ppm_path = os.path.join(work_dir, ppm)
+    _run(['tesseract', ppm_path, prefix, 'tsv'])
+    with open(prefix + '.tsv', encoding='utf-8') as fh:
+        rows = fh.read().split('\n')[1:]
+    img = _load_ppm(ppm_path)
+    lines = []          # [(block, par, line, [(word, color)])]
+    for row in rows:
+        c = row.split('\t')
+        if len(c) != 12 or c[0] != '5' or not c[11].strip():
+            continue
+        # Common OCR slip on this material: standalone "I" read as a pipe.
+        word = 'I' if c[11] == '|' else c[11]
+        color = _ink_color(img, int(c[6]), int(c[7]), int(c[8]), int(c[9])) \
+            if img else None
+        key = (int(c[1]), int(c[2]), int(c[3]), int(c[4]))
+        if lines and lines[-1][0] == key:
+            lines[-1][1].append((word, color))
+        else:
+            lines.append((key, [(word, color)]))
+    rich = []
+    prev_par = None
+    for (_page, block, par, _line), words in lines:
+        if prev_par is not None and (block, par) != prev_par:
+            rich.append([])                      # paragraph gap → blank line
+        rich.append(words)
+        prev_par = (block, par)
+    text = '\n'.join(' '.join(w for w, _ in words) for words in rich)
+    return text, rich
 
 
 @dataclass
@@ -331,7 +396,7 @@ def extract(pdf_path, work_dir, ocr=True):
     if image_pages:
         if ocr and _has_tesseract():
             for p in image_pages:
-                p.ocr_text = _ocr_page(pdf_path, p.number, work_dir)
+                p.ocr_text, p.ocr_rich = _ocr_page(pdf_path, p.number, work_dir)
         elif ocr:
             nums = ', '.join(str(p.number) for p in image_pages)
             warnings.append(

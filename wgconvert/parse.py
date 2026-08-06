@@ -135,24 +135,62 @@ def esc(s):
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+# Printed accent colors, mapped to the site's lab-tested palette rather than
+# reproduced verbatim: the bulletins color announcement headings, quotes, and
+# performer names in vivid Office-palette inks that would fail the site's
+# contrast standard on paper-white. Each ink keeps its hue family and lands
+# on the nearest accent the design already uses (maroon, gold, green, blue,
+# purple).
+def accent_for(color):
+    """Site accent class for a printed font color, or None for ordinary ink
+    (black, the near-black engraving tone, greys, and white)."""
+    m = re.fullmatch(r'#([0-9a-f]{6})', (color or '').lower())
+    if not m:
+        return None
+    r, g, b = (int(m.group(1)[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hi, lo = max(r, g, b), min(r, g, b)
+    if hi < 0.25 or hi - lo < 0.12:
+        return None                       # too dark or too grey to be an accent
+    d = hi - lo
+    if hi == r:
+        h = (60 * ((g - b) / d)) % 360
+    elif hi == g:
+        h = 60 * ((b - r) / d) + 120
+    else:
+        h = 60 * ((r - g) / d) + 240
+    if h < 20 or h >= 320:
+        return 'maroon'
+    if h < 70:
+        return 'gold'
+    if h < 170:
+        return 'green'
+    if h < 255:
+        return 'blue'
+    return 'purple'
+
+
 def runs_to_markup(runs, bold=True, italic=True, sup=True):
     """Serialize a line's runs to text with minimal inline markup (<b>, <i>,
-    <sup>) that guide.json stores and the renderer trusts."""
+    <sup>, <span class="fc-…"> for printed accent colors) that guide.json
+    stores and the renderer trusts."""
     out = ''
     for r in runs:
         t = esc(r.text)
         if not t:
             continue
+        accent = accent_for(getattr(r, 'color', None))
         if r.sup and sup:
             # Chapter-prefixed first verse ("9:1") renders as just the verse no.
             v = re.sub(r'^(\d+):(\d+)$', r'\2', t.strip())
             t = t.replace(t.strip(), f'<sup>{v}</sup>', 1)
-        if not r.sup and ((r.b and bold) or (r.i and italic)):
+        if not r.sup and ((r.b and bold) or (r.i and italic) or accent):
             # keep leading/trailing whitespace outside the tags
             m = re.fullmatch(r'(\s*)([\s\S]*?)(\s*)', t)
             lead, core, tail = m.group(1), m.group(2), m.group(3)
             wrapped = core
             if core:
+                if accent:
+                    wrapped = f'<span class="fc-{accent}">{wrapped}</span>'
                 if r.b and bold:
                     wrapped = f'<b>{wrapped}</b>'
                 if r.i and italic:
@@ -161,7 +199,19 @@ def runs_to_markup(runs, bold=True, italic=True, sup=True):
         out += t
     # merge adjacent identical tags split by the extractor
     out = out.replace('</b><b>', '').replace('</i><i>', '').replace('</sup><sup>', '')
+    prev = None
+    while prev != out:
+        prev = out
+        out = re.sub(r'<span class="fc-([a-z]+)">([^<]*)</span><span class="fc-\1">',
+                     r'<span class="fc-\1">\2', out)
     return re.sub(r'\s+', ' ', out).strip()
+
+
+def head_accent(markup):
+    """The single accent a heading is printed in, or None when it has none —
+    or several (the rainbow-lettered headings stay on the site's default)."""
+    accents = set(re.findall(r'class="fc-([a-z]+)"', markup))
+    return accents.pop() if len(accents) == 1 else None
 
 
 def line_is_stage(l):
@@ -294,8 +344,12 @@ def group_paragraphs(lines, extra_boundary=None):
     return paras
 
 
-def all_bold_line(l):
-    return all(r.b or not r.text.strip() for r in l.runs)
+def emphasized_line(l):
+    """A line set apart from the surrounding body: every visible run bold —
+    or printed in an accent ink, for editions (and scans) whose refrains and
+    references rely on colored text rather than weight."""
+    return all(r.b or accent_for(getattr(r, 'color', None)) is not None
+               or not r.text.strip() for r in l.runs)
 
 
 def prayer_text(lines):
@@ -317,7 +371,7 @@ def scripture_body(lines):
     blocks = []
     verse = None
     for l in lines:
-        if all(r.b or not r.text.strip() for r in l.runs) and SCRIPTURE_REF_RE.match(l.text):
+        if emphasized_line(l) and SCRIPTURE_REF_RE.match(l.text):
             blocks.append({'type': 'ref', 'text': l.text})
             verse = None
         else:
@@ -333,10 +387,10 @@ def scripture_body(lines):
 
 def litany_body(lines):
     blocks = []
-    # Congregation refrains are fully bold lines; split on the style change
-    # even when the vertical gap is tight.
-    for para in group_paragraphs(lines, lambda a, b: all_bold_line(a) != all_bold_line(b)):
-        if all(all_bold_line(l) for l in para):
+    # Congregation refrains are fully bold (or fully accent-ink) lines; split
+    # on the style change even when the vertical gap is tight.
+    for para in group_paragraphs(lines, lambda a, b: emphasized_line(a) != emphasized_line(b)):
+        if all(emphasized_line(l) for l in para):
             blocks.append({'type': 'refrain', 'text': tidy_prose(
                 ' '.join(runs_to_markup(l.runs, bold=False) for l in para))})
         else:
@@ -493,21 +547,28 @@ def parse_announcements(lines):
         text = tidy_prose(' '.join(runs_to_markup(l.runs) for l in para))
         # Sub-item heading: an ALL-CAPS bold prefix ending at a colon, e.g.
         # "<b>FLOWERS</b> &amp; <b>FELLOWSHIP:</b> Today's flowers…" (the
-        # rainbow-colored letters split into several bold runs).
-        m = re.match(r'^(<b>[^:]{2,110}?):(</b>)?\s*([\s\S]*)$', text)
+        # rainbow-colored letters split into several bold+span runs, so the
+        # raw-length cap is generous; the plain-text cap below is the real
+        # limit). Color spans contain no colon, so [^:] crosses them safely.
+        # Scanned bulletins have no boldness — their headings rely on colored
+        # text alone, so an accent span opens a heading just like <b> does.
+        m = re.match(r'^((?:<b>|<span class="fc-[a-z]+">)[^:]{2,320}?):'
+                     r'((?:</b>|</span>)*)\s*([\s\S]*)$', text)
         plain_head = None
         mostly_caps = False
         if m:
             plain_head = re.sub(r'<[^>]+>', '', m.group(1)).replace('&amp;', '&').strip()
             alpha = [c for c in plain_head if c.isalpha()]
             mostly_caps = bool(alpha) and sum(c.isupper() for c in alpha) / len(alpha) >= 0.6
-        if m and mostly_caps and re.fullmatch(r"[A-Za-z0-9\s&'’…!?.,-]+", plain_head):
+        if m and mostly_caps and len(plain_head) <= 110 \
+                and re.fullmatch(r"[A-Za-z0-9\s&'’…!?.,-]+", plain_head):
             heading = title_case(plain_head)
             kind = 'attendance' if re.search(r'attendance', heading, re.I) else 'note'
-            body = tidy_prose(re.sub(r'^</b>\s*', '', m.group(3)))
+            body = tidy_prose(re.sub(r'^(?:</b>|</span>|\s)+', '', m.group(3)))
             if kind == 'attendance':
-                body = re.sub(r'</?[bi]>', '', body)  # keep only <sup>
-            items.append({'heading': heading, 'text': body, 'kind': kind})
+                body = re.sub(r'</?[bi]>|</?span[^>]*>', '', body)  # keep only <sup>
+            items.append({'heading': heading, 'text': body, 'kind': kind,
+                          'color': head_accent(m.group(1))})
         elif any(BOX_CREDITS_RE.search(l.text) for l in para):
             continue          # stray hymn-credits lines — not announcements
         elif all(DISPLAY_CAPS_RE.fullmatch(l.text) for l in para):
@@ -552,6 +613,7 @@ def parse_special_event(lines):
         'paragraphs': paras,
         'note': note,
         'sectionTitle': 'This Afternoon' if re.search(r'TODAY', head_text, re.I) else 'Coming Up',
+        'color': accent_for(getattr(lines[0].runs[0], 'color', None)),
     }
 
 
@@ -621,20 +683,36 @@ def ocr_lines(p):
     paragraphs), and bracket-only lines marked italic so stage directions
     survive. Position and boldness are unknowable — label matching rides
     the vocabulary fallback, which these bulletins' 2023-style labels use
-    anyway."""
+    anyway. Ink colors sampled from the page image (ocr_rich) become
+    colored runs, so sections that rely on colored text — accent-ink
+    headings, colored refrains — keep their structure and their accents."""
+    rich = getattr(p, 'ocr_rich', None)
+    if not rich:
+        rich = [[(w, None) for w in raw.split()]
+                for raw in (p.ocr_text or '').split('\n')]
+    # OCR renders the printed en dash as an ASCII hyphen; the label
+    # machinery splits attribution on [–—].
+    dash = lambda s: re.sub(r'(?<=\S) - (?=\S)', ' – ', s)  # noqa: E731
     lines = []
     top = 0
-    for raw in (p.ocr_text or '').split('\n'):
-        t = ' '.join(raw.split())
-        # OCR renders the printed en dash as an ASCII hyphen; the label
-        # machinery splits attribution on [–—].
-        t = re.sub(r'(?<=\S) - (?=\S)', ' – ', t)
+    for words in rich:
+        t = dash(' '.join(w for w, _ in words))
         if not t:
             top += 50
             continue
         italic = bool(re.fullmatch(r'\[.*\]', t))
+        runs = []
+        for w, c in words:
+            accent = accent_for(c)
+            if runs and accent_for(runs[-1].color) == accent:
+                runs[-1].text += ' ' + w
+            else:
+                runs.append(Run(text=(' ' if runs else '') + w, i=italic,
+                                color=c if accent else '#000000'))
+        for r in runs:
+            r.text = dash(r.text)
         lines.append(Line(page=p.number, top=top, bottom=top + 12, left=50,
-                          height=12, runs=[Run(text=t, i=italic)], text=t))
+                          height=12, runs=runs, text=t))
         top += 20
     return lines
 
@@ -956,7 +1034,7 @@ def parse(extracted, opts=None):
                     poster_seen = True   # poster display text — not content
                 elif CALENDAR_BLOCK_RE.match(first.text):
                     guide['announcements'].append({
-                        'heading': 'This Week', 'kind': 'note',
+                        'heading': 'This Week', 'kind': 'note', 'color': None,
                         'text': tidy_prose(' '.join(runs_to_markup(l.runs) for l in box))})
                     classified = True
                 else:
@@ -977,23 +1055,30 @@ def parse(extracted, opts=None):
                     text = tidy_prose(' '.join(runs_to_markup(l.runs) for l in box))
                     # A shouted heading with a colon (or exclamation) leading
                     # body text is an announcement in its own box — file it
-                    # under its heading, no review needed.
-                    hm = re.match(r'^(?:<b>)?([^:<!]{2,80}?)[:!](?:</b>)?\s*([\s\S]+)$', text)
+                    # under its heading, no review needed. Bold and accent
+                    # tags may sit anywhere in the head (colored headings,
+                    # scans included); the plain-text caps/length guards
+                    # below are what keep prose out.
+                    hm = re.match(
+                        r'^((?:[^:!<]|</?b>|<span class="fc-[a-z]+">|</span>){2,240}?)[:!]'
+                        r'(?:</b>|</span>)*\s*([\s\S]+)$', text)
                     head = (re.sub(r'<[^>]+>', '', hm.group(1))
                             .replace('&amp;', '&').strip()) if hm else ''
                     alpha = [c for c in head if c.isalpha()]
-                    if head and alpha \
+                    if head and len(head) <= 80 and alpha \
                             and sum(c.isupper() for c in alpha) / len(alpha) >= 0.6 \
                             and hm.group(2).strip():
                         guide['announcements'].append({
                             'heading': title_case(head), 'kind': 'note',
-                            'text': hm.group(2).strip()})
+                            'text': hm.group(2).strip(),
+                            'color': head_accent(hm.group(1))})
                         continue
                     notes.append(
                         f'page {first.page}: unclassified block starting '
                         f'"{first.text[:50]}" (added as announcement)')
                     guide['announcements'].append({
-                        'heading': None, 'kind': 'note', 'text': text})
+                        'heading': None, 'kind': 'note', 'text': text,
+                        'color': None})
     elif text_pages:
         # Only meaningful for text guides — a scan's community content is in
         # its page images.
