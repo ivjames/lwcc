@@ -993,7 +993,8 @@ function render() {
       '<blockquote>' + esc(f.quote) + '</blockquote>' +
       '<div class="meta">' + esc(f.path) +
       (f.fix ? ' &middot; fix: ' + esc(f.fix.op)
-        : ' &middot; no mechanical fix — <a href="/admin/edit/__DATE__">edit by hand</a>') +
+        : ' &middot; no mechanical fix — <a href="/admin/edit/__DATE__#find=' +
+          encodeURIComponent(f.quote || '') + '">edit by hand</a>') +
       (f.statusNote ? ' &middot; ' + esc(f.statusNote) : '') +
       '</div></div>').join('');
     const reopenable = SCAN.findings.filter(f =>
@@ -1225,23 +1226,24 @@ function groupHtml(g, gi) {
     ' <span class="meta">' + g.items.length + ' finding' +
     (g.items.length > 1 ? 's' : '') + ' on ' + dates + ' Sunday' +
     (dates > 1 ? 's' : '') + '</span>';
-  const chip = i =>
+  const chip = (i, quote) =>
     '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '"' +
     (i.note ? ' title="' + esc(i.note) + '"' : '') + '>' +
     esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
     esc(i.status) + '</span></a>' +
     (i.status === 'open' && !i.fixable
       ? '<a class="editlink" href="/admin/edit/' + esc(i.date) +
+        (quote ? '#find=' + encodeURIComponent(quote) : '') +
         '" title="No mechanical fix — edit this Sunday by hand">edit</a>' : '');
   let body;
   if (g.kind === 'exact') {
     body = '<div>' + esc(g.issue) + '</div>' +
       '<blockquote>' + esc(g.quote) + '</blockquote>' +
-      '<div>' + g.items.map(chip).join('') + '</div>';
+      '<div>' + g.items.map(i => chip(i, g.quote)).join('') + '</div>';
   } else {
     body = g.items.map(i =>
       '<div class="itemrow" title="' + esc(i.issue) + '">' +
-      chip(i) + ' ' +
+      chip(i, i.quote) + ' ' +
       '<span class="meta">&#8220;' + esc(cut(i.quote, 100)) + '&#8221;</span>' +
       '<span class="tag ' + esc(i.confidence) + '">' + esc(i.confidence) +
       '</span>' +
@@ -2295,6 +2297,7 @@ EDIT_PAGE = (r"""<!DOCTYPE html>
   select{font:inherit;padding:4px 8px;border-radius:6px;border:1px solid #d8d6c7}
   .savebar{position:sticky;bottom:0;background:#fbfaf5;padding:12px 0;border-top:2px solid #054253}
   small.hint{color:#54574a}
+  .found{outline:3px solid #8a6410;background:#fdf6df}
 </style></head>
 <body>
 <h1>Edit — __DATE__</h1>
@@ -2462,6 +2465,46 @@ function buildForm() {
   f.append(jfs);
 }
 buildForm();
+
+// #find=<quoted text> (from the AI scan pages' edit-by-hand links): locate
+// the field holding that text, scroll to it, and highlight it. Matching
+// mirrors the scanner's canonical form — tags stripped, entities and
+// typographic quotes/dashes normalized, whitespace collapsed, case ignored —
+// with shorter prefixes as fallback for quotes that span two blocks.
+const canon = s => String(s == null ? '' : s)
+  .replace(/<[^>]+>/g, '')
+  .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
+  .replace(/[–—−]/g, '-').replace(/ /g, ' ')
+  .replace(/…/g, '...')
+  .replace(/\s+/g, ' ').trim().toLowerCase();
+
+(function jumpToFind() {
+  const m = location.hash.match(/^#find=(.*)$/);
+  if (!m) return;
+  let target = '';
+  try { target = canon(decodeURIComponent(m[1])); } catch (e) { return; }
+  if (!target) return;
+  const fields = [...document.querySelectorAll(
+    '#form input[type=text], #form textarea')];
+  const words = target.split(' ');
+  const probes = [target,
+                  words.slice(0, 8).join(' '),
+                  words.slice(0, 4).join(' ')];
+  let hit = null;
+  for (const p of probes) {
+    hit = fields.find(f => canon(f.value).includes(p));
+    if (hit) break;
+  }
+  if (!hit) {
+    $('msg').textContent =
+      'Quoted text not found in any field — it may have been edited since the scan.';
+    return;
+  }
+  hit.classList.add('found');
+  hit.scrollIntoView({block: 'center'});
+  hit.focus({preventScroll: true});
+})();
 
 $('save').addEventListener('click', async () => {
   $('save').disabled = true;
