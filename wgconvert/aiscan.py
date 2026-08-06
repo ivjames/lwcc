@@ -60,7 +60,7 @@ Hard rules:
 - The printed page is the source of truth. Never rewrite, correct, or
   paraphrase text. Every fix is a move/reclassification of existing text.
 - "quote" must be a verbatim excerpt (at most 120 characters) copied exactly
-  from the misclassified text, including any <b>/<i>/<sup> markup, so the fix
+  from the misclassified text, including any <b>/<i>/<sup>/<span> markup, so the fix
   can be verified mechanically before it is applied.
 - Address text by the indices given in the JSON: "i" for order,
   announcements, and specialEvents entries, "j" for body blocks inside an

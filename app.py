@@ -452,7 +452,10 @@ def unpublish_date(d):
               os.path.join(PUBLIC, f'.unpublished-{d}-{ts}'))
 
 
-ALLOWED_TAG_RE = re.compile(r'</?(b|i)>|<sup>|</sup>', re.I)
+ACCENT_NAMES = ('maroon', 'gold', 'green', 'blue', 'purple')
+ALLOWED_TAG_RE = re.compile(
+    r'</?(b|i)>|<sup>|</sup>'
+    r'|<span class="fc-(?:' + '|'.join(ACCENT_NAMES) + r')">|</span>', re.I)
 BLOCK_TYPES = ('para', 'prayer', 'refrain', 'ref', 'verse')
 ITEM_TYPES = ('music', 'prayer', 'litany', 'scripture', 'message', 'plain')
 
@@ -463,8 +466,9 @@ def clean_plain(s):
 
 
 def clean_rich(s):
-    """Rich field: keep only the trusted <b>/<i>/<sup> vocabulary, escape
-    everything else (existing entities pass through untouched)."""
+    """Rich field: keep only the trusted <b>/<i>/<sup>/accent-<span>
+    vocabulary, escape everything else (existing entities pass through
+    untouched)."""
     s = str(s or '')
     out, pos = [], 0
 
@@ -554,7 +558,8 @@ def sanitize_guide(sub, existing):
             g['announcements'].append({
                 'heading': clean_plain(a.get('heading')) or None,
                 'text': clean_rich(a.get('text')),
-                'kind': 'attendance' if a.get('kind') == 'attendance' else 'note'})
+                'kind': 'attendance' if a.get('kind') == 'attendance' else 'note',
+                'color': a.get('color') if a.get('color') in ACCENT_NAMES else None})
     g['specialEvents'] = []
     for ev in sub.get('specialEvents') or []:
         if not isinstance(ev, dict) or not clean_plain(ev.get('heading')):
@@ -563,7 +568,8 @@ def sanitize_guide(sub, existing):
             'heading': clean_plain(ev.get('heading')),
             'paragraphs': [clean_rich(p) for p in ev.get('paragraphs') or [] if clean_rich(p)],
             'note': clean_plain(ev.get('note')) or None,
-            'sectionTitle': clean_plain(ev.get('sectionTitle')) or 'Coming Up'})
+            'sectionTitle': clean_plain(ev.get('sectionTitle')) or 'Coming Up',
+            'color': ev.get('color') if ev.get('color') in ACCENT_NAMES else None})
 
     j = sub.get('journal') if isinstance(sub.get('journal'), dict) else None
     g['journal'] = None
@@ -2334,6 +2340,12 @@ const txt = (obj, key, label, kind = 'input') => {
     : el('textarea', {oninput: e => obj[key] = e.target.value}, obj[key] || '');
   return el('label', {class: 'f'}, label, input);
 };
+// Heading accent (detected from the printed ink; '' = site default)
+const accentSel = obj => el('label', {class: 'f'}, 'Heading accent ',
+  el('select', {onchange: e => obj.color = e.target.value || null},
+    ...['', 'maroon', 'gold', 'green', 'blue', 'purple'].map(c =>
+      el('option', {value: c, ...((obj.color || '') === c ? {selected: ''} : {})},
+         c || '(default)'))));
 const rowBtns = (arr, i, redraw) => el('span', {class: 'rowbtns'},
   el('button', {class: 'mini', onclick: () => { if (i > 0) { [arr[i-1], arr[i]] = [arr[i], arr[i-1]]; redraw(); } }}, '↑'),
   el('button', {class: 'mini', onclick: () => { if (i < arr.length - 1) { [arr[i+1], arr[i]] = [arr[i], arr[i+1]]; redraw(); } }}, '↓'),
@@ -2441,20 +2453,23 @@ function buildForm() {
         el('select', {onchange: e => a.kind = e.target.value},
           ...['note', 'attendance'].map(k =>
             el('option', {value: k, ...(a.kind === k ? {selected: ''} : {})}, k)))),
+      accentSel(a),
       txt(a, 'text', 'Text', 'ta')),
-    () => ({heading: '', text: '', kind: 'note'})));
+    () => ({heading: '', text: '', kind: 'note', color: null})));
 
   G.specialEvents = G.specialEvents || [];
   f.append(listSection('Special Events', G.specialEvents,
     (row, ev) => {
-      row.append(txt(ev, 'heading', 'Heading'), txt(ev, 'sectionTitle', 'Section title'));
+      row.append(txt(ev, 'heading', 'Heading'), txt(ev, 'sectionTitle', 'Section title'),
+                 accentSel(ev));
       const parea = el('textarea', {oninput: e =>
         ev.paragraphs = e.target.value.split(/\n\s*\n/).filter(p => p.trim())},
         (ev.paragraphs || []).join('\n\n'));
       row.append(el('label', {class: 'f'}, 'Paragraphs (blank line between)', parea),
                  txt(ev, 'note', 'Italic footnote'));
     },
-    () => ({heading: '', paragraphs: [], note: '', sectionTitle: 'Coming Up'})));
+    () => ({heading: '', paragraphs: [], note: '', sectionTitle: 'Coming Up',
+            color: null})));
 
   G.journal = G.journal || {subtitle: '', morning: '', midday: '', evening: ''};
   const jfs = el('fieldset', {}, el('legend', {}, 'Prayer Journal'));

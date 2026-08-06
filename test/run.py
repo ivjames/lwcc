@@ -192,6 +192,32 @@ assert not poster_residue(['If you wish to attend, but are unable to pay '
                            'for a ticket, contact the church office.'])
 assert not poster_residue(['presents'] * 4)
 
+# Printed accent inks: detected per-run, mapped onto the site palette, and
+# carried as <span class="fc-…"> markup; black, the engraving near-black,
+# greys, and white stay ordinary ink.
+from wgconvert.parse import accent_for, runs_to_markup, head_accent  # noqa: E402
+assert accent_for('#ee0000') == 'maroon' and accent_for('#c00000') == 'maroon'
+assert accent_for('#99195e') == 'maroon', 'magenta joins the maroon family'
+assert accent_for('#e36c0a') == 'gold' and accent_for('#f8ba00') == 'gold'
+assert accent_for('#632423') == 'maroon', 'dark red-brown reads as maroon'
+assert accent_for('#00b050') == 'green' and accent_for('#46b554') == 'green'
+assert accent_for('#0070c0') == 'blue' and accent_for('#017b76') == 'blue'
+assert accent_for('#3f4095') == 'blue' and accent_for('#7030a0') == 'purple'
+assert accent_for('#000000') is None and accent_for('#231f20') is None
+assert accent_for('#ffffff') is None and accent_for('#808080') is None
+assert accent_for(None) is None and accent_for('not-a-color') is None
+
+_runs = [Run(text='DUO '), Run(text='CONCERT', color='#7030a0'),
+         Run(text=' TODAY', b=True, color='#7030a0'),
+         Run(text='!', b=True, color='#7030a0')]
+assert runs_to_markup(_runs) == ('DUO <span class="fc-purple">CONCERT</span> '
+                                 '<b><span class="fc-purple">TODAY!</span></b>'), \
+    runs_to_markup(_runs)
+assert head_accent('<b><span class="fc-gold">AUGUST COMMUNION</span></b>') == 'gold'
+assert head_accent('<b>PLAIN HEAD</b>') is None
+assert head_accent('<span class="fc-maroon">F</span><span class="fc-gold">L</span>') \
+    is None, 'rainbow lettering keeps the site default'
+
 work_dir = tempfile.mkdtemp(prefix='wg-test-')
 try:
     extracted = extract(SAMPLE, work_dir)
@@ -240,10 +266,15 @@ try:
         'Recent LWCC Worship Attendance',
     ]
     assert g['announcements'][3]['kind'] == 'attendance'
+    assert [a['color'] for a in g['announcements']] == [None, 'maroon', 'gold', None], \
+        'heading accents from the printed inks (rainbow FLOWERS stays default)'
 
     assert len(g['specialEvents']) == 1
     assert g['specialEvents'][0]['heading'] == 'Duo Concert — TODAY!'
     assert g['specialEvents'][0]['note'] == 'For those who are able, the suggested donation is $10.'
+    assert g['specialEvents'][0]['color'] == 'purple', 'event heading printed in purple'
+    assert '<span class="fc-purple">Er-Gene Kahng</span>' in g['specialEvents'][0]['paragraphs'][0], \
+        'performer names keep their printed accent'
 
     if g['journal']:
         assert re.search(r'On this new day, O God', g['journal']['morning'])
@@ -263,6 +294,9 @@ try:
     assert 'data:image/jpeg;base64,' in html, 'cover inlined'
     assert not re.search(r'src="(?!data:)', html), 'no external resources'
     assert ('id="journal"' in html) == bool(g['journal'])
+    assert '<h3 class="fc-purple">' in html, 'event heading carries its accent class'
+    assert '<b class="fc-maroon">' in html, 'announcement heading carries its accent class'
+    assert '.fc-purple' in html, 'accent classes styled by the template CSS'
 
     # ---- second sample: 2025 format (Communion liturgy, text-layer GPS and
     # Prayer Journal pages, hymn-credits block, chapel-style prayer requests)
@@ -287,6 +321,13 @@ try:
         'LW Korean Community Church Picnic Today!', 'A Course in Miracles',
         'Blessing of the Animals', 'Need a Bible or Devotional?',
         'Recent LWCC Worship Attendance']
+    assert [a['color'] for a in g2['announcements']] == [
+        None, 'maroon', 'maroon', None, 'purple', 'gold', 'blue', None], \
+        'heading accents across the 2025 community page'
+    _acim = next(a for a in g2['announcements'] if a['heading'] == 'A Course in Miracles')
+    assert '<span class="fc-purple">' in _acim['text'], 'quoted text keeps its printed accent'
+    _att = next(a for a in g2['announcements'] if a['kind'] == 'attendance')
+    assert 'fc-' not in _att['text'], 'attendance line keeps only <sup>'
     assert g2['journal'] and 'God of all creation' in g2['journal']['morning'], \
         'text-layer Prayer Journal parsed without OCR'
     assert not g2['specialEvents'], 'journal midday note not misread as an event'

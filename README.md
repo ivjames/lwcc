@@ -188,9 +188,15 @@ $EDITOR out/1999-03-07/guide.json    # fix whatever parsed oddly
 wg-convert render out/1999-03-07/guide.json
 ```
 
-Body text in `guide.json` may carry only `<b>`, `<i>`, `<sup>` markup (already
-escaped by the parser); prayers use `\n` for their line breaks. Everything
-else is plain text.
+Body text in `guide.json` may carry only `<b>`, `<i>`, `<sup>`, and
+`<span class="fc-…">` markup (already escaped by the parser); prayers use
+`\n` for their line breaks. Everything else is plain text. The `fc-` spans
+carry printed accent inks: the parser maps each colored fontspec onto the
+site palette (`maroon`, `gold`, `green`, `blue`, `purple`) by hue, so vivid
+print colors keep their family without breaking the site's contrast standard.
+Announcement and special-event headings printed in a single accent also get a
+`color` field with the same palette names (rainbow-lettered headings keep the
+site default).
 
 ## Requirements
 

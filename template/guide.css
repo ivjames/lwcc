@@ -90,6 +90,13 @@
   .co-concert h3{color:var(--green)}
   .co-concert .sug{font-style:italic;text-align:center;margin-top:10px}
 
+  /* printed accent inks, mapped onto the site palette by the converter */
+  .fc-maroon,.co-note .blk b.fc-maroon,.co-concert h3.fc-maroon{color:var(--maroon)}
+  .fc-gold,.co-note .blk b.fc-gold,.co-concert h3.fc-gold{color:var(--gold)}
+  .fc-green,.co-note .blk b.fc-green,.co-concert h3.fc-green{color:var(--green)}
+  .fc-blue,.co-note .blk b.fc-blue,.co-concert h3.fc-blue{color:var(--blue)}
+  .fc-purple,.co-note .blk b.fc-purple,.co-concert h3.fc-purple{color:var(--purple)}
+
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   @media(max-width:560px){.grid{grid-template-columns:1fr}}
   .music{font-size:1rem}

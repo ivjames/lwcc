@@ -125,11 +125,22 @@
         },
         {
           "type": "refrain",
-          "text": "Reshaping perceptions. Breath of life; Inspiration of healing and forgiveness: Wild Wind of beginnings beyond our control and unruled by our violence yet harnessed for justice;"
-        },
+          "text": "Reshaping perceptions. Breath of life;"
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "type": "plain",
+      "label": "Inspiration of Healing and Forgiveness",
+      "title": null,
+      "titleQuoted": false,
+      "who": null,
+      "note": null,
+      "body": [
         {
           "type": "para",
-          "text": "We trust God with us urgently now."
+          "text": "<b>Wild Wind of beginnings beyond our control</b> <b>and unruled by our violence yet harnessed for justice;</b> We trust God with us urgently now."
         }
       ]
     },
@@ -288,8 +299,8 @@
     },
     {
       "kind": "item",
-      "type": "plain",
-      "label": null,
+      "type": "litany",
+      "label": "The Great Thanksgiving",
       "title": null,
       "titleQuoted": false,
       "who": null,
@@ -481,52 +492,61 @@
     {
       "heading": "Flowers and Fellowship",
       "text": "Today’s flowers are provided by Jay &amp; Connie Young. Fellowship refreshments are provided by Jenny Chang. See the sign-up charts to provide refreshments or cover the cost of altar flowers for future services. Altar flowers are $35. Phyllis, Jeanette, &amp; Virginia coordinate arrangements.",
-      "kind": "note"
+      "kind": "note",
+      "color": null
     },
     {
       "heading": "Visiting Pastor Lisa",
       "text": "A hearty welcome to Pastor Lisa Williams who leads us in Worship today! Much love &amp; gratitude for her presence, service, and leadership.",
-      "kind": "note"
+      "kind": "note",
+      "color": "maroon"
     },
     {
       "heading": "Coffee with Pastor",
       "text": "“Coffee with Pastor,” is on hiatus this week while Pastor Johan is away for Reading Week, and will resume on Thursday, September 18<sup>th</sup>.",
-      "kind": "note"
+      "kind": "note",
+      "color": "maroon"
     },
     {
       "heading": "LW Korean Community Church Picnic Today!",
       "text": "Our wonderful friends at LW Korean Community Church invite us all to their annual barbecue picnic at Clubhouse 1 at 11:30 AM, immediately following our Worship service today!",
-      "kind": "note"
+      "kind": "note",
+      "color": null
     },
     {
       "heading": "A Course in Miracles",
-      "text": "Friend of LWCC, <b>Abby Stevens</b>, will facilitate <b>“A Course in Miracles”</b> — a FREE discussion of the book of the same name every Tuesday, at 1:00 PM, starting <i><b>Tuesday, September 16</b></i><sup>th</sup> in the Music Room. Focused on the teachings of Dr. Kenneth Wapnick, the course is summed up: <i><b>“Nothing real can be threatened. Nothing unreal exists. Herein lies the</b></i> <i><b>peace of God.\"</b></i> The book may be purchased online but is also accessible for FREE at www.miraclecenter.org. More information at www.acim.org.",
-      "kind": "note"
+      "text": "Friend of LWCC, <b>Abby Stevens</b>, will facilitate <b>“A Course in Miracles”</b> — a FREE discussion of the book of the same name every Tuesday, at 1:00 PM, starting <i><b>Tuesday, September 16</b></i><sup>th</sup> in the Music Room. Focused on the teachings of Dr. Kenneth Wapnick, the course is summed up: <i><b><span class=\"fc-purple\">“Nothing real can be threatened. Nothing unreal exists. Herein lies the</span></b></i> <i><b><span class=\"fc-purple\">peace of God.\"</span></b></i> The book may be purchased online but is also accessible for FREE at <span class=\"fc-blue\">www.miraclecenter.org</span>. More information at <span class=\"fc-blue\">www.acim.org</span>.",
+      "kind": "note",
+      "color": "purple"
     },
     {
       "heading": "Blessing of the Animals",
       "text": "Sunday Worship on October 5, 2025, will be <i><b>outside</b></i> on our front patio. Observing the Feast of St. Francis, and his love for animals, the service will include “The Blessing of the Animals.” <i><b>Leisure World</b></i> <i><b>residents may bring well-behaved pets for a blessing.</b></i> Dogs must be leashed, according to LW rules. Use good judgment regarding kennels and cages, and be responsible for your pet’s behavior.",
-      "kind": "note"
+      "kind": "note",
+      "color": "gold"
     },
     {
       "heading": "Need a Bible or Devotional?",
-      "text": "FREE Bibles on the small bookshelf in the narthex, and FREE Devotional Books just outside the Library, across from the Women’s restroom. <i>Help yourself!</i> Two “new” devotional titles: <i><b>Too Blessed to Be Stressed</b></i> and <i><b>The Guiding Light</b></i>",
-      "kind": "note"
+      "text": "FREE Bibles on the small bookshelf in the narthex, and FREE Devotional Books just outside the Library, across from the Women’s restroom. <i>Help yourself!</i> Two “new” devotional titles: <i><b><span class=\"fc-green\">Too Blessed to Be Stressed</span></b></i> and <i><b><span class=\"fc-blue\">The Guiding Light</span></b></i>",
+      "kind": "note",
+      "color": "blue"
     },
     {
       "heading": "Recent LWCC Worship Attendance",
       "text": "August 10<sup>th</sup>: 37 | August 17<sup>th</sup>: 40 | August 24<sup>th</sup>: 34 | August 31<sup>st</sup>: 39",
-      "kind": "attendance"
+      "kind": "attendance",
+      "color": null
     }
   ],
   "specialEvents": [],
+  "flyers": [],
   "journal": {
     "subtitle": "Use this prayer in your time with God each day.",
     "morning": "God of all creation, you made the hands that stirred unthinking at the start of this day. As the hours slip by, help me to be more mindful of the good they might do: in the greetings they might oﬀer, in the burdens they might bear, in the worry they might soothe. Prompt me to keep them open — not clinging to what you have entrusted but freely oﬀering, freely receiving, in response to the needs I encounter this day. May each small motion be a sign of trust, a reminder that my life is in your hands. Amen.",
     "midday": "Consider The Upper Room Daily Devotional as a resource for Midday Prayer.",
-    "evening": "God of every beginning, every ending, as I remember the lives I met this day, in moments ordinary and extraordinary — as I recall reports of hardship far away, and around the corner — help me to recognize family forgotten by my heart, siblings entrusted to me. As I rest this night in your care, mend my courage and fire my imagination, that I might be truly useful to you. Plant me where you need me, in the name of the Christ. Amen."
+    "evening": "God of every beginning, every ending, as I remember the lives I met this day, in moments ordinary and extraordinary — as I recall reports of hardship far away, and around the corner — help me to recognize family forgotten by my heart, siblings entrusted to me. As I rest this night in your care, mend my courage and fire my imagination, that I might be truly useful to you. Plant me where you need me, in the name of the Christ. Amen.",
+    "sections": []
   },
-  "warnings": [
-    "page 7: content without a label kept as an untitled item (starts: \"Throughout all ages, as mountains dance and trees \")"
-  ]
+  "warnings": [],
+  "notes": []
 }
