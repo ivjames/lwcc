@@ -1429,6 +1429,12 @@ PAGE_STYLE = """
   input,button{font:inherit;padding:10px 14px;border-radius:8px;border:1px solid #d8d6c7}
   button{background:#054253;color:#fff;border:none;cursor:pointer}
   button:disabled{opacity:.5;cursor:default}
+  button.busy{opacity:.85}
+  button.busy::after{content:'';display:inline-block;width:.75em;height:.75em;
+    margin-left:7px;vertical-align:-.08em;border:2px solid #fff;
+    border-top-color:transparent;border-radius:50%;
+    animation:busyspin .8s linear infinite}
+  @keyframes busyspin{to{transform:rotate(360deg)}}
   .warn{color:#8a6410}.err{color:#a20816}.ok{color:#1f7a44}
   code{background:#f1efe6;padding:2px 6px;border-radius:4px;font-size:.85em}
 """
@@ -1807,8 +1813,7 @@ for (const _id of ['reconvertall', 'reconverteverything', 'refresheverything']) 
       : 'Re-convert ' + dates.length + ' Sundays from their stored PDFs? ' +
         'Hand-edits to them will be overwritten.';
     if (!confirm(ask)) return;
-    _btn.disabled = true;
-    _btn.textContent = 'Queueing ' + dates.length + ' re-conversions…';
+    const undo = setBusy(_btn, 'Queueing ' + dates.length + ' re-conversions…');
     try {
       const res = await fetch('/api/reconvert-batch', {
         method: 'POST',
@@ -1822,7 +1827,7 @@ for (const _id of ['reconvertall', 'reconverteverything', 'refresheverything']) 
       location.reload();
     } catch (e) {
       alert('Could not queue re-conversions: ' + e.message);
-      _btn.disabled = false;
+      undo();
     }
   });
 }
@@ -1848,7 +1853,7 @@ if (_ab) pollAiscan();
 const _ac = document.getElementById('aiscanclear');
 if (_ac) _ac.addEventListener('click', async () => {
   const dates = _ac.dataset.dates.split(' ').filter(Boolean);
-  _ac.disabled = true;
+  const undo = setBusy(_ac, 'Clearing…');
   try {
     const res = await fetch('/api/aiscan-apply', {
       method: 'POST',
@@ -1860,7 +1865,7 @@ if (_ac) _ac.addEventListener('click', async () => {
     location.reload();
   } catch (e) {
     alert('Could not clear resolved findings: ' + e.message);
-    _ac.disabled = false;
+    undo();
   }
 });
 
@@ -1868,8 +1873,7 @@ for (const _btn of _scanBtns) _btn.addEventListener('click', async () => {
   const dates = _btn.dataset.dates.split(' ').filter(Boolean);
   if (!confirm('AI-scan ' + dates.length + ' Sundays? This runs the agents ' +
                'once per Sunday, up to 10 Sundays at a time.')) return;
-  _btn.disabled = true;
-  _btn.textContent = 'Queueing ' + dates.length + ' scans…';
+  const undo = setBusy(_btn, 'Queueing ' + dates.length + ' scans…');
   try {
     const res = await fetch('/api/aiscan', {
       method: 'POST',
@@ -1883,14 +1887,13 @@ for (const _btn of _scanBtns) _btn.addEventListener('click', async () => {
     pollAiscan();
   } catch (e) {
     alert('Could not queue AI scans: ' + e.message);
-    _btn.disabled = false;
+    undo();
   }
 });
 
 const _ra = document.getElementById('rerenderall');
 if (_ra) _ra.addEventListener('click', async () => {
-  _ra.disabled = true;
-  _ra.textContent = 'Re-rendering…';
+  const undo = setBusy(_ra, 'Re-rendering every Sunday…');
   try {
     const res = await fetch('/api/rerender-all', {method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: '{}'});
@@ -1902,38 +1905,64 @@ if (_ra) _ra.addEventListener('click', async () => {
     location.reload();
   } catch (e) {
     alert('Re-render failed: ' + e.message);
-    _ra.disabled = false;
-    _ra.textContent = 'Re-render every Sunday';
+    undo();
   }
 });
 
 async function retryFailed(btn) {
   const name = btn.dataset.name;
   const date = btn.parentElement.querySelector('.retrydate').value;
-  btn.disabled = true;
-  const res = await fetch('/api/retry', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(date ? {name: name, date: date} : {name: name}),
-  });
+  const undo = setBusy(btn, 'Retrying…');
+  let res;
+  try {
+    res = await fetch('/api/retry', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(date ? {name: name, date: date} : {name: name}),
+    });
+  } catch (e) { undo(); alert('Request failed: ' + e.message); return; }
   if (res.status === 401) { location.reload(); return; }
   const data = await res.json().catch(() => ({ok: false, error: res.statusText}));
-  if (!data.ok) { alert(data.error || 'failed'); btn.disabled = false; return; }
+  if (!data.ok) { alert(data.error || 'failed'); undo(); return; }
   location.reload();
 }
 
-async function adminAction(action, date) {
+// The clicked button carries the live state: it shows a running label and a
+// spinner until the action settles (the page reloads on success, the label
+// comes back on failure), so a table full of identical buttons never leaves
+// you guessing which one is working.
+const RUNNING = {rerender: 'Rendering…', reconvert: 'Re-converting…',
+                 'reconvert-merge': 'Merging…', unpublish: 'Unpublishing…',
+                 review: 'Saving…'};
+
+function setBusy(btn, label) {
+  const was = btn.textContent;
+  btn.disabled = true;
+  btn.classList.add('busy');
+  if (label) btn.textContent = label;
+  return () => {                      // undo — call when the action fails
+    btn.disabled = false;
+    btn.classList.remove('busy');
+    btn.textContent = was;
+  };
+}
+
+async function adminAction(btn, action, date) {
   if (action === 'unpublish' && !confirm('Unpublish ' + date + '? The folder is set aside, not deleted.')) return;
   if (action === 'reconvert' && !confirm('Re-convert ' + date + ' from its stored PDF? Hand-edits to this Sunday will be overwritten.')) return;
   if (action === 'reconvert-merge' && !confirm('Re-convert ' + date + ' from its stored PDF and merge? Hand-edits are kept; unedited text gains the latest markup and accent colors.')) return;
-  const res = await fetch('/api/' + action, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({date}),
-  });
+  const undo = setBusy(btn, RUNNING[action] || 'Working…');
+  let res;
+  try {
+    res = await fetch('/api/' + action, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({date}),
+    });
+  } catch (e) { undo(); alert('Request failed: ' + e.message); return; }
   if (res.status === 401) { location.reload(); return; }  // cookie expired -> sign-in page
   const data = await res.json().catch(() => ({ok: false, error: res.statusText}));
-  if (!data.ok) { alert(data.error || 'failed'); return; }
+  if (!data.ok) { undo(); alert(data.error || 'failed'); return; }
   location.reload();
 }
 
@@ -2033,7 +2062,7 @@ def manage_html():
             warns = ''.join(f'<li class="warn">{esc(w)}</li>' for w in m['warnings'])
             items.append(
                 f'<li style="margin:10px 0"><a href="/{d}/">{date_label(d)}</a> '
-                f'<button class="mini" onclick="adminAction(\'review\', \'{d}\')">'
+                f'<button class="mini" onclick="adminAction(this, \'review\', \'{d}\')">'
                 f'Mark reviewed</button>'
                 f'<ul style="margin:4px 0 0;padding-left:18px">{warns}</ul></li>')
         bulk = sorted((d for d, _ in flagged
@@ -2132,9 +2161,9 @@ def manage_html():
         title = esc(m['title']) if m and m['title'] else ''
         reconvert = ''
         if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf')):
-            reconvert = (f'<button class="mini" onclick="adminAction(\'reconvert-merge\', '
+            reconvert = (f'<button class="mini" onclick="adminAction(this, \'reconvert-merge\', '
                          f'\'{d}\')">Re-convert, keep edits</button>'
-                         f'<button class="mini" onclick="adminAction(\'reconvert\', '
+                         f'<button class="mini" onclick="adminAction(this, \'reconvert\', '
                          f'\'{d}\')">Re-convert</button>')
         n_open = aiscan_open_count(scans[d])
         ai_badge = (f' <span class="warn" style="font-size:.85em">🔎 {n_open}'
@@ -2145,10 +2174,10 @@ def manage_html():
             f'<td class="acts">'
             f'<a class="minilink" href="/admin/edit/{d}">Edit</a>'
             f'<a class="minilink" href="/admin/aiscan/{d}">AI scan</a>{ai_badge}'
-            f'<button class="mini" onclick="adminAction(\'rerender\', \'{d}\')">'
+            f'<button class="mini" onclick="adminAction(this, \'rerender\', \'{d}\')">'
             f'Re-render</button>'
             f'{reconvert}'
-            f'<button class="mini" onclick="adminAction(\'unpublish\', \'{d}\')">'
+            f'<button class="mini" onclick="adminAction(this, \'unpublish\', \'{d}\')">'
             f'Unpublish</button></td></tr>')
     src_dates = [d for d in dates
                  if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf'))]

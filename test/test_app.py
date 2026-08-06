@@ -1161,6 +1161,9 @@ try:
     assert b'Re-convert' in body, 'admin lists the re-convert action'
     assert b'id="reconverteverything"' in body, 'full-sweep re-convert offered'
     assert b'id="rerenderall"' in body, 'bulk re-render offered'
+    assert b'adminAction(this,' in body and b'busyspin' in body, \
+        'row buttons hand themselves to adminAction so the clicked one ' \
+        'can show its running state'
     with open(os.path.join(out_dir, 'index.html'), 'w') as fh:
         fh.write('stale')
     status, body = action('reconvert', '2026-08-02')
