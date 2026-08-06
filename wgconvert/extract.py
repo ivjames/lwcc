@@ -16,6 +16,43 @@ from dataclasses import dataclass, field
 
 ENGRAVING_COLOR = '#231f20'
 MUSIC_FONT_RE = re.compile(r'maestro|opus|bravura|sonata', re.I)
+
+
+def accent_for(color):
+    """Hue family of a printed font color (maroon/gold/green/blue/purple),
+    or None for ordinary ink — black, the near-black engraving tone, greys,
+    and white. The family is used for structure decisions (is this line
+    emphasized? do these words share one ink? is this lettering deliberately
+    rainbow?); presentation carries the exact ink via accent_hex."""
+    m = re.fullmatch(r'#([0-9a-f]{6})', (color or '').lower())
+    if not m:
+        return None
+    r, g, b = (int(m.group(1)[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hi, lo = max(r, g, b), min(r, g, b)
+    if hi < 0.25 or hi - lo < 0.12:
+        return None                       # too dark or too grey to be an accent
+    d = hi - lo
+    if hi == r:
+        h = (60 * ((g - b) / d)) % 360
+    elif hi == g:
+        h = 60 * ((b - r) / d) + 120
+    else:
+        h = 60 * ((r - g) / d) + 240
+    if h < 20 or h >= 320:
+        return 'maroon'
+    if h < 70:
+        return 'gold'
+    if h < 170:
+        return 'green'
+    if h < 255:
+        return 'blue'
+    return 'purple'
+
+
+def accent_hex(color):
+    """The exact printed ink for presentation, lowercased '#rrggbb' — or None
+    when the color is ordinary ink (same gates as accent_for)."""
+    return (color or '').lower() if accent_for(color) else None
 # Emoji are embedded as invisible placeholder glyphs (opacity 0) that extract
 # as junk ASCII; the visible emoji is a separate image we ignore.
 EMOJI_FONT_RE = re.compile(r'emoji', re.I)
@@ -214,23 +251,31 @@ def _finish_line(cluster, page):
                     prev.text += run.text
                 elif prev.text and not prev.text[-1:].isspace() \
                         and not run.text[:1].isspace():
-                    # A color change mid-word (rainbow display lettering,
-                    # punctuation in a different ink, hues straddling a
-                    # palette boundary) renders as a jarring multi-color
-                    # word. Absorb the word-part into the open word, colored
+                    # A color change mid-word. Deliberate rainbow lettering
+                    # — single letters, each in its own vivid ink family —
+                    # is print art the site reproduces, so those runs stay
+                    # split. Every other mid-word change (punctuation in a
+                    # different ink, hues drifting within a word) is an
+                    # accident that would render as a jarring multi-color
+                    # word: absorb the word-part into the open word, colored
                     # by whichever side has more letters; everything after
                     # the first space keeps its own ink.
                     hm = re.match(r'(\S+)([\s\S]*)$', run.text)
                     head, rest = hm.group(1), hm.group(2)
                     prev_word = (prev.text.split() or [''])[-1]
-                    if sum(c.isalnum() for c in head) \
-                            > sum(c.isalnum() for c in prev_word) \
-                            and ' ' not in prev.text.strip():
-                        prev.color = run.color
-                    prev.text += head
-                    if rest:
-                        runs.append(Run(text=rest, b=run.b, i=run.i,
-                                        sup=run.sup, color=run.color))
+                    head_aln = sum(c.isalnum() for c in head)
+                    prev_aln = sum(c.isalnum() for c in prev_word)
+                    if head_aln <= 2 and prev_aln <= 2 \
+                            and accent_for(prev.color) and accent_for(run.color) \
+                            and accent_for(prev.color) != accent_for(run.color):
+                        runs.append(run)          # rainbow lettering
+                    else:
+                        if head_aln > prev_aln and ' ' not in prev.text.strip():
+                            prev.color = run.color
+                        prev.text += head
+                        if rest:
+                            runs.append(Run(text=rest, b=run.b, i=run.i,
+                                            sup=run.sup, color=run.color))
                 else:
                     runs.append(run)
             else:

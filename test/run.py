@@ -242,10 +242,13 @@ assert claim_caption(_ppage, _photo) is None, 'a label is not a caption'
 _ppage.lines = [_pline('Too far below the photo.', 700)]
 assert claim_caption(_ppage, _photo) is None, 'caption must hug the photo'
 
-# Printed accent inks: detected per-run, mapped onto the site palette, and
-# carried as <span class="fc-…"> markup; black, the engraving near-black,
-# greys, and white stay ordinary ink.
-from wgconvert.parse import accent_for, runs_to_markup, head_accent  # noqa: E402
+# Printed accent inks: detected per-run and carried as exact-ink
+# <span class="fc-rrggbb"> markup (the renderer contrast-darkens only as
+# needed); accent_for classifies the hue family for structure decisions;
+# black, the engraving near-black, greys, and white stay ordinary ink.
+from wgconvert.parse import accent_for, accent_hex, runs_to_markup, head_accent  # noqa: E402
+assert accent_hex('#E36C0A') == '#e36c0a' and accent_hex('#7030a0') == '#7030a0'
+assert accent_hex('#000000') is None and accent_hex('#808080') is None
 assert accent_for('#ee0000') == 'maroon' and accent_for('#c00000') == 'maroon'
 assert accent_for('#99195e') == 'maroon', 'magenta joins the maroon family'
 assert accent_for('#e36c0a') == 'gold' and accent_for('#f8ba00') == 'gold'
@@ -260,20 +263,20 @@ assert accent_for(None) is None and accent_for('not-a-color') is None
 _runs = [Run(text='DUO '), Run(text='CONCERT', color='#7030a0'),
          Run(text=' TODAY', b=True, color='#7030a0'),
          Run(text='!', b=True, color='#7030a0')]
-assert runs_to_markup(_runs) == ('DUO <span class="fc-purple">CONCERT</span> '
-                                 '<b><span class="fc-purple">TODAY!</span></b>'), \
+assert runs_to_markup(_runs) == ('DUO <span class="fc-7030a0">CONCERT</span> '
+                                 '<b><span class="fc-7030a0">TODAY!</span></b>'), \
     runs_to_markup(_runs)
-assert head_accent('<b><span class="fc-gold">AUGUST COMMUNION</span></b>') == 'gold'
+assert head_accent('<b><span class="fc-e36c0a">AUGUST COMMUNION</span></b>') == '#e36c0a'
+assert head_accent('<b><span class="fc-gold">LEGACY</span></b>') == 'gold', \
+    'palette-name markup from already-published guides passes through'
 assert head_accent('<b>PLAIN HEAD</b>') is None
-assert head_accent('<span class="fc-maroon">F</span><span class="fc-gold">L</span>') \
-    is None, 'rainbow lettering keeps the site default'
+assert head_accent('<span class="fc-ff0000">F</span><span class="fc-f79646">L</span>') \
+    is None, 'rainbow lettering keeps the site default heading style'
 
-# A color change mid-word (rainbow display lettering, punctuation in a
-# different ink, hues straddling a palette boundary) must never render as a
-# multi-color word: the extractor unifies on the side with more letters.
-_mw = Line(page=1, top=0, bottom=12, left=50, height=12, runs=[], text='')
-
-
+# Mid-word color changes: deliberate rainbow lettering (single letters in
+# distinct ink families) is print art the site reproduces run for run;
+# accidental changes — off-ink punctuation, drifting hues, a following
+# sentence in another ink — unify on the side with more letters.
 def _joined(fragments):
     from wgconvert.extract import _finish_line
     items = [{'left': 10 * i, 'width': 9, 'height': 12,
@@ -284,12 +287,15 @@ def _joined(fragments):
                         {'number': 1, 'width': 612, 'height': 792})
 
 
-_l = _joined([(c, h, True) for c, h in zip(
-    'FLOWERS', ('#ff0000', '#f79646', '#00b050', '#0070c0',
-                '#7030a0', '#c00000', '#e36c0a'))])
-assert len(_l.runs) == 1 and _l.runs[0].color == '#ff0000', \
-    'rainbow letters unify on the leading ink'
-assert _l.text == 'FLOWERS'
+_rainbow = ('#ff0000', '#f79646', '#00b050', '#0070c0',
+            '#7030a0', '#c00000', '#e36c0a')
+_l = _joined([(c, h, True) for c, h in zip('FLOWERS', _rainbow)])
+assert [r.color for r in _l.runs] == list(_rainbow), \
+    'deliberate rainbow lettering keeps every ink'
+assert _l.text == 'FLOWERS' and ''.join(r.text for r in _l.runs) == 'FLOWERS'
+_l = _joined([('MIRA', '#ee0000', True), ('CLES', '#e36c0a', True)])
+assert len(_l.runs) == 1 and _l.runs[0].color == '#ee0000', \
+    'hue drift across word halves unifies — not rainbow (fragments too long)'
 _l = _joined([('TODAY', '#ee0000', True), ('!', '#00b050', True)])
 assert len(_l.runs) == 1 and _l.runs[0].color == '#ee0000', \
     'off-ink punctuation adopts the word it ends'
@@ -300,6 +306,22 @@ assert [(r.text, r.color) for r in _l.runs] == \
 _l = _joined([('A', '#c00000', False), ('nnouncement follows here', '#000000', False)])
 assert _l.runs[0].text == 'Announcement' and _l.runs[0].color == '#000000', \
     'a stray colored first letter joins the word it starts (more letters win)'
+
+# Rainbow-lettered print headings carry their per-letter inks onto the
+# re-typeset Title Case heading; ordinary and misaligned headings do not.
+from wgconvert.parse import rainbow_heading_html  # noqa: E402
+_rhh = rainbow_heading_html(
+    '<b><span class="fc-ff0000">F</span><span class="fc-f79646">L</span>'
+    '<span class="fc-00b050">O</span>WERS &amp; FELLOWSHIP</b>',
+    'Flowers & Fellowship')
+assert _rhh == ('<span class="fc-ff0000">F</span><span class="fc-f79646">l</span>'
+                '<span class="fc-00b050">o</span>wers &amp; Fellowship'), _rhh
+assert rainbow_heading_html('<b><span class="fc-e36c0a">PLAIN HEAD</span></b>',
+                            'Plain Head') is None, 'one ink is not a rainbow'
+assert rainbow_heading_html(
+    '<span class="fc-ff0000">A</span><span class="fc-00b050">B</span>'
+    '<span class="fc-0070c0">C</span>', 'Something Else') is None, \
+    'misaligned markup falls back to the plain heading'
 
 # Sections that rely on colored text rather than boldness: an accent-ink
 # ALL-CAPS prefix opens an announcement heading just like <b> does (scans
@@ -318,14 +340,14 @@ _anns = parse_announcements([
     _colored_line([Run(text='BLESSING OF THE ANIMALS:', color='#e36c0a'),
                    Run(text=' Bring your pets to the patio.')], top=40),
 ])
-assert _anns[0]['heading'] == 'Blessing of the Animals' and _anns[0]['color'] == 'gold', \
-    'color-only heading recognized without boldness'
+assert _anns[0]['heading'] == 'Blessing of the Animals' and _anns[0]['color'] == '#e36c0a', \
+    'color-only heading recognized without boldness, exact ink kept'
 _blocks = litany_body([
     _line('Leader speaks the great thanksgiving here.'),
     _colored_line([Run(text='Christ has died. Christ is risen.', color='#c00000')], top=40),
 ])
 assert [b['type'] for b in _blocks] == ['para', 'refrain'], _blocks
-assert '<span class="fc-maroon">' in _blocks[1]['text'], 'colored refrain keeps its accent'
+assert '<span class="fc-c00000">' in _blocks[1]['text'], 'colored refrain keeps its ink'
 
 # Ink sampling from the rendered page: median of the dark pixels recovers
 # the printed color through the anti-aliased edges; too little ink → None.
@@ -336,20 +358,22 @@ _px = b''.join(bytes((0x70, 0x30, 0xa0) if 2 <= x < 8 and 1 <= y < 5 else (255, 
 assert _ink_color((_w, _h, _px), 0, 0, _w, _h) == '#7030a0'
 assert _ink_color((_w, _h, _px), 8, 0, 4, _h) is None, 'blank margin: no ink to judge'
 
-# OCR pseudo-lines: sampled word inks group into colored runs, near-black
-# stays ordinary, and the markup carries the accent.
+# OCR pseudo-lines: sampled word inks group into colored runs, snapped to
+# the hue family's page-median ink (per-word sampling jitter must not mint
+# a new class per word); near-black stays ordinary ink.
 from wgconvert.parse import ocr_lines  # noqa: E402
 _scanpage = Page(number=4, width=612, height=792, lines=[],
                  ocr_text='PRAYER REQUESTS\n\nBLESSING OF THE ANIMALS: on the patio',
                  ocr_rich=[[('PRAYER', None), ('REQUESTS', None)], [],
-                           [('BLESSING', '#e36c0a'), ('OF', '#e36c0a'),
-                            ('THE', '#e36c0a'), ('ANIMALS:', '#e36c0a'),
+                           [('BLESSING', '#e36c0a'), ('OF', '#e36d0b'),
+                            ('THE', '#e36c09'), ('ANIMALS:', '#e46c0a'),
                             ('on', '#0d0d0d'), ('the', '#0d0d0d'), ('patio', '#0d0d0d')]])
 _ols = ocr_lines(_scanpage)
 assert len(_ols) == 2 and _ols[1].text == 'BLESSING OF THE ANIMALS: on the patio'
-assert [r.color for r in _ols[1].runs] == ['#e36c0a', '#000000'], 'words grouped by accent'
+assert [r.color for r in _ols[1].runs] == ['#e36c0a', '#000000'], \
+    'words grouped by ink family, jitter snapped to the page-median ink'
 assert runs_to_markup(_ols[1].runs) == \
-    '<span class="fc-gold">BLESSING OF THE ANIMALS:</span> on the patio'
+    '<span class="fc-e36c0a">BLESSING OF THE ANIMALS:</span> on the patio'
 
 work_dir = tempfile.mkdtemp(prefix='wg-test-')
 try:
@@ -399,15 +423,21 @@ try:
         'Recent LWCC Worship Attendance',
     ]
     assert g['announcements'][3]['kind'] == 'attendance'
-    assert [a['color'] for a in g['announcements']] == ['maroon', 'maroon', 'gold', None], \
-        'heading accents from the printed inks (rainbow FLOWERS unifies on its leading ink)'
+    assert [a['color'] for a in g['announcements']] == [None, '#632423', '#e36c0a', None], \
+        'heading accents carry the exact printed inks (rainbow FLOWERS stays site default)'
+    _fl = g['announcements'][0]
+    assert _fl['headingHtml'] and _fl['headingHtml'].count('<span') >= 5 \
+        and re.sub(r'<[^>]+>', '', _fl['headingHtml']).replace('&amp;', '&') == _fl['heading'], \
+        'rainbow FLOWERS heading keeps its per-letter inks'
+    assert g['prayerRequests'][0]['nameColor'] == '#0070c0', \
+        'prayer-request name carries its printed blue'
 
     assert len(g['specialEvents']) == 1
     assert g['specialEvents'][0]['heading'] == 'Duo Concert — TODAY!'
     assert g['specialEvents'][0]['note'] == 'For those who are able, the suggested donation is $10.'
-    assert g['specialEvents'][0]['color'] == 'purple', 'event heading printed in purple'
-    assert '<span class="fc-purple">Er-Gene Kahng</span>' in g['specialEvents'][0]['paragraphs'][0], \
-        'performer names keep their printed accent'
+    assert g['specialEvents'][0]['color'] == '#7030a0', 'event heading keeps its printed purple'
+    assert '<span class="fc-7030a0">Er-Gene Kahng</span>' in g['specialEvents'][0]['paragraphs'][0], \
+        'performer names keep their exact printed ink'
 
     if g['journal']:
         assert re.search(r'On this new day, O God', g['journal']['morning'])
@@ -429,9 +459,14 @@ try:
     assert 'data:image/jpeg;base64,' in html, 'cover inlined'
     assert not re.search(r'src="(?!data:)', html), 'no external resources'
     assert ('id="journal"' in html) == bool(g['journal'])
-    assert '<h3 class="fc-purple">' in html, 'event heading carries its accent class'
-    assert '<b class="fc-maroon">' in html, 'announcement heading carries its accent class'
-    assert '.fc-purple' in html, 'accent classes styled by the template CSS'
+    assert '<h3 class="fc-7030a0">' in html, 'event heading carries its exact-ink class'
+    assert '<b class="fc-e36c0a">' in html, 'announcement heading carries its exact-ink class'
+    assert '.fc-7030a0' in html and '.fc-e36c0a{color:' in html, \
+        'renderer generates a contrast-checked rule per ink used on the page'
+    assert '.fc-purple' in html, 'legacy palette classes stay styled'
+    from wgconvert.render import display_color  # noqa: E402
+    assert display_color('#7030a0') == '#7030a0', 'dark inks render verbatim'
+    assert display_color('#f8ba00') != '#f8ba00', 'too-light inks darken for contrast'
 
     # ---- second sample: 2025 format (Communion liturgy, text-layer GPS and
     # Prayer Journal pages, hymn-credits block, chapel-style prayer requests)
@@ -457,10 +492,10 @@ try:
         'Blessing of the Animals', 'Need a Bible or Devotional?',
         'Recent LWCC Worship Attendance']
     assert [a['color'] for a in g2['announcements']] == [
-        'maroon', 'maroon', 'maroon', None, 'purple', 'gold', 'blue', None], \
-        'heading accents across the 2025 community page (multi-ink picnic head stays default)'
+        None, '#c00000', '#632423', None, '#7030a0', '#e36c0a', '#0070c0', None], \
+        'exact heading inks across the 2025 community page (rainbow/multi-ink stay default)'
     _acim = next(a for a in g2['announcements'] if a['heading'] == 'A Course in Miracles')
-    assert '<span class="fc-purple">' in _acim['text'], 'quoted text keeps its printed accent'
+    assert '<span class="fc-7030a0">' in _acim['text'], 'quoted text keeps its printed ink'
     _att = next(a for a in g2['announcements'] if a['kind'] == 'attendance')
     assert 'fc-' not in _att['text'], 'attendance line keeps only <sup>'
     assert g2['journal'] and 'God of all creation' in g2['journal']['morning'], \
@@ -561,9 +596,9 @@ try:
         labels_s = [o['label'] for o in gs['order'] if o['kind'] == 'item']
         assert 'Unison Prayer' in labels_s and len(labels_s) >= 4, labels_s
         by_head = {a.get('heading'): a.get('color') for a in gs['announcements']}
-        assert by_head.get('A Course in Miracles') == 'purple', by_head
-        assert by_head.get('Blessing of the Animals') == 'gold', by_head
-        assert by_head.get('Need a Bible or Devotional?') == 'blue', by_head
+        assert accent_for(by_head.get('A Course in Miracles')) == 'purple', by_head
+        assert accent_for(by_head.get('Blessing of the Animals')) == 'gold', by_head
+        assert accent_for(by_head.get('Need a Bible or Devotional?')) == 'blue', by_head
         assert any('fc-' in (a.get('text') or '') for a in gs['announcements']), \
             'colored body text keeps its accents through OCR'
     else:

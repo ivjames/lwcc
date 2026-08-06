@@ -1340,16 +1340,16 @@ try:
     assert any(a.get('heading') == 'Hand Added' for a in merged['announcements']), \
         'operator-added announcement kept'
     by_head = {a.get('heading'): a for a in merged['announcements']}
-    assert by_head['Coffee with Pastor']['color'] == 'maroon', 'heading accent restored'
+    assert by_head['Coffee with Pastor']['color'] == '#632423', 'heading ink restored'
     assert '<span class="fc-' in by_head['August Communion Sunday']['text'] \
-        or by_head['August Communion Sunday']['color'] == 'gold', 'accents restored'
-    assert merged['specialEvents'][0]['color'] == 'purple'
-    assert '<span class="fc-purple">' in merged['specialEvents'][0]['paragraphs'][0], \
+        or by_head['August Communion Sunday']['color'] == '#e36c0a', 'accents restored'
+    assert merged['specialEvents'][0]['color'] == '#7030a0'
+    assert '<span class="fc-7030a0">' in merged['specialEvents'][0]['paragraphs'][0], \
         'markup restored where the text was not edited'
     assert any('refreshed from the printed PDF (hand edits kept)' in n
                for n in merged['notes'])
     page = open(os.path.join(out_dir, 'index.html'), 'rb').read()
-    assert b'Rewritten by hand' in page and b'fc-purple' in page, \
+    assert b'Rewritten by hand' in page and b'fc-7030a0' in page, \
         'merge re-rendered with edits and colors together'
     entries = [json.loads(l) for l in open(log_path)]
     assert any(e.get('merge') and e.get('reconvert') and e.get('ok')
@@ -1370,7 +1370,7 @@ try:
             break
         time.sleep(0.5)
     merged = json.load(open(mgj))
-    assert merged['specialEvents'][0]['color'] == 'purple', \
+    assert merged['specialEvents'][0]['color'] == '#7030a0', \
         'batch merge refreshed the accent'
     assert merged['announcements'][0]['text'] == \
         'Rewritten by hand — no longer the printed text.', \
@@ -1406,7 +1406,9 @@ try:
     g['bogusKey'] = {'x': 1}                               # unknown: dropped
     g['announcements'][1]['text'] = (
         'Accent <span class="fc-purple">kept</span> '
+        '<span class="fc-7030a0">exact ink kept</span> '
         '<span class="fc-hack">rogue class</span> '
+        '<span class="fc-12345g">rogue hex</span> '
         '<span onclick="x()" class="fc-gold">attributes</span>')
     g['announcements'][1]['color'] = 'purple'              # accent: whitelisted
     g['announcements'][2]['color'] = 'hotpink'             # off-palette: dropped
@@ -1422,12 +1424,25 @@ try:
     assert saved['warnings'] == [], 'warnings come from the file, not the form'
     assert 'bogusKey' not in saved
     assert '<span class="fc-purple">kept</span>' in saved['announcements'][1]['text'], \
-        'palette accent span survives the sanitizer'
+        'legacy palette span survives the sanitizer'
+    assert '<span class="fc-7030a0">exact ink kept</span>' in saved['announcements'][1]['text'], \
+        'exact-ink span survives the sanitizer'
     assert '<span class="fc-hack">' not in saved['announcements'][1]['text'] \
+        and '<span class="fc-12345g">' not in saved['announcements'][1]['text'] \
         and '<span onclick' not in saved['announcements'][1]['text'], \
         'off-vocabulary spans neutralized'
     assert saved['announcements'][1]['color'] == 'purple'
     assert saved['announcements'][2]['color'] is None, 'off-palette accent dropped'
+    g = json.load(open(gj))
+    g['announcements'][1]['color'] = '#E36C0A'
+    g['prayerRequests'][0]['nameColor'] = '#0070c0'
+    status, body = req('/api/save',
+                       data=json.dumps({'date': '2026-08-09', 'guide': g}).encode(),
+                       headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/json'})
+    assert status == 200 and json.loads(body)['ok'], body
+    saved = json.load(open(gj))
+    assert saved['announcements'][1]['color'] == '#e36c0a', 'exact ink kept, lowercased'
+    assert saved['prayerRequests'][0]['nameColor'] == '#0070c0', 'name accent kept'
     page = open(os.path.join(scratch, 'public', '2026-08-09', 'index.html')).read()
     assert 'Edited welcome <b>kept</b>' in page, 'save re-rendered the page'
     assert 'alert(1)' not in page or '<script>alert' not in page
