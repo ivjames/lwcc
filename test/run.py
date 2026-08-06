@@ -219,6 +219,39 @@ assert head_accent('<b>PLAIN HEAD</b>') is None
 assert head_accent('<span class="fc-maroon">F</span><span class="fc-gold">L</span>') \
     is None, 'rainbow lettering keeps the site default'
 
+# A color change mid-word (rainbow display lettering, punctuation in a
+# different ink, hues straddling a palette boundary) must never render as a
+# multi-color word: the extractor unifies on the side with more letters.
+_mw = Line(page=1, top=0, bottom=12, left=50, height=12, runs=[], text='')
+
+
+def _joined(fragments):
+    from wgconvert.extract import _finish_line
+    items = [{'left': 10 * i, 'width': 9, 'height': 12,
+              'font': NS(color=color), 'top': 0,
+              'runs': [Run(text=t, b=b)]}
+             for i, (t, color, b) in enumerate(fragments)]
+    return _finish_line({'top': 0, 'bottom': 12, 'items': items},
+                        {'number': 1, 'width': 612, 'height': 792})
+
+
+_l = _joined([(c, h, True) for c, h in zip(
+    'FLOWERS', ('#ff0000', '#f79646', '#00b050', '#0070c0',
+                '#7030a0', '#c00000', '#e36c0a'))])
+assert len(_l.runs) == 1 and _l.runs[0].color == '#ff0000', \
+    'rainbow letters unify on the leading ink'
+assert _l.text == 'FLOWERS'
+_l = _joined([('TODAY', '#ee0000', True), ('!', '#00b050', True)])
+assert len(_l.runs) == 1 and _l.runs[0].color == '#ee0000', \
+    'off-ink punctuation adopts the word it ends'
+_l = _joined([('www.acim.org', '#0070c0', False), ('. More soon.', '#000000', False)])
+assert [(r.text, r.color) for r in _l.runs] == \
+    [('www.acim.org.', '#0070c0'), (' More soon.', '#000000')], \
+    'only the glued word-part is absorbed — the rest keeps its own ink'
+_l = _joined([('A', '#c00000', False), ('nnouncement follows here', '#000000', False)])
+assert _l.runs[0].text == 'Announcement' and _l.runs[0].color == '#000000', \
+    'a stray colored first letter joins the word it starts (more letters win)'
+
 # Sections that rely on colored text rather than boldness: an accent-ink
 # ALL-CAPS prefix opens an announcement heading just like <b> does (scans
 # have no boldness at all), and a fully accent-ink line is a litany refrain.
@@ -317,8 +350,8 @@ try:
         'Recent LWCC Worship Attendance',
     ]
     assert g['announcements'][3]['kind'] == 'attendance'
-    assert [a['color'] for a in g['announcements']] == [None, 'maroon', 'gold', None], \
-        'heading accents from the printed inks (rainbow FLOWERS stays default)'
+    assert [a['color'] for a in g['announcements']] == ['maroon', 'maroon', 'gold', None], \
+        'heading accents from the printed inks (rainbow FLOWERS unifies on its leading ink)'
 
     assert len(g['specialEvents']) == 1
     assert g['specialEvents'][0]['heading'] == 'Duo Concert — TODAY!'
@@ -373,8 +406,8 @@ try:
         'Blessing of the Animals', 'Need a Bible or Devotional?',
         'Recent LWCC Worship Attendance']
     assert [a['color'] for a in g2['announcements']] == [
-        None, 'maroon', 'maroon', None, 'purple', 'gold', 'blue', None], \
-        'heading accents across the 2025 community page'
+        'maroon', 'maroon', 'maroon', None, 'purple', 'gold', 'blue', None], \
+        'heading accents across the 2025 community page (multi-ink picnic head stays default)'
     _acim = next(a for a in g2['announcements'] if a['heading'] == 'A Course in Miracles')
     assert '<span class="fc-purple">' in _acim['text'], 'quoted text keeps its printed accent'
     _att = next(a for a in g2['announcements'] if a['kind'] == 'attendance')
