@@ -194,8 +194,11 @@ A scan that is mostly art publishes as a facsimile of page images.
    full-page flyer — are kept too (`images` in guide.json): the placed-image
    boxes `pdftohtml` reports are filtered down to content-shaped ones (icons,
    off-page background art, full-page backdrops, and panels with text printed
-   on them are not photos), the caption printed under a photo is claimed for
-   it rather than leaking into the surrounding section, and each photo is
+   on them are not photos; a picture *of* printed music — a hymnal snippet
+   pasted in as an image — is recognized by its pixels, colorless bilevel
+   print with staff lines, and dropped with a note under the
+   music-not-reproduced rule), the caption printed under a photo is claimed
+   for it rather than leaking into the surrounding section, and each photo is
    published as a crop of its rendered page (`photo-<page>-<n>.jpg`) in a
    Photos section. Nothing is silently dropped; findings are
    two-tier: **warnings** mean content may be lost or wrong (missing
