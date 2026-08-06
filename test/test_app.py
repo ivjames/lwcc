@@ -29,16 +29,19 @@ assert app_mod.filename_matches_date('2023-10-01/source.pdf', '2023-10-01')
 assert not app_mod.filename_matches_date('WG 010823.pdf', '2023-01-15')
 assert not app_mod.filename_matches_date(None, '2023-01-08')
 
-# Timestamps are Pacific wall-clock everywhere: new stamps carry the offset
-# and display with a PT label; legacy server-clock stamps (no offset) pass
-# through untouched rather than being guessed at.
+# Timestamps are Pacific wall-clock everywhere: new stamps carry the offset;
+# legacy stamps have none recorded — they came from the droplet's UTC clock,
+# so naive parses as UTC and converts too.
 assert app_mod.PACIFIC is not None, 'tzdata available'
 assert str(app_mod.now_pacific().utcoffset()) in ('-1 day, 17:00:00',
                                                   '-1 day, 16:00:00')
 assert app_mod.fmt_at('2026-08-06T10:00:00-07:00') == '2026-08-06T10:00:00 PT'
 assert app_mod.fmt_at('2026-01-06T18:00:00+00:00') == '2026-01-06T10:00:00 PT', \
     'stamps from any zone display as Pacific'
-assert app_mod.fmt_at('2026-08-05T10:00:00') == '2026-08-05T10:00:00'
+assert app_mod.fmt_at('2026-08-05T10:00:00') == '2026-08-05T03:00:00 PT', \
+    'legacy naive stamps are UTC — converted, not shown raw'
+assert app_mod.fmt_at('2026-01-05T02:00:00') == '2026-01-04T18:00:00 PT', \
+    'winter legacy stamps convert at PST and may cross the date line'
 assert app_mod.fmt_at(None) == '' and app_mod.fmt_at('junk') == 'junk'
 
 # --- AI article scanner: digest, response parsing, and repair application run
