@@ -90,12 +90,15 @@
   .co-concert h3{color:var(--green)}
   .co-concert .sug{font-style:italic;text-align:center;margin-top:10px}
 
-  /* printed accent inks, mapped onto the site palette by the converter */
-  .fc-maroon,.co-note .blk b.fc-maroon,.co-concert h3.fc-maroon{color:var(--maroon)}
-  .fc-gold,.co-note .blk b.fc-gold,.co-concert h3.fc-gold{color:var(--gold)}
-  .fc-green,.co-note .blk b.fc-green,.co-concert h3.fc-green{color:var(--green)}
-  .fc-blue,.co-note .blk b.fc-blue,.co-concert h3.fc-blue{color:var(--blue)}
-  .fc-purple,.co-note .blk b.fc-purple,.co-concert h3.fc-purple{color:var(--purple)}
+  /* Printed accent inks. Exact inks (.fc-rrggbb) get per-page rules generated
+     by the renderer, contrast-darkened only as needed; these five named
+     classes are the legacy palette mapping, kept for already-published
+     guide.json markup. */
+  .fc-maroon,.co-note .blk b.fc-maroon,.co-concert h3.fc-maroon,.co-prayer h3.fc-maroon{color:var(--maroon)}
+  .fc-gold,.co-note .blk b.fc-gold,.co-concert h3.fc-gold,.co-prayer h3.fc-gold{color:var(--gold)}
+  .fc-green,.co-note .blk b.fc-green,.co-concert h3.fc-green,.co-prayer h3.fc-green{color:var(--green)}
+  .fc-blue,.co-note .blk b.fc-blue,.co-concert h3.fc-blue,.co-prayer h3.fc-blue{color:var(--blue)}
+  .fc-purple,.co-note .blk b.fc-purple,.co-concert h3.fc-purple,.co-prayer h3.fc-purple{color:var(--purple)}
 
   figure.photo{margin:14px auto;max-width:640px;text-align:center}
   figure.photo img{width:100%;height:auto;border-radius:10px;box-shadow:0 4px 14px rgba(0,0,0,.12)}

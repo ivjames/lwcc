@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from .extract import Line, Run
+from .extract import Line, Run, accent_for, accent_hex
 
 from .known_texts import KNOWN_TEXTS
 
@@ -135,50 +135,19 @@ def esc(s):
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
-# Printed accent colors, mapped to the site's lab-tested palette rather than
-# reproduced verbatim: the bulletins color announcement headings, quotes, and
-# performer names in vivid Office-palette inks that would fail the site's
-# contrast standard on paper-white. Each ink keeps its hue family and lands
-# on the nearest accent the design already uses (maroon, gold, green, blue,
-# purple).
-def accent_for(color):
-    """Site accent class for a printed font color, or None for ordinary ink
-    (black, the near-black engraving tone, greys, and white)."""
-    m = re.fullmatch(r'#([0-9a-f]{6})', (color or '').lower())
-    if not m:
-        return None
-    r, g, b = (int(m.group(1)[i:i + 2], 16) / 255 for i in (0, 2, 4))
-    hi, lo = max(r, g, b), min(r, g, b)
-    if hi < 0.25 or hi - lo < 0.12:
-        return None                       # too dark or too grey to be an accent
-    d = hi - lo
-    if hi == r:
-        h = (60 * ((g - b) / d)) % 360
-    elif hi == g:
-        h = 60 * ((b - r) / d) + 120
-    else:
-        h = 60 * ((r - g) / d) + 240
-    if h < 20 or h >= 320:
-        return 'maroon'
-    if h < 70:
-        return 'gold'
-    if h < 170:
-        return 'green'
-    if h < 255:
-        return 'blue'
-    return 'purple'
-
-
 def runs_to_markup(runs, bold=True, italic=True, sup=True):
     """Serialize a line's runs to text with minimal inline markup (<b>, <i>,
-    <sup>, <span class="fc-…"> for printed accent colors) that guide.json
-    stores and the renderer trusts."""
+    <sup>, <span class="fc-rrggbb"> carrying the exact printed ink) that
+    guide.json stores and the renderer trusts. The renderer generates a CSS
+    rule per ink, darkened only as far as legibility demands — so the print's
+    orange stays orange, not a palette approximation."""
     out = ''
     for r in runs:
         t = esc(r.text)
         if not t:
             continue
-        accent = accent_for(getattr(r, 'color', None))
+        hexc = accent_hex(getattr(r, 'color', None))
+        accent = hexc and f'fc-{hexc[1:]}'
         if r.sup and sup:
             # Chapter-prefixed first verse ("9:1") renders as just the verse no.
             v = re.sub(r'^(\d+):(\d+)$', r'\2', t.strip())
@@ -190,7 +159,7 @@ def runs_to_markup(runs, bold=True, italic=True, sup=True):
             wrapped = core
             if core:
                 if accent:
-                    wrapped = f'<span class="fc-{accent}">{wrapped}</span>'
+                    wrapped = f'<span class="{accent}">{wrapped}</span>'
                 if r.b and bold:
                     wrapped = f'<b>{wrapped}</b>'
                 if r.i and italic:
@@ -202,16 +171,69 @@ def runs_to_markup(runs, bold=True, italic=True, sup=True):
     prev = None
     while prev != out:
         prev = out
-        out = re.sub(r'<span class="fc-([a-z]+)">([^<]*)</span><span class="fc-\1">',
+        out = re.sub(r'<span class="fc-([0-9a-z]+)">([^<]*)</span><span class="fc-\1">',
                      r'<span class="fc-\1">\2', out)
     return re.sub(r'\s+', ' ', out).strip()
 
 
+def rainbow_heading_html(head_markup, heading):
+    """Per-letter ink spans for a heading whose print is rainbow-lettered
+    (three or more distinct inks), re-cased onto the site's Title Case
+    heading. None for ordinary headings, or whenever the markup does not
+    map cleanly onto the heading text — the plain heading then renders."""
+    if len(set(re.findall(r'class="fc-([0-9a-f]{6})"', head_markup))) < 3:
+        return None
+    tokens = []                                   # (plain char, ink class)
+    cls = None
+    for m in re.finditer(r'<span class="(fc-[0-9a-z]+)">|(</span>)'
+                         r'|(<[^>]+>)|&(amp|lt|gt);|([\s\S])', head_markup):
+        if m.group(1):
+            cls = m.group(1)
+        elif m.group(2):
+            cls = None
+        elif m.group(3):
+            pass                                  # other tags carry no ink
+        elif m.group(4):
+            tokens.append(({'amp': '&', 'lt': '<', 'gt': '>'}[m.group(4)], cls))
+        else:
+            tokens.append((m.group(5), cls))
+    # Re-case the print's characters onto the Title Case heading (which also
+    # collapsed whitespace and trimmed); bail on any misalignment.
+    out = []
+    ti = 0
+    for ch, ink in tokens:
+        if ch.isspace():
+            if ti < len(heading) and heading[ti].isspace():
+                out.append((heading[ti], None))
+                ti += 1
+            continue
+        if ti >= len(heading) or heading[ti].lower() != ch.lower():
+            return None
+        out.append((heading[ti], ink))
+        ti += 1
+    if ti != len(heading):
+        return None
+    html = ''
+    for ch, ink in out:
+        ch = esc(ch)
+        html += f'<span class="{ink}">{ch}</span>' if ink else ch
+    prev = None
+    while prev != html:                 # merge consecutive same-ink letters
+        prev = html
+        html = re.sub(r'<span class="fc-([0-9a-z]+)">([^<]*)</span>'
+                      r'<span class="fc-\1">', r'<span class="fc-\1">\2', html)
+    return html
+
+
 def head_accent(markup):
-    """The single accent a heading is printed in, or None when it has none —
-    or several (the rainbow-lettered headings stay on the site's default)."""
-    accents = set(re.findall(r'class="fc-([a-z]+)"', markup))
-    return accents.pop() if len(accents) == 1 else None
+    """The single ink a heading is printed in ('#rrggbb'), or None when it
+    has none — or several (rainbow-lettered headings stay on the site's
+    default; legacy palette names pass through unchanged)."""
+    accents = set(re.findall(r'class="fc-([0-9a-z]+)"', markup))
+    if len(accents) != 1:
+        return None
+    token = accents.pop()
+    return f'#{token}' if re.fullmatch(r'[0-9a-f]{6}', token) else token
 
 
 def line_is_stage(l):
@@ -533,11 +555,13 @@ def parse_prayer_requests(lines):
             text = tidy_prose(' '.join(
                 ''.join(r.text for r in l.runs if not r.b) for l in para))
             text = re.sub(r'^[—–-]\s*', '', text)
+            name_color = accent_hex(getattr(name_run, 'color', None))
         else:
             # no short bold name — keep the whole paragraph, markup intact
             name = None
+            name_color = None
             text = tidy_prose(' '.join(runs_to_markup(l.runs) for l in para))
-        entries.append({'name': name, 'text': text})
+        entries.append({'name': name, 'text': text, 'nameColor': name_color})
     return entries
 
 
@@ -552,7 +576,7 @@ def parse_announcements(lines):
         # limit). Color spans contain no colon, so [^:] crosses them safely.
         # Scanned bulletins have no boldness — their headings rely on colored
         # text alone, so an accent span opens a heading just like <b> does.
-        m = re.match(r'^((?:<b>|<span class="fc-[a-z]+">)[^:]{2,320}?):'
+        m = re.match(r'^((?:<b>|<span class="fc-[0-9a-z]+">)[^:]{2,480}?):'
                      r'((?:</b>|</span>)*)\s*([\s\S]*)$', text)
         plain_head = None
         mostly_caps = False
@@ -568,7 +592,8 @@ def parse_announcements(lines):
             if kind == 'attendance':
                 body = re.sub(r'</?[bi]>|</?span[^>]*>', '', body)  # keep only <sup>
             items.append({'heading': heading, 'text': body, 'kind': kind,
-                          'color': head_accent(m.group(1))})
+                          'color': head_accent(m.group(1)),
+                          'headingHtml': rainbow_heading_html(m.group(1), heading)})
         elif any(BOX_CREDITS_RE.search(l.text) for l in para):
             continue          # stray hymn-credits lines — not announcements
         elif all(DISPLAY_CAPS_RE.fullmatch(l.text) for l in para):
@@ -613,7 +638,7 @@ def parse_special_event(lines):
         'paragraphs': paras,
         'note': note,
         'sectionTitle': 'This Afternoon' if re.search(r'TODAY', head_text, re.I) else 'Coming Up',
-        'color': accent_for(getattr(lines[0].runs[0], 'color', None)),
+        'color': accent_hex(getattr(lines[0].runs[0], 'color', None)),
     }
 
 
@@ -690,6 +715,19 @@ def ocr_lines(p):
     if not rich:
         rich = [[(w, None) for w in raw.split()]
                 for raw in (p.ocr_text or '').split('\n')]
+    # Sampled inks jitter by a channel or two from word to word; snap each
+    # word to its hue family's page-median ink so a colored passage carries
+    # ONE exact color instead of a slightly different hex per word.
+    by_family = {}
+    for words in rich:
+        for _, c in words:
+            fam = accent_for(c)
+            if fam:
+                by_family.setdefault(fam, []).append(c)
+    page_ink = {}
+    for fam, hexes in by_family.items():
+        chans = [sorted(int(h[i:i + 2], 16) for h in hexes) for i in (1, 3, 5)]
+        page_ink[fam] = '#%02x%02x%02x' % tuple(ch[len(ch) // 2] for ch in chans)
     # OCR renders the printed en dash as an ASCII hyphen; the label
     # machinery splits attribution on [–—].
     dash = lambda s: re.sub(r'(?<=\S) - (?=\S)', ' – ', s)  # noqa: E731
@@ -708,7 +746,7 @@ def ocr_lines(p):
                 runs[-1].text += ' ' + w
             else:
                 runs.append(Run(text=(' ' if runs else '') + w, i=italic,
-                                color=c if accent else '#000000'))
+                                color=page_ink[accent] if accent else '#000000'))
         for r in runs:
             r.text = dash(r.text)
         lines.append(Line(page=p.number, top=top, bottom=top + 12, left=50,
@@ -1146,7 +1184,7 @@ def parse(extracted, opts=None):
                     # scans included); the plain-text caps/length guards
                     # below are what keep prose out.
                     hm = re.match(
-                        r'^((?:[^:!<]|</?b>|<span class="fc-[a-z]+">|</span>){2,240}?)[:!]'
+                        r'^((?:[^:!<]|</?b>|<span class="fc-[0-9a-z]+">|</span>){2,320}?)[:!]'
                         r'(?:</b>|</span>)*\s*([\s\S]+)$', text)
                     head = (re.sub(r'<[^>]+>', '', hm.group(1))
                             .replace('&amp;', '&').strip()) if hm else ''

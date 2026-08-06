@@ -73,17 +73,20 @@ def merge_guides(current, fresh):
                 texts += 1
 
     accents = 0
-    for field in ('announcements', 'specialEvents'):
-        by_heading = {}
+    for field, label, color_key in (('announcements', 'heading', 'color'),
+                                    ('announcements', 'heading', 'headingHtml'),
+                                    ('specialEvents', 'heading', 'color'),
+                                    ('prayerRequests', 'name', 'nameColor')):
+        by_label = {}
         for entry in fresh.get(field) or []:
-            if entry.get('heading') and entry.get('color'):
-                by_heading.setdefault(_canon(entry['heading']), set()).add(entry['color'])
+            if entry.get(label) and entry.get(color_key):
+                by_label.setdefault(_canon(entry[label]), set()).add(entry[color_key])
         for entry in merged.get(field) or []:
-            if entry.get('color') or not entry.get('heading'):
+            if entry.get(color_key) or not entry.get(label):
                 continue                    # hand-set accents are edits: kept
-            colors = by_heading.get(_canon(entry['heading']))
+            colors = by_label.get(_canon(entry[label]))
             if colors and len(colors) == 1:
-                entry['color'] = next(iter(colors))
+                entry[color_key] = next(iter(colors))
                 accents += 1
 
     # The re-conversion just (re)wrote the page images — the inventory must

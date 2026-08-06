@@ -97,12 +97,15 @@
   .co-concert h3{color:var(--green)}
   .co-concert .sug{font-style:italic;text-align:center;margin-top:10px}
 
-  /* printed accent inks, mapped onto the site palette by the converter */
-  .fc-maroon,.co-note .blk b.fc-maroon,.co-concert h3.fc-maroon{color:var(--maroon)}
-  .fc-gold,.co-note .blk b.fc-gold,.co-concert h3.fc-gold{color:var(--gold)}
-  .fc-green,.co-note .blk b.fc-green,.co-concert h3.fc-green{color:var(--green)}
-  .fc-blue,.co-note .blk b.fc-blue,.co-concert h3.fc-blue{color:var(--blue)}
-  .fc-purple,.co-note .blk b.fc-purple,.co-concert h3.fc-purple{color:var(--purple)}
+  /* Printed accent inks. Exact inks (.fc-rrggbb) get per-page rules generated
+     by the renderer, contrast-darkened only as needed; these five named
+     classes are the legacy palette mapping, kept for already-published
+     guide.json markup. */
+  .fc-maroon,.co-note .blk b.fc-maroon,.co-concert h3.fc-maroon,.co-prayer h3.fc-maroon{color:var(--maroon)}
+  .fc-gold,.co-note .blk b.fc-gold,.co-concert h3.fc-gold,.co-prayer h3.fc-gold{color:var(--gold)}
+  .fc-green,.co-note .blk b.fc-green,.co-concert h3.fc-green,.co-prayer h3.fc-green{color:var(--green)}
+  .fc-blue,.co-note .blk b.fc-blue,.co-concert h3.fc-blue,.co-prayer h3.fc-blue{color:var(--blue)}
+  .fc-purple,.co-note .blk b.fc-purple,.co-concert h3.fc-purple,.co-prayer h3.fc-purple{color:var(--purple)}
 
   figure.photo{margin:14px auto;max-width:640px;text-align:center}
   figure.photo img{width:100%;height:auto;border-radius:10px;box-shadow:0 4px 14px rgba(0,0,0,.12)}
@@ -118,6 +121,15 @@
   footer{background:var(--teal);color:#fff;text-align:center;padding:26px 20px;
     font-family:Arial,Helvetica,sans-serif;font-size:.9rem;margin-top:20px;line-height:1.8}
   footer a{color:#cfe3ea}
+
+  .fc-0070c0,.co-note .blk b.fc-0070c0,.co-concert h3.fc-0070c0,.co-prayer h3.fc-0070c0{color:#0070c0}
+  .fc-00b050,.co-note .blk b.fc-00b050,.co-concert h3.fc-00b050,.co-prayer h3.fc-00b050{color:#00823a}
+  .fc-632423,.co-note .blk b.fc-632423,.co-concert h3.fc-632423,.co-prayer h3.fc-632423{color:#632423}
+  .fc-7030a0,.co-note .blk b.fc-7030a0,.co-concert h3.fc-7030a0,.co-prayer h3.fc-7030a0{color:#7030a0}
+  .fc-c00000,.co-note .blk b.fc-c00000,.co-concert h3.fc-c00000,.co-prayer h3.fc-c00000{color:#c00000}
+  .fc-e36c0a,.co-note .blk b.fc-e36c0a,.co-concert h3.fc-e36c0a,.co-prayer h3.fc-e36c0a{color:#b65607}
+  .fc-f79646,.co-note .blk b.fc-f79646,.co-concert h3.fc-f79646,.co-prayer h3.fc-f79646{color:#9e5e2b}
+  .fc-ff0000,.co-note .blk b.fc-ff0000,.co-concert h3.fc-ff0000,.co-prayer h3.fc-ff0000{color:#dc0000}
 </style>
 </head>
 <body>
@@ -299,7 +311,7 @@ For you are the ground and the fruitful vision, the birth, power, and fulfillmen
   <section id="prayers">
     <h2 class="sec">Prayer Requests</h2>
     <div class="callout co-prayer">
-      <h3>Patty Jo Schmitz</h3>
+      <h3 class="fc-0070c0">Patty Jo Schmitz</h3>
       <p>Patty Jo’s son, Richard Keller, passed away on Tuesday, July 21, 2026. Unbeknownst to PattyJo, Richard had been battling cancer and was in chemo treatment. He is survived by his wife, Theresa. Please continue to pray for strength and comfort for Patty Jo and her family, and peaceful rest for Richard.</p>
     </div>
   </section>
@@ -307,11 +319,11 @@ For you are the ground and the fruitful vision, the birth, power, and fulfillmen
   <section id="news">
     <h2 class="sec">Notes &amp; Announcements</h2>
     <div class="callout co-note">
-      <div class="blk"><b class="fc-maroon">🌷 Flowers &amp; Fellowship</b><br>
+      <div class="blk"><b>🌷 <span class="fc-ff0000">F</span><span class="fc-f79646">l</span><span class="fc-00b050">o</span><span class="fc-0070c0">w</span><span class="fc-7030a0">e</span><span class="fc-c00000">r</span><span class="fc-e36c0a">s</span> &amp; Fellowship</b><br>
         Today’s flowers are provided by Steve Martinez. Fellowship refreshments are provided by Pastor Jang Yong and our siblings at LW Korean Community Church. See the sign-up charts to provide refreshments or cover the cost of altar flowers for future services. Altar flowers are $25<i>.</i> See Phyllis Spencer to coordinate arrangements.</div>
-      <div class="blk"><b class="fc-maroon">☕ Coffee with Pastor</b><br>
+      <div class="blk"><b class="fc-632423">☕ Coffee with Pastor</b><br>
         This week’s “Coffee with Pastor” is canceled while Pastor Johan is away. We will resume with Membership Meetings and “Coffee with…” next week, on Thursday, August 13, 2026.</div>
-      <div class="blk"><b class="fc-gold">✝ August Communion Sunday</b><br>
+      <div class="blk"><b class="fc-e36c0a">✝ August Communion Sunday</b><br>
         <i><b>Communion Sunday</b></i> will take place next week, on <i><b>Sunday, August 9, 2026</b></i>.</div>
       <div class="blk"><b>📊 Recent LWCC Worship Attendance</b>
         <div class="att">July 5<sup>th</sup>: 31 &nbsp;|&nbsp; July 12<sup>th</sup>: 37 &nbsp;|&nbsp; July 19<sup>th</sup>: 34 &nbsp;|&nbsp; July 26<sup>th</sup>: 37</div></div>
@@ -321,8 +333,8 @@ For you are the ground and the fruitful vision, the birth, power, and fulfillmen
   <section id="event">
     <h2 class="sec">This Afternoon</h2>
     <div class="callout co-concert">
-      <h3 class="fc-purple">🎻 Duo Concert — TODAY!</h3>
-      <p>Join us this afternoon Sunday, August 2, 2026, at 4:00 PM, as violinist <b><span class="fc-purple">Er-Gene Kahng</span></b> joins forces with our very own resident pianist, <b><span class="fc-purple">Hannah Yi</span></b> in a recital featuring beautiful music by Somei Satoh, Ludwig van Beethoven, and Edvard Grieg. Flyers are in the narthex — please take some and share with friends and neighbors — <b>ALL ARE WELCOME!</b></p>
+      <h3 class="fc-7030a0">🎻 Duo Concert — TODAY!</h3>
+      <p>Join us this afternoon Sunday, August 2, 2026, at 4:00 PM, as violinist <b><span class="fc-7030a0">Er-Gene Kahng</span></b> joins forces with our very own resident pianist, <b><span class="fc-7030a0">Hannah Yi</span></b> in a recital featuring beautiful music by Somei Satoh, Ludwig van Beethoven, and Edvard Grieg. Flyers are in the narthex — please take some and share with friends and neighbors — <b>ALL ARE WELCOME!</b></p>
       <p class="sug">For those who are able, the suggested donation is $10.</p>
     </div>
   </section>

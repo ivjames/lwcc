@@ -29,8 +29,51 @@ def rich(s):
 ACCENT_NAMES = ('maroon', 'gold', 'green', 'blue', 'purple')
 
 
-def accent_class(name):
-    return f' class="fc-{name}"' if name in ACCENT_NAMES else ''
+def accent_class(value):
+    """class attribute for a stored accent: an exact ink ('#rrggbb') or a
+    legacy palette name. Anything else renders unclassed (site default)."""
+    if value in ACCENT_NAMES:
+        return f' class="fc-{value}"'
+    if isinstance(value, str) and re.fullmatch(r'#[0-9a-f]{6}', value):
+        return f' class="fc-{value[1:]}"'
+    return ''
+
+
+def _lum(hexc):
+    def lin(c):
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (int(hexc[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+
+
+PAPER_LUM = _lum('#fbfaf5')          # the site background (--paper)
+
+
+def display_color(hexc):
+    """The printed ink, darkened only as far as WCAG 4.5:1 against the paper
+    background demands — scaling toward black keeps the hue, so the print's
+    orange reads as orange, not a palette substitute."""
+    rgb = [int(hexc[i:i + 2], 16) for i in (1, 3, 5)]
+    for _ in range(40):
+        cur = '#%02x%02x%02x' % tuple(rgb)
+        if (PAPER_LUM + 0.05) / (_lum(cur) + 0.05) >= 4.5:
+            return cur
+        rgb = [int(c * 0.93) for c in rgb]
+    return '#%02x%02x%02x' % tuple(rgb)
+
+
+FC_HEX_RE = re.compile(r'fc-([0-9a-f]{6})')
+
+
+def accent_css(html):
+    """One generated rule per exact ink used on the page, at the same
+    specificity tiers the template gives the legacy named accents."""
+    rules = []
+    for h in sorted(set(FC_HEX_RE.findall(html))):
+        sel = (f'.fc-{h},.co-note .blk b.fc-{h},.co-concert h3.fc-{h},'
+               f'.co-prayer h3.fc-{h}')
+        rules.append(f'  {sel}{{color:{display_color("#" + h)}}}')
+    return ('\n' + '\n'.join(rules) + '\n') if rules else ''
 
 
 def sup_ordinals(s):
@@ -184,7 +227,7 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None, flye
     if guide['prayerRequests']:
         toc.append(('#prayers', 'Prayer Requests'))
         cards = '\n'.join(f'''    <div class="callout co-prayer">
-      {f'<h3>{esc(pr["name"])}</h3>' if pr.get('name') else ''}
+      {f'<h3{accent_class(pr.get("nameColor"))}>{esc(pr["name"])}</h3>' if pr.get('name') else ''}
       <p>{rich(pr['text'])}</p>
     </div>''' for pr in guide['prayerRequests'])
         sections.append(f'''
@@ -198,8 +241,12 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None, flye
         toc.append(('#news', 'Announcements'))
         blks = []
         for a in guide['announcements']:
+            # headingHtml: rainbow-lettered print headings carry per-letter
+            # ink spans (pre-sanitized rich markup); plain headings escape.
+            head_html = rich(a['headingHtml']) if a.get('headingHtml') \
+                else esc(a['heading']) if a.get('heading') else ''
             head = (f'<b{accent_class(a.get("color"))}>'
-                    f'{announcement_emoji(a["heading"])}{esc(a["heading"])}</b>') if a.get('heading') else ''
+                    f'{announcement_emoji(a["heading"])}{head_html}</b>') if a.get('heading') else ''
             if a.get('kind') == 'attendance':
                 att = re.sub(r'\s*\|\s*', ' &nbsp;|&nbsp; ', rich(a['text']))
                 blks.append(f'''      <div class="blk">{head}
@@ -328,6 +375,7 @@ def render(guide, church, banner_path=None, cover_path=None, css_path=None, flye
 
     vision = f' · <em>{esc(church["vision"])}</em>' if church.get('vision') else ''
     sections_html = '\n'.join(sections)
+    css += accent_css(sections_html)
 
     return f'''<!DOCTYPE html>
 <html lang="en">

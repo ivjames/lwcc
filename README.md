@@ -215,12 +215,17 @@ wg-convert render out/1999-03-07/guide.json
 Body text in `guide.json` may carry only `<b>`, `<i>`, `<sup>`, and
 `<span class="fc-…">` markup (already escaped by the parser); prayers use
 `\n` for their line breaks. Everything else is plain text. The `fc-` spans
-carry printed accent inks: the parser maps each colored fontspec onto the
-site palette (`maroon`, `gold`, `green`, `blue`, `purple`) by hue, so vivid
-print colors keep their family without breaking the site's contrast standard.
-Announcement and special-event headings printed in a single accent also get a
-`color` field with the same palette names (rainbow-lettered headings keep the
-site default).
+carry printed accent inks **exactly**: `fc-rrggbb` classes hold the print's
+own hex, and the renderer generates one CSS rule per ink, darkened only as
+far as WCAG 4.5:1 against the page background demands (hue preserved — the
+print's orange stays orange). The five named classes (`fc-maroon` …) remain
+supported for guides published before exact inks. Headings printed in a
+single ink get a `color` field ('#rrggbb'); rainbow-lettered headings
+instead get `headingHtml`, per-letter ink spans over the Title Case heading
+(dropped automatically if the heading text is later edited); prayer-request
+names carry `nameColor`. Deliberate rainbow lettering (single letters in
+distinct ink families) is preserved run for run; accidental mid-word ink
+changes still unify to one color per word.
 
 ## Requirements
 

@@ -546,9 +546,18 @@ def unpublish_date(d):
 ACCENT_NAMES = ('maroon', 'gold', 'green', 'blue', 'purple')
 ALLOWED_TAG_RE = re.compile(
     r'</?(b|i)>|<sup>|</sup>'
-    r'|<span class="fc-(?:' + '|'.join(ACCENT_NAMES) + r')">|</span>', re.I)
+    r'|<span class="fc-(?:' + '|'.join(ACCENT_NAMES) + r'|[0-9a-f]{6})">|</span>',
+    re.I)
 BLOCK_TYPES = ('para', 'prayer', 'refrain', 'ref', 'verse')
 ITEM_TYPES = ('music', 'prayer', 'litany', 'scripture', 'message', 'plain')
+
+
+def clean_accent(v):
+    """Accent field: an exact ink '#rrggbb' or a legacy palette name."""
+    v = str(v or '').strip().lower()
+    if v in ACCENT_NAMES or re.fullmatch(r'#[0-9a-f]{6}', v):
+        return v
+    return None
 
 
 def clean_plain(s):
@@ -642,15 +651,25 @@ def sanitize_guide(sub, existing):
     for pr in sub.get('prayerRequests') or []:
         if isinstance(pr, dict) and clean_rich(pr.get('text')):
             g['prayerRequests'].append({'name': clean_plain(pr.get('name')) or None,
-                                        'text': clean_rich(pr.get('text'))})
+                                        'text': clean_rich(pr.get('text')),
+                                        'nameColor': clean_accent(pr.get('nameColor'))})
     g['announcements'] = []
     for a in sub.get('announcements') or []:
         if isinstance(a, dict) and clean_rich(a.get('text')):
+            heading = clean_plain(a.get('heading')) or None
+            # A rainbow heading's rich form survives only while it still
+            # spells the (possibly edited) plain heading — else it is stale
+            # and the plain heading renders.
+            hh = clean_rich(a.get('headingHtml')) or None
+            if hh and (re.sub(r'<[^>]+>', '', hh).replace('&amp;', '&')
+                       != (heading or '')):
+                hh = None
             g['announcements'].append({
-                'heading': clean_plain(a.get('heading')) or None,
+                'heading': heading,
+                'headingHtml': hh,
                 'text': clean_rich(a.get('text')),
                 'kind': 'attendance' if a.get('kind') == 'attendance' else 'note',
-                'color': a.get('color') if a.get('color') in ACCENT_NAMES else None})
+                'color': clean_accent(a.get('color'))})
     g['specialEvents'] = []
     for ev in sub.get('specialEvents') or []:
         if not isinstance(ev, dict) or not clean_plain(ev.get('heading')):
@@ -660,7 +679,7 @@ def sanitize_guide(sub, existing):
             'paragraphs': [clean_rich(p) for p in ev.get('paragraphs') or [] if clean_rich(p)],
             'note': clean_plain(ev.get('note')) or None,
             'sectionTitle': clean_plain(ev.get('sectionTitle')) or 'Coming Up',
-            'color': ev.get('color') if ev.get('color') in ACCENT_NAMES else None})
+            'color': clean_accent(ev.get('color'))})
 
     j = sub.get('journal') if isinstance(sub.get('journal'), dict) else None
     g['journal'] = None
@@ -2586,11 +2605,12 @@ const txt = (obj, key, label, kind = 'input') => {
   return el('label', {class: 'f'}, label, input);
 };
 // Heading accent (detected from the printed ink; '' = site default)
-const accentSel = obj => el('label', {class: 'f'}, 'Heading accent ',
-  el('select', {onchange: e => obj.color = e.target.value || null},
-    ...['', 'maroon', 'gold', 'green', 'blue', 'purple'].map(c =>
-      el('option', {value: c, ...((obj.color || '') === c ? {selected: ''} : {})},
-         c || '(default)'))));
+// Accent input: an exact ink like #e36c0a (as printed), a legacy palette
+// name (maroon/gold/green/blue/purple), or blank for the site default.
+const accentSel = (obj, key = 'color', label = 'Heading accent (#rrggbb or blank)') =>
+  el('label', {class: 'f'}, label,
+    el('input', {type: 'text', value: obj[key] || '', placeholder: '#e36c0a',
+                 oninput: e => obj[key] = e.target.value.trim() || null}));
 const rowBtns = (arr, i, redraw) => el('span', {class: 'rowbtns'},
   el('button', {class: 'mini', onclick: () => { if (i > 0) { [arr[i-1], arr[i]] = [arr[i], arr[i-1]]; redraw(); } }}, '↑'),
   el('button', {class: 'mini', onclick: () => { if (i < arr.length - 1) { [arr[i+1], arr[i]] = [arr[i], arr[i+1]]; redraw(); } }}, '↓'),
@@ -2688,8 +2708,10 @@ function buildForm() {
 
   G.prayerRequests = G.prayerRequests || [];
   f.append(listSection('Prayer Requests', G.prayerRequests,
-    (row, pr) => row.append(txt(pr, 'name', 'Name (optional)'), txt(pr, 'text', 'Text', 'ta')),
-    () => ({name: '', text: ''})));
+    (row, pr) => row.append(txt(pr, 'name', 'Name (optional)'),
+      accentSel(pr, 'nameColor', 'Name accent (#rrggbb or blank)'),
+      txt(pr, 'text', 'Text', 'ta')),
+    () => ({name: '', text: '', nameColor: null})));
 
   G.announcements = G.announcements || [];
   f.append(listSection('Notes & Announcements', G.announcements,

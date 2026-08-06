@@ -309,7 +309,8 @@
   "prayerRequests": [
     {
       "name": "Patty Jo Schmitz",
-      "text": "Patty Jo’s son, Richard Keller, passed away on Tuesday, July 21, 2026. Unbeknownst to PattyJo, Richard had been battling cancer and was in chemo treatment. He is survived by his wife, Theresa. Please continue to pray for strength and comfort for Patty Jo and her family, and peaceful rest for Richard."
+      "text": "Patty Jo’s son, Richard Keller, passed away on Tuesday, July 21, 2026. Unbeknownst to PattyJo, Richard had been battling cancer and was in chemo treatment. He is survived by his wife, Theresa. Please continue to pray for strength and comfort for Patty Jo and her family, and peaceful rest for Richard.",
+      "nameColor": "#0070c0"
     }
   ],
   "announcements": [
@@ -317,36 +318,40 @@
       "heading": "Flowers & Fellowship",
       "text": "Today’s flowers are provided by Steve Martinez. Fellowship refreshments are provided by Pastor Jang Yong and our siblings at LW Korean Community Church. See the sign-up charts to provide refreshments or cover the cost of altar flowers for future services. Altar flowers are $25<i>.</i> See Phyllis Spencer to coordinate arrangements.",
       "kind": "note",
-      "color": "maroon"
+      "color": null,
+      "headingHtml": "<span class=\"fc-ff0000\">F</span><span class=\"fc-f79646\">l</span><span class=\"fc-00b050\">o</span><span class=\"fc-0070c0\">w</span><span class=\"fc-7030a0\">e</span><span class=\"fc-c00000\">r</span><span class=\"fc-e36c0a\">s</span> &amp; Fellowship"
     },
     {
       "heading": "Coffee with Pastor",
       "text": "This week’s “Coffee with Pastor” is canceled while Pastor Johan is away. We will resume with Membership Meetings and “Coffee with…” next week, on Thursday, August 13, 2026.",
       "kind": "note",
-      "color": "maroon"
+      "color": "#632423",
+      "headingHtml": null
     },
     {
       "heading": "August Communion Sunday",
       "text": "<i><b>Communion Sunday</b></i> will take place next week, on <i><b>Sunday, August 9, 2026</b></i>.",
       "kind": "note",
-      "color": "gold"
+      "color": "#e36c0a",
+      "headingHtml": null
     },
     {
       "heading": "Recent LWCC Worship Attendance",
       "text": "July 5<sup>th</sup>: 31 | July 12<sup>th</sup>: 37 | July 19<sup>th</sup>: 34 | July 26<sup>th</sup>: 37",
       "kind": "attendance",
-      "color": null
+      "color": null,
+      "headingHtml": null
     }
   ],
   "specialEvents": [
     {
       "heading": "Duo Concert — TODAY!",
       "paragraphs": [
-        "Join us this afternoon Sunday, August 2, 2026, at 4:00 PM, as violinist <b><span class=\"fc-purple\">Er-Gene Kahng</span></b> joins forces with our very own resident pianist, <b><span class=\"fc-purple\">Hannah Yi</span></b> in a recital featuring beautiful music by Somei Satoh, Ludwig van Beethoven, and Edvard Grieg. Flyers are in the narthex — please take some and share with friends and neighbors — <b>ALL ARE WELCOME!</b>"
+        "Join us this afternoon Sunday, August 2, 2026, at 4:00 PM, as violinist <b><span class=\"fc-7030a0\">Er-Gene Kahng</span></b> joins forces with our very own resident pianist, <b><span class=\"fc-7030a0\">Hannah Yi</span></b> in a recital featuring beautiful music by Somei Satoh, Ludwig van Beethoven, and Edvard Grieg. Flyers are in the narthex — please take some and share with friends and neighbors — <b>ALL ARE WELCOME!</b>"
       ],
       "note": "For those who are able, the suggested donation is $10.",
       "sectionTitle": "This Afternoon",
-      "color": "purple"
+      "color": "#7030a0"
     }
   ],
   "images": [],
