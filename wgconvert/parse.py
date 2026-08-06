@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import re
 
-from .extract import Line, Run, accent_for, accent_hex
+from .extract import (Line, Run, accent_for, accent_hex, image_is_engraving,
+                      render_region_ppm)
 
 from .known_texts import KNOWN_TEXTS
 
@@ -887,6 +888,20 @@ def claim_caption(page, im):
     return tidy_prose(' '.join(l.text for l in cap)) or None
 
 
+def photo_is_music(extracted, page_num, box):
+    """True when a candidate photo's printed region is an engraved-music
+    image (see image_is_engraving). Needs the source PDF on hand; synthetic
+    Extracted objects without one skip the check and keep the photo."""
+    if not extracted.pdf_path or not extracted.work_dir:
+        return False
+    try:
+        img = render_region_ppm(extracted.pdf_path, page_num, box,
+                                extracted.work_dir)
+    except RuntimeError:
+        return False
+    return img is not None and image_is_engraving(img)
+
+
 # --- main ------------------------------------------------------------------
 
 def parse(extracted, opts=None):
@@ -911,10 +926,17 @@ def parse(extracted, opts=None):
     # Claimed before the text flow is assembled, so a photo's caption rides
     # with the photo instead of leaking into the surrounding section. Page 1
     # belongs to the cover pipeline; scans publish whole pages as facsimiles.
+    # A candidate that is a picture *of* printed music (a hymnal snippet
+    # pasted in as an image) falls under the music-not-reproduced rule, like
+    # its vector-engraved siblings — dropped, with a note for the record.
     for p in text_pages:
         if p.number == 1:
             continue
         for im in page_photos(p):
+            if photo_is_music(extracted, p.number, im):
+                notes.append(f'page {p.number}: engraved music placed as an '
+                             f'image (music is not reproduced)')
+                continue
             guide['images'].append({
                 'page': p.number, 'top': im['top'], 'left': im['left'],
                 'width': im['width'], 'height': im['height'],

@@ -242,6 +242,59 @@ assert claim_caption(_ppage, _photo) is None, 'a label is not a caption'
 _ppage.lines = [_pline('Too far below the photo.', 700)]
 assert claim_caption(_ppage, _photo) is None, 'caption must hug the photo'
 
+# A picture *of* printed music must not pass as a photo: the region's pixels
+# give it away — no color, paper-white/ink-black with few mid-tones, and
+# staff lines (rows of ink running across most of the width). Photographs
+# fail on color or mid-tones; text blocks have no 60%-ink rows.
+from wgconvert.extract import image_is_engraving  # noqa: E402
+
+
+def _rgb_fill(w, h, rgb):
+    return bytearray(bytes(rgb) * (w * h))
+
+
+def _score_rgb(w, h):
+    """White ground, two five-line staves spanning the width, some ink blobs
+    for note heads — the pixel shape of an engraved-music snippet."""
+    px = _rgb_fill(w, h, (255, 255, 255))
+
+    def dot(x, y):
+        if 0 <= x < w and 0 <= y < h:
+            px[(y * w + x) * 3:(y * w + x) * 3 + 3] = b'\x00\x00\x00'
+    for staff_top in (h // 6, 4 * h // 6):
+        for line in range(5):
+            y = staff_top + line * 6
+            for x in range(w):
+                dot(x, y)
+    for n in range(w // 40):
+        cx = 20 + n * 38
+        for dy in range(-2, 3):
+            for dx in range(-3, 4):
+                dot(cx + dx, h // 6 + (n % 4) * 6 + dy)
+    return bytes(px)
+
+
+def _photo_rgb(w, h):
+    return b''.join(bytes((x * 255 // w, y * 255 // h, 160))
+                    for y in range(h) for x in range(w))
+
+
+assert image_is_engraving((450, 180, _score_rgb(450, 180))), 'staves read as music'
+assert not image_is_engraving((450, 180, _photo_rgb(450, 180))), \
+    'a colorful photo is not music'
+assert not image_is_engraving((450, 180, bytes(_rgb_fill(450, 180, (128, 128, 128))))), \
+    'gray mid-tones (a B/W photograph) are not music'
+assert not image_is_engraving((450, 180, bytes(_rgb_fill(450, 180, (0, 0, 0))))), \
+    'a dark image is not music'
+_sparse = _rgb_fill(450, 180, (255, 255, 255))
+for _y in range(10, 170, 12):        # text-ish speckle: ~20% ink per row
+    for _x in range(0, 450, 5):
+        _sparse[(_y * 450 + _x) * 3:(_y * 450 + _x) * 3 + 3] = b'\x00\x00\x00'
+assert not image_is_engraving((450, 180, bytes(_sparse))), \
+    'bilevel text/speckle without staff lines is not music'
+assert not image_is_engraving((30, 30, bytes(_rgb_fill(30, 30, (255, 255, 255))))), \
+    'too small to judge'
+
 # Printed accent inks: detected per-run and carried as exact-ink
 # <span class="fc-rrggbb"> markup (the renderer contrast-darkens only as
 # needed); accent_for classifies the hue family for structure decisions;
@@ -524,6 +577,87 @@ try:
     assert re.search(r'<img src="data:image/jpeg;base64,[^"]+" '
                      r'alt="Sunset over the shore\."', html2), 'caption doubles as alt text'
 
+    # The engraving classifier against real print: the 2025 sample's page 2
+    # mixes engraved systems with prose — its staff bands read as music, the
+    # prayer text block between them does not.
+    from wgconvert.extract import render_region_ppm  # noqa: E402
+    _p2 = os.path.join(ROOT, 'samples', 'WG_2025_09_07.pdf')
+    for _box, _is_music in (
+            ({'top': 60, 'left': 30, 'width': 850, 'height': 380}, True),
+            ({'top': 770, 'left': 30, 'width': 850, 'height': 380}, True),
+            ({'top': 540, 'left': 60, 'width': 800, 'height': 200}, False)):
+        _img = render_region_ppm(_p2, 2, _box, work_dir)
+        assert image_is_engraving(_img) == _is_music, (_box, _is_music)
+
+    # ---- synthetic guide with a raster score AND a real photo on one text
+    # page: the score image is dropped under the music-not-reproduced rule
+    # (with a note), the photo survives. This is the backlog failure where
+    # hymnal snippets pasted as images published as "photos".
+    def _mini_pdf(out, pdf_pages):
+        """pdf_pages: [(texts, images)]; texts = [(x, y, size, s)] in points,
+        images = [(x, y, w, h, px_w, px_h, rgb)] with (x, y) the box's
+        lower-left corner. Uncompressed DeviceRGB streams — nothing but
+        stdlib needed to author a page pdftohtml/pdftoppm fully understand."""
+        objs = {1: b'<< /Type /Catalog /Pages 2 0 R >>',
+                3: b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'}
+        kids = []
+        num = 4
+        for texts, images in pdf_pages:
+            content = ''
+            xob = b''
+            for i, (x, y, w, h, pw, ph, rgb) in enumerate(images):
+                objs[num] = (b'<< /Type /XObject /Subtype /Image /Width %d '
+                             b'/Height %d /ColorSpace /DeviceRGB '
+                             b'/BitsPerComponent 8 /Length %d >>\nstream\n'
+                             % (pw, ph, len(rgb)) + rgb + b'\nendstream')
+                content += f'q {w} 0 0 {h} {x} {y} cm /I{i} Do Q\n'
+                xob += b'/I%d %d 0 R ' % (i, num)
+                num += 1
+            for x, y, size, s in texts:
+                s = s.replace('\\', r'\\').replace('(', r'\(').replace(')', r'\)')
+                content += f'BT /F0 {size} Tf {x} {y} Td ({s}) Tj ET\n'
+            cbytes = content.encode()
+            objs[num] = (b'<< /Length %d >>\nstream\n' % len(cbytes)
+                         + cbytes + b'\nendstream')
+            objs[num + 1] = (
+                b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] '
+                b'/Resources << /Font << /F0 3 0 R >> /XObject << ' + xob
+                + b'>> >> /Contents %d 0 R >>' % num)
+            kids.append(num + 1)
+            num += 2
+        objs[2] = (b'<< /Type /Pages /Kids ['
+                   + b' '.join(b'%d 0 R' % k for k in kids)
+                   + b'] /Count %d >>' % len(kids))
+        buf, offsets = b'%PDF-1.4\n', {}
+        for n in sorted(objs):
+            offsets[n] = len(buf)
+            buf += b'%d 0 obj\n' % n + objs[n] + b'\nendobj\n'
+        xref_at, count = len(buf), max(objs) + 1
+        buf += b'xref\n0 %d\n0000000000 65535 f \n' % count
+        for n in range(1, count):
+            buf += b'%010d 00000 n \n' % offsets[n]
+        buf += (b'trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n'
+                % (count, xref_at))
+        with open(out, 'wb') as fh:
+            fh.write(buf)
+
+    mini = os.path.join(work_dir, 'mini.pdf')
+    _mini_pdf(mini, [
+        ([(72, 720, 14, 'September 14, 2025')], []),
+        ([(72, 740, 12, 'HYMN: "Amazing Grace"'),
+          (72, 720, 12, 'We lift our voices together in song this morning.'),
+          (72, 700, 12, 'The choir invites everyone to join the refrain.'),
+          (72, 680, 12, 'Please remain standing as the music ends.')],
+         [(72, 430, 300, 120, 450, 180, _score_rgb(450, 180)),
+          (72, 200, 300, 120, 450, 180, _photo_rgb(450, 180))]),
+    ])
+    gm = parse(extract(mini, work_dir + '-mini', ocr=False))
+    assert len(gm['images']) == 1 and gm['images'][0]['page'] == 2, gm['images']
+    assert 690 <= gm['images'][0]['top'] <= 725, \
+        'the surviving image is the photo, not the score'
+    assert any('engraved music placed as an image' in n for n in gm['notes']), \
+        gm['notes']
+
     # ---- scanned bulletin, end to end: pages of the 2025 sample rendered
     # to JPEG and wrapped into an image-only PDF. Scans have no boldness, so
     # sections rely on colored text alone — the OCR stage samples each
@@ -608,5 +742,6 @@ try:
 finally:
     shutil.rmtree(work_dir, ignore_errors=True)
     shutil.rmtree(work_dir + '-2', ignore_errors=True)
+    shutil.rmtree(work_dir + '-mini', ignore_errors=True)
     shutil.rmtree(work_dir + '-photos', ignore_errors=True)
     shutil.rmtree(work_dir + '-scan', ignore_errors=True)

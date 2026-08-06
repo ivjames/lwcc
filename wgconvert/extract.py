@@ -379,6 +379,64 @@ def render_page_region(pdf_path, page_num, box, dest):
     os.replace(os.path.join(out_dir, produced), dest)
 
 
+def render_region_ppm(pdf_path, page_num, box, work_dir):
+    """Render one placed image's region at the XML scale (1 unit = 1 pixel)
+    and load it for pixel classification; the PPM is deleted after loading.
+    None when pdftoppm produced nothing usable."""
+    prefix = os.path.join(
+        work_dir, f'.region-{page_num}-{box["top"]}-{box["left"]}')
+    _run(['pdftoppm', '-r', str(XML_DPI),
+          '-f', str(page_num), '-l', str(page_num),
+          '-x', str(max(0, box['left'])), '-y', str(max(0, box['top'])),
+          '-W', str(box['width']), '-H', str(box['height']),
+          pdf_path, prefix])
+    name = os.path.basename(prefix)
+    produced = next((f for f in os.listdir(work_dir)
+                     if f.startswith(name + '-') and f.endswith('.ppm')), None)
+    if not produced:
+        return None
+    path = os.path.join(work_dir, produced)
+    img = _load_ppm(path)
+    os.unlink(path)
+    return img
+
+
+def image_is_engraving(img):
+    """A region that is a picture *of* printed music — a hymnal snippet
+    pasted into the page as an image (vector-engraved scores are caught by
+    fontspec instead). The tell is print, not photograph: essentially no
+    color, almost everything paper-white or ink-black with few gray
+    mid-tones, and staff lines — several pixel rows whose ink runs across
+    most of the width. Photographs fail on color or mid-tones; text-as-image
+    blocks fail on staff lines (no text row is 60% ink)."""
+    w, h, px = img
+    if w < 40 or h < 40:
+        return False
+    total = w * h
+    colored = mid = dark = white = 0
+    line_rows = 0
+    for y in range(h):
+        base = y * w * 3
+        row_dark = 0
+        for x in range(w):
+            r, g, b = px[base + 3 * x:base + 3 * x + 3]
+            s = r + g + b
+            if max(r, g, b) - min(r, g, b) > 40:
+                colored += 1
+            elif s < 384:
+                dark += 1
+                row_dark += 1
+            elif s > 690:
+                white += 1
+            else:
+                mid += 1
+        if row_dark >= w * 0.6:
+            line_rows += 1
+    return (colored < total * 0.02 and mid < total * 0.15
+            and dark < total * 0.35 and white > total * 0.5
+            and line_rows >= 5)
+
+
 def _has_tesseract():
     return shutil.which('tesseract') is not None
 
@@ -475,6 +533,11 @@ class Extracted:
     pages: list
     cover_path: str | None
     warnings: list
+    # Where this came from, so the parser can look back at the printed page
+    # (pixel checks on placed-image regions). None in synthetic tests — the
+    # checks that need them simply don't run.
+    pdf_path: str | None = None
+    work_dir: str | None = None
 
 
 def extract(pdf_path, work_dir, ocr=True):
@@ -516,4 +579,5 @@ def extract(pdf_path, work_dir, ocr=True):
     cover_path = _find_cover_image(
         pdf_path, work_dir,
         page1_blank=not (pages and pages[0].lines))
-    return Extracted(pages=pages, cover_path=cover_path, warnings=warnings)
+    return Extracted(pages=pages, cover_path=cover_path, warnings=warnings,
+                     pdf_path=pdf_path, work_dir=work_dir)
