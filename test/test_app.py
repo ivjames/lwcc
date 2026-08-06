@@ -1289,6 +1289,8 @@ try:
     status, body = req('/admin', headers=COOKIE)
     assert b'reconvert-merge' in body and b'id="refresheverything"' in body, \
         'admin offers the keep-edits re-convert, per Sunday and as a sweep'
+    assert b'id="sweepstatus"' in body and b'wgBatchTotal' in body, \
+        'batch progress meter: sweep-card status line + stored batch size'
     mgj = os.path.join(out_dir, 'guide.json')
     g = json.load(open(mgj))
     # Simulate a pre-color, hand-edited Sunday: strip every accent, rewrite

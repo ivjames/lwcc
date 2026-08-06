@@ -1491,6 +1491,8 @@ PAGE_STYLE = """
     animation:busyspin .8s linear infinite}
   @keyframes busyspin{to{transform:rotate(360deg)}}
   .warn{color:#8a6410}.err{color:#a20816}.ok{color:#1f7a44}
+  #queuebanner progress,#sweepstatus progress{width:180px;height:12px;
+    vertical-align:-.1em;margin:0 6px;accent-color:#054253}
   code{background:#f1efe6;padding:2px 6px;border-radius:4px;font-size:.85em}
 """
 
@@ -1819,6 +1821,7 @@ if (_cr) _cr.addEventListener('click', async () => {
 });
 
 const _qb = document.getElementById('queuebanner');
+const _sw = document.getElementById('sweepstatus');
 async function pollBanner() {
   try {
     const res = await fetch('/api/status?ids=');
@@ -1826,13 +1829,34 @@ async function pollBanner() {
     const data = await res.json();
     const qs = data.queue || {};
     const conv = qs.converting || [];
-    if (!qs.waiting && !conv.length) {
+    const remaining = (qs.waiting || 0) + conv.length;
+    if (!remaining) {
+      sessionStorage.removeItem('wgBatchTotal');
       if (!running && !queue.length) location.reload();
       return;
     }
-    _qb.innerHTML = qs.waiting + ' file' + (qs.waiting === 1 ? '' : 's') + ' waiting' +
+    // A batch queued from this browser stores its size, giving the meter a
+    // denominator; a queue larger than that total is someone else's work,
+    // so fall back to plain counts rather than showing a bogus fraction.
+    let total = parseInt(sessionStorage.getItem('wgBatchTotal') || '', 10) || 0;
+    if (total && remaining > total) {
+      sessionStorage.removeItem('wgBatchTotal');
+      total = 0;
+    }
+    const done = total ? total - remaining : 0;
+    const meter = total
+      ? done + ' of ' + total + ' done <progress max="' + total + '" value="' +
+        done + '"></progress> '
+      : '';
+    const detail = qs.waiting + ' file' + (qs.waiting === 1 ? '' : 's') + ' waiting' +
       (conv.length ? ', converting ' +
         conv.map(c => '<b>' + escHtml(c.file || '…') + '</b>').join(', ') : '');
+    _qb.innerHTML = meter + detail;
+    if (_sw) {
+      _sw.hidden = false;
+      _sw.innerHTML = 'Server queue: ' + meter + detail +
+        ' — this page reloads when the queue empties.';
+    }
   } catch (e) { /* transient — keep polling */ }
   setTimeout(pollBanner, 3000);
 }
@@ -1877,8 +1901,11 @@ for (const _id of ['reconvertall', 'reconverteverything', 'refresheverything']) 
       });
       const data = await res.json().catch(() => ({ok: false}));
       if (!data.ok) throw new Error(data.error || res.statusText);
-      // The server queue takes it from here — the banner shows live progress
-      // and this page can be closed.
+      // The server queue takes it from here — remember the batch size so
+      // the reloaded page's meter has a denominator; the banner and the
+      // sweep-card status show live progress and this page can be closed.
+      sessionStorage.setItem('wgBatchTotal',
+        String((data.queued || 0) + (data.alreadyQueued || []).length));
       location.reload();
     } catch (e) {
       alert('Could not queue re-conversions: ' + e.message);
@@ -2254,7 +2281,8 @@ def manage_html():
                   f'data-dates="{" ".join(src_dates)}">Re-convert every Sunday '
                   f'({len(src_dates)})</button> — full sweep through the server '
                   f'queue after a converter fix, flagged or not '
-                  f'(discards hand-edits).</p>')
+                  f'(discards hand-edits).</p>'
+                  f'<p class="warn" id="sweepstatus" hidden></p>')
     out.append('<div class="card"><p><b>Published Sundays</b> — re-render '
                'rebuilds the page from its guide.json (after hand-edits); '
                're-convert re-runs the converter on the stored source PDF '
