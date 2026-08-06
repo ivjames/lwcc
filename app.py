@@ -15,7 +15,10 @@ newest at /) and converts newly uploaded worship-guide PDFs in place:
                       .env (fails closed if unset)
     GET  /admin/aiscan/YYYY-MM-DD   AI article scanner: review a Sunday for
                       OCR misclassifications (announcements vs page directions
-                      vs content) and apply verified, text-preserving repairs;
+                      vs content) — plus a scripture verse-number agent that
+                      reads each passage against its reference and checks
+                      every verse carries its <sup> superscript label — and
+                      apply verified, text-preserving repairs;
                       POST /api/aiscan queues scans (one date or a batch;
                       needs ANTHROPIC_API_KEY in .env) on a durable queue —
                       up to AISCAN_WORKERS run concurrently, markers in
@@ -609,8 +612,11 @@ def save_guide(d, submitted):
 # --- AI article scanner -----------------------------------------------------
 # Reviews a published Sunday's guide.json with Claude for text the parser
 # filed under the wrong class (announcements vs page/stage directions vs
-# worship content) — the classic OCR-backlog failure. Findings live in
-# public/<date>/aiscan.json; repairs are verified text-preserving moves.
+# worship content) — the classic OCR-backlog failure. A second agent pass
+# (aiscan.scan_verses) reads the scripture section and checks every verse
+# against its passage reference for its <sup> superscript verse number.
+# Findings live in public/<date>/aiscan.json; repairs are verified
+# text-preserving moves or markup-only <sup> adjustments.
 
 def aiscan_load(d):
     try:
@@ -632,8 +638,10 @@ def aiscan_open_count(scan):
 
 
 def run_aiscan(d):
-    """Scan one Sunday and persist the result. Raises RuntimeError with an
-    operator-readable message when the API is unreachable or declines."""
+    """Scan one Sunday and persist the result: the classification reviewer
+    plus the scripture verse-number agent, merged into one findings list
+    (ids f1… and v1…). Raises RuntimeError with an operator-readable
+    message when the API is unreachable or declines."""
     api_key = ENV.get('ANTHROPIC_API_KEY', '')
     if not api_key:
         raise RuntimeError('AI scanner disabled: set ANTHROPIC_API_KEY in '
@@ -642,6 +650,18 @@ def run_aiscan(d):
         guide = json.load(fh)
     model = ENV.get('AISCAN_MODEL') or aiscan.DEFAULT_MODEL
     scan = aiscan.scan_guide(guide, api_key, model=model)
+    verses = aiscan.scan_verses(guide, api_key, model=model)
+    if verses:
+        scan['findings'] += verses['findings']
+        if verses.get('summary'):
+            scan['summary'] = (scan.get('summary') or '').strip()
+            scan['summary'] += (' — ' if scan['summary'] else '') \
+                + 'Scripture verses: ' + verses['summary']
+        for k in ('input', 'output'):
+            a = (scan.get('usage') or {}).get(k)
+            b = (verses.get('usage') or {}).get(k)
+            if a is not None or b is not None:
+                scan.setdefault('usage', {})[k] = (a or 0) + (b or 0)
     scan['at'] = datetime.datetime.now().isoformat(timespec='seconds')
     # a re-scan rebuilds the working findings but keeps the archive
     resolved = (aiscan_load(d) or {}).get('resolvedFindings')
@@ -953,9 +973,12 @@ AISCAN_PAGE = ("""<!DOCTYPE html>
 <div class="card">
   <p>Reviews this Sunday&#8217;s parsed guide with Claude for text the OCR
   pipeline filed under the wrong class &mdash; announcements vs page
-  directions vs worship content. Repairs move the printed text; nothing is
-  rewritten, and every fix is verified against the stored text before it is
-  applied.</p>
+  directions vs worship content. A second agent reads the scripture section
+  passage by passage and, from each reference, checks that every verse is
+  labeled with its superscript verse number &mdash; flagging bare, missing,
+  or wrongly superscripted numbers. Repairs move the printed text or adjust
+  <code>&lt;sup&gt;</code> markup only; nothing is rewritten, and every fix
+  is verified against the stored text before it is applied.</p>
   __KEYNOTE__
   <p><button id="scan" __SCANDIS__>__SCANLABEL__</button>
      <span id="scanmsg"></span></p>
@@ -1098,7 +1121,7 @@ async function pollScan() {
     watching = true;
     $('scan').disabled = true;
     $('scanmsg').textContent = job.status === 'scanning'
-      ? 'Scanning — one Claude request, may take a minute…'
+      ? 'Scanning — the article and scripture-verse agents are reading, may take a minute or two…'
       : 'Queued (' + data.scanning.length + ' scanning, ' + data.waiting + ' waiting)…';
     setTimeout(pollScan, 2000);
     return;
@@ -2029,7 +2052,9 @@ def manage_html():
     out.append('<div class="card"><p><b>AI article scanner</b> — reviews each '
                'Sunday&#8217;s parsed guide for text the OCR pipeline filed '
                'under the wrong class (announcements vs page directions vs '
-               'worship content). Open each Sunday&#8217;s scan page from the '
+               'worship content), and reads the scripture section to check '
+               'every verse is labeled with its superscript verse number. '
+               'Open each Sunday&#8217;s scan page from the '
                'list below to review and apply repairs.</p>'
                '<p><a href="/admin/aiscan">Matching findings across '
                'Sundays</a> — recurring misclassifications grouped, with '
