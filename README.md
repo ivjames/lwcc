@@ -79,6 +79,12 @@ converter server-side — no re-upload needed. Sundays uploaded before
 retention existed have no stored source; re-upload those once. Re-convert
 discards hand-edits to that Sunday (it re-parses the PDF from scratch).
 
+Batch re-conversions are restart-durable: each queued Sunday leaves a
+marker in `queue/reconvert/` until its job settles, and the app resumes
+survivors on startup — a redeploy mid-sweep pauses the batch instead of
+losing it. Conversion workers default to one per core (max 4); set
+`CONVERT_WORKERS` in `.env` to override.
+
 **Re-convert, keep edits** merges instead (`wgconvert/merge.py`): the
 published guide stays the skeleton — the operator's text, structure, and
 classifications win — while any field whose text still matches the printed

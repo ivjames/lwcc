@@ -636,6 +636,58 @@ app_mod.batch_update('b1', done=1)
 assert app_mod.queue_snapshot()['batches'] == [], 'settled batch pruned'
 assert not app_mod.BATCHES, 'nothing left behind'
 
+# --- conversion workers: every core by default (the heavy work is
+# subprocesses), capped at 4, .env override wins.
+_os_cpu = os.cpu_count
+try:
+    os.cpu_count = lambda: 2
+    assert app_mod.convert_workers() == 2, 'a 2-core droplet gets 2 workers'
+    os.cpu_count = lambda: 16
+    assert app_mod.convert_workers() == 4, 'capped at 4'
+    app_mod.ENV['CONVERT_WORKERS'] = '3'
+    assert app_mod.convert_workers() == 3, '.env override wins'
+finally:
+    os.cpu_count = _os_cpu
+    app_mod.ENV.pop('CONVERT_WORKERS', None)
+
+# --- durable re-convert queue: each queued Sunday leaves a marker that a
+# startup rescan resumes (as a fresh batch, so the meter has a denominator);
+# markers for since-unpublished Sundays and junk names are ignored/cleaned.
+_rscratch = tempfile.mkdtemp(prefix='lwcc-reconvq-')
+_saved = {k: getattr(app_mod, k) for k in
+          ('PUBLIC', 'QUEUE_DIR', 'RECONVERT_QUEUE_DIR', 'audit_log')}
+try:
+    app_mod.PUBLIC = os.path.join(_rscratch, 'public')
+    app_mod.QUEUE_DIR = os.path.join(_rscratch, 'queue')
+    app_mod.RECONVERT_QUEUE_DIR = os.path.join(app_mod.QUEUE_DIR, 'reconvert')
+    app_mod.audit_log = lambda entry: None
+    os.makedirs(os.path.join(app_mod.PUBLIC, '2026-02-01'))
+    open(os.path.join(app_mod.PUBLIC, '2026-02-01', 'source.pdf'), 'wb').write(b'%PDF-')
+    os.makedirs(app_mod.RECONVERT_QUEUE_DIR)
+    json.dump({'merge': True}, open(
+        os.path.join(app_mod.RECONVERT_QUEUE_DIR, '2026-02-01'), 'w'))
+    json.dump({}, open(
+        os.path.join(app_mod.RECONVERT_QUEUE_DIR, '2026-03-01'), 'w'))  # no source
+    open(os.path.join(app_mod.RECONVERT_QUEUE_DIR, 'junk-name'), 'w').close()
+    app_mod.rescan_reconverts()
+    assert not os.path.exists(os.path.join(
+        app_mod.RECONVERT_QUEUE_DIR, '2026-03-01')), 'sourceless marker cleaned'
+    assert os.path.exists(os.path.join(
+        app_mod.RECONVERT_QUEUE_DIR, '2026-02-01')), 'live marker kept until settled'
+    _jid = app_mod.CONVERT_Q.get_nowait()
+    _job = app_mod.JOBS[_jid]
+    assert _job['keep'] and _job['merge'] and _job['dateOverride'] == '2026-02-01', \
+        'resumed job carries merge + pinned date'
+    assert _job['file'] == '2026-02-01/source.pdf' and _job.get('batch')
+    assert app_mod.BATCHES[_job['batch']]['total'] == 1, 'resumed batch metered'
+    assert app_mod.CONVERT_Q.empty(), 'junk marker never enqueued'
+finally:
+    app_mod.JOBS.clear()
+    app_mod.BATCHES.clear()
+    for k, v in _saved.items():
+        setattr(app_mod, k, v)
+    shutil.rmtree(_rscratch, ignore_errors=True)
+
 PORT = 8972
 BASE = f'http://127.0.0.1:{PORT}'
 TOKEN = 'test-token-123'
@@ -1363,6 +1415,8 @@ try:
                        data=json.dumps({'dates': ['2026-08-02'], 'merge': True}).encode(),
                        headers={**COOKIE, 'Content-Type': 'application/json'})
     assert status == 200 and json.loads(body)['queued'] == 1, body
+    marker = os.path.join(scratch, 'queue', 'reconvert', '2026-08-02')
+    assert os.path.exists(marker), 'queued re-convert leaves its durable marker'
     for _ in range(240):
         status, body = req('/api/status?ids=', headers=COOKIE)
         qs = json.loads(body)['queue']
@@ -1375,6 +1429,8 @@ try:
     assert merged['announcements'][0]['text'] == \
         'Rewritten by hand — no longer the printed text.', \
         'batch merge kept the hand edit'
+    assert not os.listdir(os.path.join(scratch, 'queue', 'reconvert')), \
+        'settled jobs remove their durable markers'
 
     # Guide <-> original PDF navigation: the week-nav links to /DATE/original
     # when a source is stored; the viewer page links back and embeds the PDF.

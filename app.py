@@ -54,6 +54,9 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, 'public')
 QUEUE_DIR = os.path.join(ROOT, 'queue')          # spooled uploads awaiting conversion
 FAILED_DIR = os.path.join(QUEUE_DIR, 'failed')   # spooled uploads whose conversion failed
+RECONVERT_QUEUE_DIR = os.path.join(QUEUE_DIR, 'reconvert')  # one marker per
+                                                 # queued batch re-conversion,
+                                                 # so a restart resumes them
 DATE_DIR_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 MAX_UPLOAD = 40 * 1024 * 1024
 COOKIE_NAME = 'wg_token'
@@ -358,7 +361,10 @@ def convert_workers():
     configured = (ENV.get('CONVERT_WORKERS') or '').strip()
     if configured.isdigit() and int(configured) > 0:
         return int(configured)
-    return min(4, max(1, (os.cpu_count() or 1) - 1))
+    # The heavy lifting is subprocess work (pdftoppm, tesseract), so use
+    # every core by default — on the 2-core droplet that means bulk sweeps
+    # run two conversions at once instead of one.
+    return min(4, max(1, os.cpu_count() or 1))
 
 
 def job_update(jid, **kw):
@@ -369,8 +375,9 @@ def job_update(jid, **kw):
 # Re-convert batches get a meter: each batch records its size when queued and
 # counts jobs as they settle (converted, failed, or cancelled), so the admin
 # banner can show "37/120, 3 failed" instead of only what's left in the
-# queue. In-memory like the job table — pending re-converts don't survive a
-# restart, so neither must their meter.
+# queue. In-memory like the job table; queued re-converts leave durable
+# markers (queue/reconvert/) and a restart re-registers the survivors as a
+# fresh batch, so the meter picks up where the batch left off.
 BATCHES = {}
 
 
@@ -443,6 +450,53 @@ def convert_worker():
                                     os.path.join(FAILED_DIR, os.path.basename(path) + '.meta'))
                 except OSError:
                     pass
+        if job.get('marker'):            # settled either way: durable marker done
+            try:
+                os.unlink(job['marker'])
+            except OSError:
+                pass
+
+
+def rescan_reconverts():
+    """Re-enqueue batch re-conversions that a restart interrupted. Their
+    jobs point at stored source PDFs rather than spool files, so each
+    queued Sunday leaves a marker in queue/reconvert/ until its job
+    settles; markers found at startup resume the batch — including the job
+    a restart may have killed mid-write, which simply re-runs. Survivors
+    register as a fresh batch so the admin meter keeps a denominator."""
+    if not os.path.isdir(RECONVERT_QUEUE_DIR):
+        return
+    resumed = []
+    for name in sorted(os.listdir(RECONVERT_QUEUE_DIR)):
+        marker = os.path.join(RECONVERT_QUEUE_DIR, name)
+        if not DATE_DIR_RE.match(name) or not os.path.isfile(marker):
+            continue
+        src = os.path.join(PUBLIC, name, 'source.pdf')
+        if not os.path.exists(src):
+            os.unlink(marker)            # unpublished since — nothing to redo
+            continue
+        merge = False
+        try:
+            with open(marker, encoding='utf-8') as fh:
+                merge = bool((json.load(fh) or {}).get('merge'))
+        except (OSError, ValueError):
+            pass
+        resumed.append((name, marker, merge))
+    if not resumed:
+        return
+    bid = (now_pacific().strftime('%Y%m%d%H%M%S') + '-' + os.urandom(4).hex())
+    with JOBS_LOCK:
+        BATCHES[bid] = {'total': len(resumed), 'done': 0, 'failed': 0,
+                        'cancelled': 0,
+                        **({'merge': True} if all(m for _, _, m in resumed) else {})}
+    for name, marker, merge in resumed:
+        jid = (now_pacific().strftime('%Y%m%d%H%M%S') + '-' + os.urandom(4).hex())
+        job_update(jid, status='queued', file=f'{name}/source.pdf',
+                   path=os.path.join(PUBLIC, name, 'source.pdf'),
+                   keep=True, batch=bid, marker=marker,
+                   **({'merge': True, 'dateOverride': name} if merge else {}))
+        CONVERT_Q.put(jid)
+    print(f'resumed {len(resumed)} interrupted re-conversion(s)', flush=True)
 
 
 def queue_snapshot():
@@ -453,7 +507,7 @@ def queue_snapshot():
     empties)."""
     with JOBS_LOCK:
         waiting = sum(1 for j in JOBS.values() if j.get('status') == 'queued')
-        conv = [{k: v for k, v in j.items() if k != 'path'}
+        conv = [{k: v for k, v in j.items() if k not in ('path', 'marker')}
                 for j in JOBS.values() if j.get('status') == 'converting']
         for bid in [bid for bid, b in BATCHES.items() if b['done'] >= b['total']]:
             del BATCHES[bid]
@@ -2923,7 +2977,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             ids = [i for i in urllib.parse.parse_qs(query).get('ids', [''])[0].split(',') if i]
             with JOBS_LOCK:
                 jobs = {i: {k: v for k, v in JOBS.get(i, {'status': 'unknown'}).items()
-                            if k != 'path'} for i in ids}
+                            if k not in ('path', 'marker')} for i in ids}
             self.send_json({'ok': True, 'jobs': jobs, 'queue': queue_snapshot()})
             return
         if path == '/api/aiscan-status':
@@ -3055,6 +3109,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if j.get('keep') and j.get('status') == 'queued':
                         j['status'] = 'cancelled'
                         cleared += 1
+                        if j.get('marker'):
+                            try:         # cancelled: durable marker done too
+                                os.unlink(j['marker'])
+                            except OSError:
+                                pass
                         b = BATCHES.get(j.get('batch'))
                         if b:            # cancelled jobs settle their meter
                             b['done'] += 1
@@ -3161,14 +3220,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 BATCHES[bid] = {'total': len(queued), 'done': 0, 'failed': 0,
                                 'cancelled': 0,
                                 **({'merge': True} if merge else {})}
+        os.makedirs(RECONVERT_QUEUE_DIR, exist_ok=True)
         for date in queued:
             jid = (now_pacific().strftime('%Y%m%d%H%M%S')
                    + '-' + os.urandom(4).hex())
+            # A durable marker per queued Sunday: deleted when its job
+            # settles, rescanned on startup so a restart resumes the batch
+            # instead of losing it.
+            marker = os.path.join(RECONVERT_QUEUE_DIR, date)
+            with open(marker, 'w', encoding='utf-8') as fh:
+                json.dump({'merge': merge}, fh)
             # Merge jobs pin the date so the refresh lands on this Sunday's
             # guide even if the parser would read the date differently.
             job_update(jid, status='queued', file=f'{date}/source.pdf',
                        path=os.path.join(PUBLIC, date, 'source.pdf'),
-                       keep=True, batch=bid,
+                       keep=True, batch=bid, marker=marker,
                        **({'merge': True, 'dateOverride': date} if merge else {}))
             CONVERT_Q.put(jid)
         audit_log({'action': 'reconvert-batch', 'ok': True,
@@ -3401,6 +3467,7 @@ def main():
     args = ap.parse_args()
     os.makedirs(PUBLIC, exist_ok=True)
     rescan_spool()
+    rescan_reconverts()
     workers = convert_workers()
     for i in range(workers):
         threading.Thread(target=convert_worker, daemon=True,
