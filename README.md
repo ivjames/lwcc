@@ -88,7 +88,9 @@ detected one, and the flyer/photo/cover inventory follows the fresh
 conversion (photo captions the operator has set win over the fresh parse's).
 Edited text simply has no canonical match and passes through untouched. A
 "Refresh every Sunday, keep edits" sweep runs the same merge across the
-backlog through the server queue.
+backlog through the server queue; each sweep registers a server-side meter
+that the queue banner and the sweep card show live ("37 of 120 done, 3
+failed" with a progress bar, in any browser) until its last job settles.
 
 Batch the backlog from a terminal:
 

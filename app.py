@@ -366,6 +366,22 @@ def job_update(jid, **kw):
         JOBS.setdefault(jid, {}).update(kw)
 
 
+# Re-convert batches get a meter: each batch records its size when queued and
+# counts jobs as they settle (converted, failed, or cancelled), so the admin
+# banner can show "37/120, 3 failed" instead of only what's left in the
+# queue. In-memory like the job table — pending re-converts don't survive a
+# restart, so neither must their meter.
+BATCHES = {}
+
+
+def batch_update(bid, **deltas):
+    with JOBS_LOCK:
+        b = BATCHES.get(bid) if bid else None
+        if b:
+            for k, v in deltas.items():
+                b[k] = b.get(k, 0) + v
+
+
 def spool_upload(body, fname, date_override=None):
     os.makedirs(QUEUE_DIR, exist_ok=True)
     jid = (now_pacific().strftime('%Y%m%d%H%M%S')
@@ -408,6 +424,7 @@ def convert_worker():
                        date=guide['date'], dateISO=guide['dateISO'],
                        url=f"/{guide['dateISO']}/", replaced=replaced,
                        warnings=guide['warnings'], notes=guide.get('notes') or [])
+            batch_update(job.get('batch'), done=1)
             if not keep:
                 os.unlink(path)
                 if os.path.exists(path + '.meta'):
@@ -416,6 +433,7 @@ def convert_worker():
             traceback.print_exc()
             audit_log({'ok': False, **extra, 'error': str(e)})
             job_update(jid, status='failed', error=str(e))
+            batch_update(job.get('batch'), done=1, failed=1)
             if not keep:
                 try:    # keep the PDF for a retry after the parser learns it
                     os.makedirs(FAILED_DIR, exist_ok=True)
@@ -429,12 +447,18 @@ def convert_worker():
 
 def queue_snapshot():
     """Live queue state for the admin page and /api/status: how many jobs
-    wait, and which files are converting right now (one per worker)."""
+    wait, which files are converting right now (one per worker), and the
+    meter of every re-convert batch still in flight (finished batches are
+    pruned here — the banner they fed reloads the page when the queue
+    empties)."""
     with JOBS_LOCK:
         waiting = sum(1 for j in JOBS.values() if j.get('status') == 'queued')
         conv = [{k: v for k, v in j.items() if k != 'path'}
                 for j in JOBS.values() if j.get('status') == 'converting']
-    return {'waiting': waiting, 'converting': conv}
+        for bid in [bid for bid, b in BATCHES.items() if b['done'] >= b['total']]:
+            del BATCHES[bid]
+        batches = [dict(b) for b in BATCHES.values()]
+    return {'waiting': waiting, 'converting': conv, 'batches': batches}
 
 
 def rescan_spool():
@@ -1829,32 +1853,27 @@ async function pollBanner() {
     const data = await res.json();
     const qs = data.queue || {};
     const conv = qs.converting || [];
-    const remaining = (qs.waiting || 0) + conv.length;
-    if (!remaining) {
-      sessionStorage.removeItem('wgBatchTotal');
+    if (!qs.waiting && !conv.length) {
       if (!running && !queue.length) location.reload();
       return;
     }
-    // A batch queued from this browser stores its size, giving the meter a
-    // denominator; a queue larger than that total is someone else's work,
-    // so fall back to plain counts rather than showing a bogus fraction.
-    let total = parseInt(sessionStorage.getItem('wgBatchTotal') || '', 10) || 0;
-    if (total && remaining > total) {
-      sessionStorage.removeItem('wgBatchTotal');
-      total = 0;
-    }
-    const done = total ? total - remaining : 0;
-    const meter = total
-      ? done + ' of ' + total + ' done <progress max="' + total + '" value="' +
-        done + '"></progress> '
-      : '';
+    // Each re-convert batch carries its own server-side meter (total, done,
+    // failed, cancelled), so every browser sees the same fraction — no
+    // client-side bookkeeping, and plain uploads never skew it.
+    const meters = (qs.batches || []).map(b =>
+      (b.merge ? 'Refreshing (keep edits)' : 'Re-converting') + ': ' +
+      b.done + ' of ' + b.total + ' done' +
+      (b.failed ? ', ' + b.failed + ' failed' : '') +
+      (b.cancelled ? ', ' + b.cancelled + ' cancelled' : '') +
+      ' <progress max="' + b.total + '" value="' + b.done + '"></progress> '
+    ).join('');
     const detail = qs.waiting + ' file' + (qs.waiting === 1 ? '' : 's') + ' waiting' +
       (conv.length ? ', converting ' +
         conv.map(c => '<b>' + escHtml(c.file || '…') + '</b>').join(', ') : '');
-    _qb.innerHTML = meter + detail;
+    _qb.innerHTML = meters + detail;
     if (_sw) {
       _sw.hidden = false;
-      _sw.innerHTML = 'Server queue: ' + meter + detail +
+      _sw.innerHTML = 'Server queue: ' + meters + detail +
         ' — this page reloads when the queue empties.';
     }
   } catch (e) { /* transient — keep polling */ }
@@ -1901,11 +1920,9 @@ for (const _id of ['reconvertall', 'reconverteverything', 'refresheverything']) 
       });
       const data = await res.json().catch(() => ({ok: false}));
       if (!data.ok) throw new Error(data.error || res.statusText);
-      // The server queue takes it from here — remember the batch size so
-      // the reloaded page's meter has a denominator; the banner and the
-      // sweep-card status show live progress and this page can be closed.
-      sessionStorage.setItem('wgBatchTotal',
-        String((data.queued || 0) + (data.alreadyQueued || []).length));
+      // The server queue takes it from here — it registered the batch's
+      // meter, so the banner and the sweep-card status show live progress
+      // in any browser, and this page can be closed.
       location.reload();
     } catch (e) {
       alert('Could not queue re-conversions: ' + e.message);
@@ -2399,6 +2416,16 @@ def failed_uploads_html():
             + ''.join(items) + '</ul></div>')
 
 
+def batch_meter_html(b):
+    """One re-convert batch's meter for the queue banner (the JS poll renders
+    the same shape client-side — keep them in step)."""
+    label = 'Refreshing (keep edits)' if b.get('merge') else 'Re-converting'
+    extra = ((f', {b["failed"]} failed' if b.get('failed') else '')
+             + (f', {b["cancelled"]} cancelled' if b.get('cancelled') else ''))
+    return (f'{label}: {b["done"]} of {b["total"]} done{extra} '
+            f'<progress max="{b["total"]}" value="{b["done"]}"></progress> ')
+
+
 def recent_uploads_html():
     """Compact last-few-uploads card for the bottom of /admin — the batch
     results table in the upload card is per-visit, this one survives leaving
@@ -2413,8 +2440,9 @@ def recent_uploads_html():
             names = ', '.join(f"<b>{esc(c.get('file') or '…')}</b>"
                               for c in snap['converting'])
             now = f', converting {names}'
+        meters = ''.join(batch_meter_html(b) for b in snap['batches'])
         active = (f'<p class="warn"><b>Server queue active:</b> '
-                  f'<span id="queuebanner">{snap["waiting"]} '
+                  f'<span id="queuebanner">{meters}{snap["waiting"]} '
                   f'file{"s" if snap["waiting"] != 1 else ""} '
                   f'waiting{now}</span> — updates live; finished results appear '
                   f'below and in the history, and this page reloads when the '
@@ -3005,6 +3033,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if j.get('keep') and j.get('status') == 'queued':
                         j['status'] = 'cancelled'
                         cleared += 1
+                        b = BATCHES.get(j.get('batch'))
+                        if b:            # cancelled jobs settle their meter
+                            b['done'] += 1
+                            b['cancelled'] += 1
             audit_log({'action': 'reconvert-clear', 'ok': True, 'cleared': cleared})
             self.send_json({'ok': True, 'cleared': cleared})
             return
@@ -3096,14 +3128,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 already.append(date)     # a re-convert of this Sunday is
                 continue                 # queued or running — don't stack
             pending.add(fname)
+            queued.append(date)
+        # The batch meter must exist before its first job can finish, so the
+        # batch is registered up front and the jobs enqueued after.
+        bid = None
+        if queued:
+            bid = (now_pacific().strftime('%Y%m%d%H%M%S')
+                   + '-' + os.urandom(4).hex())
+            with JOBS_LOCK:
+                BATCHES[bid] = {'total': len(queued), 'done': 0, 'failed': 0,
+                                'cancelled': 0,
+                                **({'merge': True} if merge else {})}
+        for date in queued:
             jid = (now_pacific().strftime('%Y%m%d%H%M%S')
                    + '-' + os.urandom(4).hex())
             # Merge jobs pin the date so the refresh lands on this Sunday's
             # guide even if the parser would read the date differently.
-            job_update(jid, status='queued', file=fname, path=src, keep=True,
+            job_update(jid, status='queued', file=f'{date}/source.pdf',
+                       path=os.path.join(PUBLIC, date, 'source.pdf'),
+                       keep=True, batch=bid,
                        **({'merge': True, 'dateOverride': date} if merge else {}))
             CONVERT_Q.put(jid)
-            queued.append(date)
         audit_log({'action': 'reconvert-batch', 'ok': True,
                    **({'merge': True} if merge else {}),
                    'queued': len(queued),
