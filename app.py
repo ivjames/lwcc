@@ -83,16 +83,17 @@ def now_pacific():
 
 
 def fmt_at(s):
-    """A stored timestamp, for display: offset-stamped entries show as
-    Pacific wall-clock with a PT label; older stamps from the server's own
-    clock have no offset recorded and pass through unlabeled."""
+    """A stored timestamp, for display: always Pacific wall-clock with a PT
+    label. New stamps carry their offset; legacy stamps have none recorded —
+    they came from the droplet's clock, which runs UTC, so naive parses as
+    UTC and converts too."""
     s = str(s or '')
     try:
         dt = datetime.datetime.fromisoformat(s)
     except ValueError:
         return s
     if dt.tzinfo is None:
-        return s
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
     if PACIFIC:
         dt = dt.astimezone(PACIFIC)
     return dt.strftime('%Y-%m-%dT%H:%M:%S') + ' PT'
@@ -1055,9 +1056,15 @@ function render() {
   const box = $('results');
   if (!SCAN) { box.innerHTML = ''; return; }
   const open = SCAN.findings.filter(f => f.status === 'open');
-  // offset-stamped scan times are Pacific; show them as such
-  const fmtAt = s => String(s == null ? '' : s)
-    .replace(/[+-]\d{2}:\d{2}$/, ' PT').replace('T', ' ');
+  // Scan times display as Pacific wall-clock. Stamps without an offset are
+  // legacy ones from the droplet's clock, which runs UTC — parse them as
+  // UTC (append Z) so they convert instead of showing 7-8 hours off.
+  const fmtAt = s => {
+    if (!s) return '';
+    const d = new Date(/[+-]\d{2}:\d{2}$|Z$/.test(s) ? s : s + 'Z');
+    if (isNaN(d)) return String(s);
+    return d.toLocaleString('sv-SE', {timeZone: 'America/Los_Angeles'}) + ' PT';
+  };
   let html = '<div class="card"><p><b>Scan from ' + esc(fmtAt(SCAN.at)) + '</b>' +
     ' <span class="meta">(' + esc(SCAN.model) + ')</span></p>' +
     '<p>' + esc(SCAN.summary) + '</p>';
