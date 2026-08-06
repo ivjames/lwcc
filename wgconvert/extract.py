@@ -35,6 +35,7 @@ class Run:
     b: bool = False
     i: bool = False
     sup: bool = False
+    color: str = '#000000'   # printed ink color from the fontspec
 
 
 @dataclass
@@ -196,8 +197,9 @@ def _finish_line(cluster, page):
                     and not runs[-1].text.endswith((' ', '\t', '\n'))
                     and not text[:1].isspace()):
                 text = ' ' + text
-            run = Run(text=text, b=r.b, i=r.i, sup=sup)
-            if runs and runs[-1].b == run.b and runs[-1].i == run.i and runs[-1].sup == run.sup:
+            run = Run(text=text, b=r.b, i=r.i, sup=sup, color=it['font'].color)
+            if runs and runs[-1].b == run.b and runs[-1].i == run.i \
+                    and runs[-1].sup == run.sup and runs[-1].color == run.color:
                 runs[-1].text += run.text
             else:
                 runs.append(run)

@@ -1022,6 +1022,12 @@ try:
     g['dateISO'] = '1999-01-01'                            # protected: ignored
     g['warnings'] = ['forged']                             # protected: ignored
     g['bogusKey'] = {'x': 1}                               # unknown: dropped
+    g['announcements'][1]['text'] = (
+        'Accent <span class="fc-purple">kept</span> '
+        '<span class="fc-hack">rogue class</span> '
+        '<span onclick="x()" class="fc-gold">attributes</span>')
+    g['announcements'][1]['color'] = 'purple'              # accent: whitelisted
+    g['announcements'][2]['color'] = 'hotpink'             # off-palette: dropped
     status, body = req('/api/save',
                        data=json.dumps({'date': '2026-08-09', 'guide': g}).encode(),
                        headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/json'})
@@ -1033,6 +1039,13 @@ try:
     assert saved['dateISO'] == '2026-08-02', 'dateISO from file (fixture is a copy), forge ignored'
     assert saved['warnings'] == [], 'warnings come from the file, not the form'
     assert 'bogusKey' not in saved
+    assert '<span class="fc-purple">kept</span>' in saved['announcements'][1]['text'], \
+        'palette accent span survives the sanitizer'
+    assert '<span class="fc-hack">' not in saved['announcements'][1]['text'] \
+        and '<span onclick' not in saved['announcements'][1]['text'], \
+        'off-vocabulary spans neutralized'
+    assert saved['announcements'][1]['color'] == 'purple'
+    assert saved['announcements'][2]['color'] is None, 'off-palette accent dropped'
     page = open(os.path.join(scratch, 'public', '2026-08-09', 'index.html')).read()
     assert 'Edited welcome <b>kept</b>' in page, 'save re-rendered the page'
     assert 'alert(1)' not in page or '<script>alert' not in page
