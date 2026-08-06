@@ -1603,8 +1603,9 @@ ADMIN_PAGE = ("""<!DOCTYPE html>
   </thead><tbody></tbody></table>
   <div id="summary"></div>
 </div>
-__HISTORY__
+__FAILED__
 __REVIEW__
+__HISTORY__
 <p><a href="/">Current guide</a> · <a href="/archive">Archive</a> ·
    <a href="/admin/logout">Sign out</a></p>
 <script>
@@ -2184,9 +2185,10 @@ def failed_uploads_html():
 
 
 def recent_uploads_html():
-    """Compact last-few-uploads card for /admin — the batch results table
-    above is per-visit, this one survives leaving the page. When the server
-    queue is still working, say so up top (this page reloads fresh)."""
+    """Compact last-few-uploads card for the bottom of /admin — the batch
+    results table in the upload card is per-visit, this one survives leaving
+    the page. When the server queue is still working, say so (this page
+    reloads fresh when it empties)."""
     entries = upload_history(limit=8)
     snap = queue_snapshot()
     active = ''
@@ -2677,9 +2679,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == '/admin':
             if self.require_admin():
                 self.send_page(ADMIN_PAGE
-                               .replace('__HISTORY__',
-                                        failed_uploads_html() + recent_uploads_html())
-                               .replace('__REVIEW__', manage_html()),
+                               .replace('__FAILED__', failed_uploads_html())
+                               .replace('__REVIEW__', manage_html())
+                               .replace('__HISTORY__', recent_uploads_html()),
                                cache='no-store')
             return
         if path == '/admin/history':
