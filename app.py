@@ -992,7 +992,8 @@ function render() {
       '<div>' + esc(f.issue) + '</div>' +
       '<blockquote>' + esc(f.quote) + '</blockquote>' +
       '<div class="meta">' + esc(f.path) +
-      (f.fix ? ' &middot; fix: ' + esc(f.fix.op) : ' &middot; no mechanical fix — edit by hand') +
+      (f.fix ? ' &middot; fix: ' + esc(f.fix.op)
+        : ' &middot; no mechanical fix — <a href="/admin/edit/__DATE__">edit by hand</a>') +
       (f.statusNote ? ' &middot; ' + esc(f.statusNote) : '') +
       '</div></div>').join('');
     const reopenable = SCAN.findings.filter(f =>
@@ -1162,6 +1163,8 @@ AISCAN_AGG_PAGE = ("""<!DOCTYPE html>
     background:#eaf1f5;border:1px solid #76a2bf;border-radius:6px;
     padding:2px 8px;margin:2px 6px 2px 0;display:inline-block;
     text-decoration:none;color:#054253}
+  a.editlink{font-family:Arial,Helvetica,sans-serif;font-size:.78em;
+    margin:2px 10px 2px -2px;display:inline-block}
   .meta{color:#54574a;font-size:.88em}
   button.mini{padding:4px 12px;font-size:.82em;margin-right:8px;background:#3f6b82}
   h2.sec{font-family:Arial,Helvetica,sans-serif;font-size:.95rem;letter-spacing:2px;
@@ -1226,7 +1229,10 @@ function groupHtml(g, gi) {
     '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '"' +
     (i.note ? ' title="' + esc(i.note) + '"' : '') + '>' +
     esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
-    esc(i.status) + '</span></a>';
+    esc(i.status) + '</span></a>' +
+    (i.status === 'open' && !i.fixable
+      ? '<a class="editlink" href="/admin/edit/' + esc(i.date) +
+        '" title="No mechanical fix — edit this Sunday by hand">edit</a>' : '');
   let body;
   if (g.kind === 'exact') {
     body = '<div>' + esc(g.issue) + '</div>' +
