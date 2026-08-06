@@ -457,6 +457,23 @@ def rerender_date(d):
         fh.write(html)
 
 
+def rerender_all():
+    """Rebuild every published Sunday's page from its stored guide.json with
+    the current template — a template/CSS or renderer upgrade reaches the
+    whole backlog without re-converting a single PDF or touching hand-edits.
+    (Changes that need re-extraction from the PDF — like detecting printed
+    accent colors — are the re-convert sweeps' job, not this one's.)
+    Returns (rendered_dates, {date: error})."""
+    rendered, failed = [], {}
+    for d in published_dates():
+        try:
+            rerender_date(d)
+            rendered.append(d)
+        except Exception as e:
+            failed[d] = str(e)
+    return rendered, failed
+
+
 def unpublish_date(d):
     """Take a Sunday off the site without destroying it: the folder is renamed
     aside (restore by renaming it back and re-uploading is never needed)."""
@@ -1813,7 +1830,7 @@ for (const _id of ['reconvertall', 'reconverteverything', 'refresheverything']) 
 // AI scans run from a server-side queue (up to 10 at a time) that survives
 // restarts — queue the batch, then watch until it drains.
 const _ab = document.getElementById('aiscanbanner');
-const _as = document.getElementById('aiscanall');
+const _scanBtns = [...document.querySelectorAll('.aiscanqueue')];
 async function pollAiscan() {
   try {
     const res = await fetch('/api/aiscan-status');
@@ -1822,7 +1839,7 @@ async function pollAiscan() {
     if (!data.waiting && !data.scanning.length) { location.reload(); return; }
     const txt = data.scanning.length + ' scanning, ' + data.waiting + ' waiting…';
     if (_ab) _ab.textContent = 'AI scans in progress: ' + txt;
-    if (_as && _as.disabled) _as.textContent = 'AI scans: ' + txt;
+    for (const b of _scanBtns) if (b.disabled) b.textContent = 'AI scans: ' + txt;
   } catch (e) { /* transient — keep polling */ }
   setTimeout(pollAiscan, 3000);
 }
@@ -1847,12 +1864,12 @@ if (_ac) _ac.addEventListener('click', async () => {
   }
 });
 
-if (_as) _as.addEventListener('click', async () => {
-  const dates = _as.dataset.dates.split(' ').filter(Boolean);
-  if (!confirm('AI-scan ' + dates.length + ' Sundays? This runs one Claude ' +
-               'API request per Sunday, up to 10 at a time.')) return;
-  _as.disabled = true;
-  _as.textContent = 'Queueing ' + dates.length + ' scans…';
+for (const _btn of _scanBtns) _btn.addEventListener('click', async () => {
+  const dates = _btn.dataset.dates.split(' ').filter(Boolean);
+  if (!confirm('AI-scan ' + dates.length + ' Sundays? This runs the agents ' +
+               'once per Sunday, up to 10 Sundays at a time.')) return;
+  _btn.disabled = true;
+  _btn.textContent = 'Queueing ' + dates.length + ' scans…';
   try {
     const res = await fetch('/api/aiscan', {
       method: 'POST',
@@ -1866,7 +1883,27 @@ if (_as) _as.addEventListener('click', async () => {
     pollAiscan();
   } catch (e) {
     alert('Could not queue AI scans: ' + e.message);
-    _as.disabled = false;
+    _btn.disabled = false;
+  }
+});
+
+const _ra = document.getElementById('rerenderall');
+if (_ra) _ra.addEventListener('click', async () => {
+  _ra.disabled = true;
+  _ra.textContent = 'Re-rendering…';
+  try {
+    const res = await fetch('/api/rerender-all', {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: '{}'});
+    const data = await res.json().catch(() => ({ok: false}));
+    if (!data.ok) throw new Error(data.error || res.statusText);
+    const bad = data.failed ? Object.keys(data.failed) : [];
+    alert(data.rendered + ' Sunday(s) re-rendered with the current template.' +
+          (bad.length ? ' Failed: ' + bad.join(', ') : ''));
+    location.reload();
+  } catch (e) {
+    alert('Re-render failed: ' + e.message);
+    _ra.disabled = false;
+    _ra.textContent = 'Re-render every Sunday';
   }
 });
 
@@ -2037,9 +2074,15 @@ def manage_html():
     scan_all = ''
     if key_set and unscanned:
         n = len(unscanned.split())
-        scan_all = (f'<p><button class="mini" id="aiscanall" '
+        scan_all = (f'<p><button class="mini aiscanqueue" id="aiscanall" '
                     f'data-dates="{unscanned}">Scan all unscanned ({n})'
-                    f'</button> — runs one Claude request per Sunday.</p>')
+                    f'</button> — runs the agents once per Sunday.</p>')
+    if key_set and any(scans[d] is not None for d in dates):
+        scan_all += (f'<p><button class="mini aiscanqueue" id="aiscanredo" '
+                     f'data-dates="{" ".join(dates)}">Re-scan every Sunday '
+                     f'({len(dates)})</button> — re-runs both agents on the '
+                     f'whole backlog after a scanner upgrade; open findings '
+                     f'are rebuilt, resolved history is kept.</p>')
     key_note = ('' if key_set else
                 '<p class="warn">Scanning is disabled: set '
                 '<code>ANTHROPIC_API_KEY</code> in <code>.env</code> and '
@@ -2110,18 +2153,24 @@ def manage_html():
     src_dates = [d for d in dates
                  if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf'))]
     sweep = ''
+    if dates:
+        sweep += (f'<p><button class="mini" id="rerenderall">Re-render every '
+                  f'Sunday ({len(dates)})</button> — rebuilds each page from '
+                  f'its stored guide.json with the current template, so a '
+                  f'template or styling upgrade reaches the whole backlog '
+                  f'without re-converting; hand-edits are kept.</p>')
     if src_dates:
-        sweep = (f'<p><button class="mini" id="refresheverything"{busy} '
-                 f'data-dates="{" ".join(src_dates)}">Refresh every Sunday, '
-                 f'keep edits ({len(src_dates)})</button> — merge re-convert '
-                 f'through the server queue: hand-edits kept, unedited text '
-                 f'gains the converter&#8217;s latest markup and accent '
-                 f'colors.</p>'
-                 f'<p><button class="mini" id="reconverteverything"{busy} '
-                 f'data-dates="{" ".join(src_dates)}">Re-convert every Sunday '
-                 f'({len(src_dates)})</button> — full sweep through the server '
-                 f'queue after a converter fix, flagged or not '
-                 f'(discards hand-edits).</p>')
+        sweep += (f'<p><button class="mini" id="refresheverything"{busy} '
+                  f'data-dates="{" ".join(src_dates)}">Refresh every Sunday, '
+                  f'keep edits ({len(src_dates)})</button> — merge re-convert '
+                  f'through the server queue: hand-edits kept, unedited text '
+                  f'gains the converter&#8217;s latest markup and accent '
+                  f'colors.</p>'
+                  f'<p><button class="mini" id="reconverteverything"{busy} '
+                  f'data-dates="{" ".join(src_dates)}">Re-convert every Sunday '
+                  f'({len(src_dates)})</button> — full sweep through the server '
+                  f'queue after a converter fix, flagged or not '
+                  f'(discards hand-edits).</p>')
     out.append('<div class="card"><p><b>Published Sundays</b> — re-render '
                'rebuilds the page from its guide.json (after hand-edits); '
                're-convert re-runs the converter on the stored source PDF '
@@ -2812,6 +2861,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.handle_login(body)
             return
         if path not in ('/api/upload', '/api/retry', '/api/review', '/api/rerender',
+                        '/api/rerender-all',
                         '/api/reconvert', '/api/reconvert-merge',
                         '/api/reconvert-batch',
                         '/api/reconvert-clear', '/api/unpublish', '/api/save',
@@ -2845,6 +2895,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         cleared += 1
             audit_log({'action': 'reconvert-clear', 'ok': True, 'cleared': cleared})
             self.send_json({'ok': True, 'cleared': cleared})
+            return
+        if path == '/api/rerender-all':
+            # Rebuild every published page from its guide.json with the
+            # current template — no PDFs touched, hand-edits kept.
+            rendered, failed = rerender_all()
+            audit_log({'action': 'rerender-all', 'ok': not failed,
+                       'rendered': len(rendered),
+                       **({'failed': failed} if failed else {})})
+            self.send_json({'ok': True, 'rendered': len(rendered),
+                            **({'failed': failed} if failed else {})})
             return
         if path in ('/api/aiscan', '/api/aiscan-apply'):
             self.handle_aiscan(path, body)

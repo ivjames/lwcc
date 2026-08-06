@@ -1160,6 +1160,7 @@ try:
     status, body = req('/admin', headers=COOKIE)
     assert b'Re-convert' in body, 'admin lists the re-convert action'
     assert b'id="reconverteverything"' in body, 'full-sweep re-convert offered'
+    assert b'id="rerenderall"' in body, 'bulk re-render offered'
     with open(os.path.join(out_dir, 'index.html'), 'w') as fh:
         fh.write('stale')
     status, body = action('reconvert', '2026-08-02')
@@ -1301,6 +1302,30 @@ try:
     assert status == 200 and json.loads(body)['ok'], body
     assert os.path.getmtime(idx) >= before
     assert b'Love Unleashed' in open(idx, 'rb').read()
+
+    # Re-render all: one click rebuilds every published Sunday's page from
+    # its stored guide.json with the current template — a template or
+    # styling upgrade reaches the whole backlog without re-converting a
+    # single PDF; hand-edits live in guide.json and are kept.
+    status, body = req('/api/rerender-all', data=b'{}',
+                       headers={'Content-Type': 'application/json'})
+    assert status == 401, 'bulk re-render gated like every admin API'
+    idx02 = os.path.join(scratch, 'public', '2026-08-02', 'index.html')
+    for p in (idx, idx02):
+        with open(p, 'w') as fh:
+            fh.write('stale')
+    status, body = req('/api/rerender-all', data=b'{}',
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    assert status == 200, (status, body)
+    ra = json.loads(body)
+    assert ra['ok'] and ra['rendered'] >= 2 and 'failed' not in ra, ra
+    assert b'Love Unleashed' in open(idx, 'rb').read() \
+        and b'Love Unleashed' in open(idx02, 'rb').read(), \
+        'every page rebuilt from its stored guide.json'
+    entries = [json.loads(l) for l in open(log_path)]
+    assert any(e.get('action') == 'rerender-all' and e.get('ok')
+               and e.get('rendered') == ra['rendered'] for e in entries), \
+        'bulk re-render audited'
 
     # Unpublish sets the folder aside (dot-prefixed, unserved) and the front
     # page falls back to the previous newest Sunday.
