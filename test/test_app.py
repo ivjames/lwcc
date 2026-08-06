@@ -615,6 +615,27 @@ finally:
         setattr(app_mod, k, v)
     shutil.rmtree(_qscratch, ignore_errors=True)
 
+# --- re-convert batch meter: a batch is registered (with its size) before
+# its jobs enqueue; jobs settle it as they finish, fail, or are cancelled;
+# the queue snapshot reports it live and prunes it once fully settled.
+app_mod.BATCHES['b1'] = {'total': 3, 'done': 0, 'failed': 0, 'cancelled': 0}
+app_mod.batch_update('b1', done=1)
+app_mod.batch_update('b1', done=1, failed=1)
+app_mod.batch_update(None, done=1)        # plain uploads carry no batch
+app_mod.batch_update('gone', done=1)      # a pruned/unknown id is a no-op
+_snap = app_mod.queue_snapshot()
+assert _snap['batches'] == [{'total': 3, 'done': 2, 'failed': 1, 'cancelled': 0}], _snap
+assert app_mod.batch_meter_html(_snap['batches'][0]) == (
+    'Re-converting: 2 of 3 done, 1 failed '
+    '<progress max="3" value="2"></progress> ')
+assert app_mod.batch_meter_html(
+    {'total': 5, 'done': 4, 'merge': True, 'cancelled': 2}) == (
+    'Refreshing (keep edits): 4 of 5 done, 2 cancelled '
+    '<progress max="5" value="4"></progress> ')
+app_mod.batch_update('b1', done=1)
+assert app_mod.queue_snapshot()['batches'] == [], 'settled batch pruned'
+assert not app_mod.BATCHES, 'nothing left behind'
+
 PORT = 8972
 BASE = f'http://127.0.0.1:{PORT}'
 TOKEN = 'test-token-123'
@@ -1209,13 +1230,19 @@ try:
     assert rb['ok'] and rb['queued'] == 1 and rb['skipped'] == ['1999-01-01'], rb
     assert rb['alreadyQueued'] == ['2026-08-02'], 'duplicate dates never stack'
     qs = None
+    seen_batch = None
     for _ in range(240):
         status, body = req('/api/status?ids=', headers=COOKIE)
         qs = json.loads(body)['queue']
+        if qs.get('batches'):
+            seen_batch = qs['batches'][0]
         if not qs['waiting'] and not qs['converting']:
             break
         time.sleep(0.5)
     assert qs and not qs['waiting'] and not qs['converting'], qs
+    assert seen_batch == {'total': 1, 'done': 0, 'failed': 0, 'cancelled': 0}, \
+        (seen_batch, 'batch meter visible in the snapshot while in flight')
+    assert qs['batches'] == [], 'settled batch pruned from the snapshot'
     g02 = json.load(open(gj02))
     assert g02['warnings'] == [], 'batch re-convert regenerated the guide'
     assert os.path.exists(os.path.join(scratch, 'public', '2026-08-02', 'source.pdf')), \
@@ -1289,8 +1316,8 @@ try:
     status, body = req('/admin', headers=COOKIE)
     assert b'reconvert-merge' in body and b'id="refresheverything"' in body, \
         'admin offers the keep-edits re-convert, per Sunday and as a sweep'
-    assert b'id="sweepstatus"' in body and b'wgBatchTotal' in body, \
-        'batch progress meter: sweep-card status line + stored batch size'
+    assert b'id="sweepstatus"' in body and b'qs.batches' in body, \
+        'batch progress meter: sweep-card status line, fed by the server-side batches'
     mgj = os.path.join(out_dir, 'guide.json')
     g = json.load(open(mgj))
     # Simulate a pre-color, hand-edited Sunday: strip every accent, rewrite
