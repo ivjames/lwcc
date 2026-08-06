@@ -38,8 +38,11 @@ OPS = ('item_to_stage', 'stage_to_item', 'item_to_announcement',
        'announcement_to_stage', 'event_to_announcement',
        'welcome_to_announcement')
 
-# the scripture verse-number agent's markup-only fixes
-VERSE_OPS = ('sup_verse', 'unsup_verse')
+# The scripture verse-number agent's fixes. sup_verse/unsup_verse are
+# markup-only; fix_verse/insert_verse restore a printed verse number that
+# OCR garbled into other glyphs or dropped — the replacement is always just
+# <sup>N</sup>, never other words.
+VERSE_OPS = ('sup_verse', 'unsup_verse', 'fix_verse', 'insert_verse')
 
 SYSTEM_PROMPT = """\
 You are the quality reviewer for a church worship-guide conversion pipeline.
@@ -163,6 +166,14 @@ detection sometimes misses: a verse number is left as a bare digit in the
 running text ("13 Now when Jesus heard…"), was dropped by OCR entirely, or a
 number that is not a verse number got wrapped in <sup> by mistake.
 
+OCR also often misreads the tiny superscript digits as other glyphs
+entirely: apostrophes and quotes (' ‘ ’ "), degree signs (7° for 20, ?°),
+asterisks, percent and ampersand signs, &gt;, or stray letters — sometimes
+fused onto the next word ("Sand they were baptized" is the printed
+"6 and they were baptized"; "'8As he walked" is "18 As he walked"). The
+passage reference plus the numbers already present around it tell you
+exactly which number belongs at each spot.
+
 Read every scripture item below. Each "ref" block names a passage
 (book chapter:verse-range); the "verse" blocks after it carry that passage's
 text. From the reference, work out exactly which verse numbers the text must
@@ -176,23 +187,37 @@ Report ONLY verse-number labeling problems:
 - superscripted (wrongly): a <sup>-wrapped number that is not one of this
   passage's verse numbers — a time, a chapter number stuck mid-text, page
   furniture → fix unsup_verse.
-- missing: the expected number appears nowhere in the text (OCR dropped it)
-  → op "none"; never invent text. Also use "none" for any other verse
-  problem no markup-only fix expresses.
+- garbled: the glyphs standing where the printed verse number was are not
+  its digits (OCR misread them) → fix fix_verse: "garbled" is the exact
+  misread run copied verbatim (including any <sup> tags around or inside
+  it), "number" is the true printed number; the run is replaced by
+  <sup>number</sup> and nothing else. A wrong number inside <sup> ("1!"
+  for 11) is also fix_verse, with the tags in "garbled".
+- missing: the number appears nowhere — not even as garbled glyphs — but
+  you know exactly which verse starts where → fix insert_verse; "quote"
+  must begin exactly at the verse's first words so the number can be
+  inserted in front of them. If you cannot anchor the spot, op "none".
 
 Hard rules:
-- The printed page is the source of truth. Never rewrite, reorder, correct,
-  or paraphrase text. The only fixes are markup-only: wrapping an existing
-  bare number in <sup></sup>, or unwrapping a wrongly wrapped one.
+- The printed page is the source of truth: these fixes RESTORE what the
+  printer set — a superscript verse number — and may touch nothing else.
+  Never rewrite, reorder, correct, or paraphrase words, even obvious OCR
+  misspellings next to the number ("lmmediately"): fix the number, leave
+  the word.
+- "garbled" must contain ONLY the glyphs standing where the number was.
+  Include a letter only when it is the misread number fused onto an intact
+  word ("Sand" → garbled "S", leaving the real word "and"). Never take
+  letters that belong to the word itself — if removing them would leave a
+  mangled fragment, the fix is not mechanical: use op "none".
 - Do NOT flag numbers that belong to the scripture prose itself (counts,
   measures, years, times) — they are only a problem when wrongly inside
   <sup>.
 - Translation section headings printed inside the text ("The Cost of
   Discipleship", "A Song of Ascents.") are normal and never a finding.
 - "quote" must be a verbatim excerpt (at most 120 characters) copied exactly
-  from the verse text — the number in question plus the first words of its
-  verse — so the fix can be located and verified mechanically even when the
-  same digits occur elsewhere in the passage.
+  from the verse text — the number (or garbled run) plus the first words of
+  its verse — so the fix can be located and verified mechanically even when
+  the same glyphs occur elsewhere in the passage.
 - Address text by the indices given in the JSON: "i" for the order item,
   "j" for the body block; "number" is the verse number itself.
 - confidence: "high" = certain, safe to fix mechanically; "medium" =
@@ -213,7 +238,8 @@ VERSE_FINDINGS_SCHEMA = {
                     'quote': {'type': 'string'},
                     'issue': {'type': 'string'},
                     'current': {'type': 'string',
-                                'enum': ['bare', 'superscripted', 'missing']},
+                                'enum': ['bare', 'superscripted', 'garbled',
+                                         'missing']},
                     'proposed': {'type': 'string',
                                  'enum': ['superscript', 'plain', 'flag']},
                     'confidence': {'type': 'string',
@@ -226,9 +252,10 @@ VERSE_FINDINGS_SCHEMA = {
                             'orderIndex': {'type': ['integer', 'null']},
                             'blockIndex': {'type': ['integer', 'null']},
                             'number': {'type': ['integer', 'null']},
+                            'garbled': {'type': ['string', 'null']},
                         },
                         'required': ['op', 'orderIndex', 'blockIndex',
-                                     'number'],
+                                     'number', 'garbled'],
                         'additionalProperties': False,
                     },
                 },
@@ -525,6 +552,78 @@ def _unsup_verse_text(text, number, quote):
     return text[:s] + n + text[e:], None
 
 
+def _put_sup(text, s, e, n):
+    """Replace text[s:e] with <sup>n</sup>, restoring the printed space
+    when the number was fused onto the following word."""
+    rep = '<sup>' + n + '</sup>'
+    if e < len(text) and (text[e].isalnum() or text[e] == '<'):
+        rep += ' '
+    return text[:s] + rep + text[e:]
+
+
+def _fix_verse_text(text, number, garbled, quote):
+    """Replace an OCR-garbled verse-number run with the printed
+    <sup>number</sup>; returns (new_text, None) or (None, reason)."""
+    if not isinstance(number, int) or number < 1:
+        return None, f'bad verse number {number!r}'
+    g = str(garbled or '')
+    plain_g = re.sub(r'<[^>]+>', '', g)
+    if not g or not plain_g or len(plain_g) > 8:
+        return None, 'garbled run missing or too long to be a verse number'
+    if re.search(r'[A-Za-z]{3,}', plain_g):
+        return None, 'garbled run looks like a word — refused'
+    spans = []
+    at = text.find(g)
+    while at != -1:
+        ok = True
+        if '<' not in g:
+            if text.rfind('<', 0, at) > text.rfind('>', 0, at):
+                ok = False                  # inside a tag
+        if ok:
+            spans.append((at, at + len(g)))
+        at = text.find(g, at + 1)
+    # disambiguate by the quote: canonical context around the garbled run
+    if len(spans) > 1 and quote and g in quote:
+        qb, _, qa = quote.partition(g)
+        after = _canon(qa)[:24]
+        before = _canon(qb)[-24:]
+        if after:
+            spans = [sp for sp in spans
+                     if _canon(text[sp[1]:sp[1] + 200]).startswith(after)] \
+                    or spans
+        if len(spans) > 1 and before:
+            spans = [sp for sp in spans
+                     if _canon(text[max(0, sp[0] - 200):sp[0]])
+                     .endswith(before)] or spans
+    if not spans:
+        return None, 'garbled text not found where the fix points — skipped'
+    if len(spans) > 1:
+        return None, (f'garbled run appears in {len(spans)} places — '
+                      'ambiguous, fix by hand')
+    s, e = spans[0]
+    return _put_sup(text, s, e, str(number)), None
+
+
+def _insert_verse_text(text, number, quote):
+    """Insert a verse number OCR dropped entirely, in front of the verse's
+    first words (the quote must start exactly at them); returns
+    (new_text, None) or (None, reason)."""
+    if not isinstance(number, int) or number < 1:
+        return None, f'bad verse number {number!r}'
+    q = str(quote or '').strip()
+    if len(re.sub(r'<[^>]+>', '', q)) < 10:
+        return None, 'quote too short to anchor the insertion'
+    spans = [m.start() for m in re.finditer(re.escape(q), text)]
+    if not spans:
+        return None, ('quoted verse text not found verbatim — cannot anchor '
+                      'the insertion; fix by hand')
+    if len(spans) > 1:
+        return None, (f'quoted verse text appears in {len(spans)} places — '
+                      'ambiguous, fix by hand')
+    s = spans[0]
+    return text[:s] + '<sup>' + str(number) + '</sup> ' + text[s:], None
+
+
 def _apply_one(g, fix, quote):
     """Apply one verified fix in place; return None on success or a reason
     string on refusal (bad index, quote mismatch)."""
@@ -640,12 +739,22 @@ def _apply_one(g, fix, quote):
         body = entry.get('body') or []
         if not isinstance(j, int) or not 0 <= j < len(body):
             return f'body block {j!r} out of range'
-        err = check(body[j].get('text'))
-        if err:
-            return err
-        wrap = _sup_verse_text if op == 'sup_verse' else _unsup_verse_text
-        new_text, reason = wrap(body[j].get('text') or '',
-                                fix.get('number'), quote)
+        text = body[j].get('text') or ''
+        # sup/unsup verify the quote canonically (tags stripped); the OCR
+        # repairs verify by their own raw anchors instead — a garbled quote
+        # canonicalizes unpredictably.
+        if op in ('sup_verse', 'unsup_verse'):
+            err = check(text)
+            if err:
+                return err
+            wrap = _sup_verse_text if op == 'sup_verse' else _unsup_verse_text
+            new_text, reason = wrap(text, fix.get('number'), quote)
+        elif op == 'fix_verse':
+            new_text, reason = _fix_verse_text(text, fix.get('number'),
+                                               fix.get('garbled'), quote)
+        else:                               # insert_verse
+            new_text, reason = _insert_verse_text(text, fix.get('number'),
+                                                  quote)
         if reason:
             return reason
         body[j]['text'] = new_text
@@ -685,7 +794,7 @@ def _relocate(g, op, quote):
         cands = [{'orderIndex': i} for i, o in enumerate(order)
                  if o.get('kind') == 'stage' and q in _canon(o.get('text'))]
     elif op in ('para_to_announcement', 'para_to_stage', 'discard_para',
-                'sup_verse', 'unsup_verse'):
+                'sup_verse', 'unsup_verse', 'fix_verse', 'insert_verse'):
         cands = [{'orderIndex': i, 'blockIndex': j}
                  for i, o in enumerate(order) if o.get('kind') == 'item'
                  for j, b in enumerate(o.get('body') or [])
