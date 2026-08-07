@@ -8,6 +8,13 @@ carry and checks every one is labeled with its superscript <sup>N</sup>
 marker. Its fixes are markup-only — wrap a bare verse number, unwrap a
 wrongly superscripted one — never text edits.
 
+A third agent (scan_photos) looks at the published photo crops themselves:
+each interstitial photo a Sunday publishes is sent to Claude as an image,
+and crops that are really sheet music or a block of unrelated printed text
+— the pixel heuristics' misses — are flagged. Its only mechanical fix
+drops the crop from the page's Photos section; the printed page itself is
+untouched.
+
 The printed PDF is the source of truth, so the scanner never rewrites text.
 Claude reports findings that each quote the misfiled text verbatim and name
 one mechanical fix (reclassify an order item as a stage direction, move a
@@ -22,8 +29,10 @@ transport is injectable so tests run without a key or network.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import json
+import os
 import re
 import time
 import urllib.error
@@ -43,6 +52,10 @@ OPS = ('item_to_stage', 'stage_to_item', 'item_to_announcement',
 # OCR garbled into other glyphs or dropped — the replacement is always just
 # <sup>N</sup>, never other words.
 VERSE_OPS = ('sup_verse', 'unsup_verse', 'fix_verse', 'insert_verse')
+
+# The photo agent's one fix: remove a crop that is not a photograph from the
+# published photo inventory. Recrop advice stays flag-only — a human trims.
+PHOTO_OPS = ('drop_photo',)
 
 SYSTEM_PROMPT = """\
 You are the quality reviewer for a church worship-guide conversion pipeline.
@@ -271,6 +284,88 @@ VERSE_FINDINGS_SCHEMA = {
 }
 
 
+PHOTO_SYSTEM_PROMPT = """\
+You are the photo reviewer for a church worship-guide conversion pipeline.
+A printed Sunday worship guide PDF was converted to a web page. Photographs
+set between the text on its pages were cropped out and published in the
+page's Photos section. The crop chooser is a pixel heuristic and sometimes
+publishes the wrong thing: a scanned piece of sheet music pasted into the
+bulletin, a block of printed text, or a crop that drags neighboring page
+content in along a photograph's edge.
+
+You are shown each published crop as an image, preceded by a JSON label with
+its index "i", filename, page number, and any caption. Judge only what the
+pixels show:
+
+- A photograph (people, places, objects, artwork, scenery) is publishable —
+  never a finding, even when it is low quality, black-and-white, or has a
+  little incidental text inside the scene (a banner, a sign, a name tag).
+- sheet_music: engraved or handwritten musical notation — staff lines,
+  notes, hymn scores — fills the crop or a substantial part of it.
+- text: the crop is mostly printed text from the page — announcements,
+  liturgy, poster lettering — rather than a photograph.
+- mixed: a real photograph plus a substantial slice of sheet music or
+  unrelated printed text that the crop dragged in with it.
+
+Hard rules:
+- Report ONLY crops that should not publish as photos (sheet_music, text,
+  mixed). A genuine photograph is never a finding.
+- "quote" must be the crop's exact filename as labeled (e.g.
+  "photo-10-1.jpg") so the finding can be verified mechanically before it
+  is applied.
+- The only mechanical fix is drop_photo(imageIndex, image): the crop is
+  removed from the published Photos section (the printed page is
+  unaffected). Use it for sheet_music and text. For mixed — a real
+  photograph that needs a tighter crop — use op "none" so a person recrops
+  by hand.
+- confidence: "high" = clearly not a publishable photograph, safe to drop
+  mechanically; "medium" = probably; "low" = worth a human look, do not
+  auto-fix.
+- If every crop is a genuine photograph, return an empty findings list.
+  Do not invent problems.
+"""
+
+PHOTO_FINDINGS_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'findings': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'path': {'type': 'string'},
+                    'quote': {'type': 'string'},
+                    'issue': {'type': 'string'},
+                    'current': {'type': 'string',
+                                'enum': ['sheet_music', 'text', 'mixed']},
+                    'proposed': {'type': 'string',
+                                 'enum': ['drop', 'recrop']},
+                    'confidence': {'type': 'string',
+                                   'enum': ['high', 'medium', 'low']},
+                    'fix': {
+                        'type': 'object',
+                        'properties': {
+                            'op': {'type': 'string',
+                                   'enum': list(PHOTO_OPS) + ['none']},
+                            'imageIndex': {'type': ['integer', 'null']},
+                            'image': {'type': ['string', 'null']},
+                        },
+                        'required': ['op', 'imageIndex', 'image'],
+                        'additionalProperties': False,
+                    },
+                },
+                'required': ['path', 'quote', 'issue', 'current', 'proposed',
+                             'confidence', 'fix'],
+                'additionalProperties': False,
+            },
+        },
+        'summary': {'type': 'string'},
+    },
+    'required': ['findings', 'summary'],
+    'additionalProperties': False,
+}
+
+
 def guide_digest(guide):
     """The slice of guide.json the reviewer needs, with explicit indices so
     fixes can address entries unambiguously."""
@@ -328,15 +423,33 @@ def verse_digest(guide):
     return {'dateISO': guide.get('dateISO'), 'scripture': items}
 
 
-def _request(digest, system, schema, model):
+def photo_files(guide, photo_dir):
+    """The guide's published photo crops that exist on disk, as
+    [(imageIndex, filename, jpeg_bytes)]. Entries never materialized or
+    whose crop is unreadable are skipped — there is nothing to look at."""
+    out = []
+    for i, im in enumerate(guide.get('images') or []):
+        fn = im.get('image')
+        if not fn or not re.fullmatch(r'photo-\d+-\d+\.jpg', fn):
+            continue
+        try:
+            with open(os.path.join(photo_dir, fn), 'rb') as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        if data:
+            out.append((i, fn, data))
+    return out
+
+
+def _request(content, system, schema, model):
+    if not isinstance(content, list):
+        content = json.dumps(content, ensure_ascii=False, indent=1)
     return {
         'model': model,
         'max_tokens': 8192,
         'system': system,
-        'messages': [{
-            'role': 'user',
-            'content': json.dumps(digest, ensure_ascii=False, indent=1),
-        }],
+        'messages': [{'role': 'user', 'content': content}],
         'output_config': {'format': {'type': 'json_schema',
                                      'schema': schema}},
         # Opus 5's safety classifiers can decline a request outright; the
@@ -353,6 +466,24 @@ def build_request(guide, model=DEFAULT_MODEL):
 def build_verse_request(guide, model=DEFAULT_MODEL):
     return _request(verse_digest(guide), VERSE_SYSTEM_PROMPT,
                     VERSE_FINDINGS_SCHEMA, model)
+
+
+def build_photo_request(guide, photos, model=DEFAULT_MODEL):
+    """photos: [(imageIndex, filename, jpeg_bytes)] from photo_files().
+    Each crop goes to the model as an image block preceded by a JSON label
+    carrying its index, filename, page, and caption."""
+    inventory = guide.get('images') or []
+    content = []
+    for i, fn, data in photos:
+        im = inventory[i] if 0 <= i < len(inventory) else {}
+        content.append({'type': 'text', 'text': json.dumps(
+            {'i': i, 'image': fn, 'page': im.get('page'),
+             'caption': im.get('caption')}, ensure_ascii=False)})
+        content.append({'type': 'image', 'source': {
+            'type': 'base64', 'media_type': 'image/jpeg',
+            'data': base64.b64encode(data).decode('ascii')}})
+    return _request(content, PHOTO_SYSTEM_PROMPT, PHOTO_FINDINGS_SCHEMA,
+                    model)
 
 
 def http_transport(payload, api_key, timeout=600):
@@ -401,6 +532,19 @@ def scan_verses(guide, api_key, model=DEFAULT_MODEL, transport=None):
     transport = transport or http_transport
     response = transport(build_verse_request(guide, model), api_key)
     return _parse_scan(response, model, prefix='v', ops=VERSE_OPS)
+
+
+def scan_photos(guide, photo_dir, api_key, model=DEFAULT_MODEL,
+                transport=None):
+    """Run the photo reviewer over the guide's published photo crops in
+    photo_dir. Returns the same shape as scan_guide with ids p1, p2, … — or
+    None (no API call) when no crops are on disk to look at."""
+    photos = photo_files(guide, photo_dir)
+    if not photos:
+        return None
+    transport = transport or http_transport
+    response = transport(build_photo_request(guide, photos, model), api_key)
+    return _parse_scan(response, model, prefix='p', ops=PHOTO_OPS)
 
 
 def _parse_scan(response, model, prefix, ops):
@@ -760,6 +904,19 @@ def _apply_one(g, fix, quote):
         body[j]['text'] = new_text
         return None
 
+    if op == 'drop_photo':
+        # verified by filename, not quote-in-text: the crop the model looked
+        # at must be the crop the index points at.
+        images = g.setdefault('images', [])
+        i = fix.get('imageIndex')
+        if not isinstance(i, int) or not 0 <= i < len(images):
+            return f'image index {i!r} out of range'
+        name = str(quote or fix.get('image') or '').strip()
+        if not name or name != (images[i].get('image') or ''):
+            return 'photo filename does not match where the fix points — skipped'
+        del images[i]
+        return None
+
     if op == 'welcome_to_announcement':
         body = (g.get('welcome') or {}).get('body') or []
         j = fix.get('blockIndex')
@@ -809,6 +966,11 @@ def _relocate(g, op, quote):
                  for i, ev in enumerate(g.get('specialEvents') or [])
                  if q in _canon((ev.get('heading') or '') + ' '
                                 + ' '.join(ev.get('paragraphs') or []))]
+    elif op == 'drop_photo':
+        name = str(quote or '').strip()
+        cands = [{'imageIndex': i}
+                 for i, im in enumerate(g.get('images') or [])
+                 if im.get('image') == name]
     elif op == 'welcome_to_announcement':
         cands = [{'blockIndex': j}
                  for j, b in enumerate((g.get('welcome') or {}).get('body') or [])
@@ -858,6 +1020,8 @@ def apply_findings(guide, findings, ids):
             rank, idx = 2, f['fix'].get('blockIndex')
         elif op == 'event_to_announcement':
             rank, idx = 3, f['fix'].get('eventIndex')
+        elif op == 'drop_photo':
+            rank, idx = 4, f['fix'].get('imageIndex')
         else:
             rank, idx = 0, f['fix'].get('orderIndex')
         blk = f['fix'].get('blockIndex')

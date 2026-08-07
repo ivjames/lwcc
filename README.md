@@ -36,6 +36,13 @@ becomes the front page.
   wrong class (announcements vs page directions vs worship content) and
   offers verified, text-preserving repairs — nothing is rewritten, findings
   are moves only, each checked against the stored text before it is applied.
+  Two more agents run in series with it: a scripture verse-number checker
+  (each passage read against its reference, `<sup>` labels restored with
+  markup-only fixes) and a photo verifier that looks at the Sunday's
+  published photo crops themselves and flags any that are really sheet
+  music or a block of unrelated printed text rather than a photograph — its
+  fix drops the crop (and its file) from the page's Photos section, verified
+  by filename before it is applied.
   Findings persist in `public/<date>/aiscan.json`; apply, dismiss, or leave
   them for hand-editing. Requires `ANTHROPIC_API_KEY` in `.env` (scanning
   fails closed without it; `AISCAN_MODEL` overrides the default model). The
