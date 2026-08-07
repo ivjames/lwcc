@@ -42,7 +42,11 @@ becomes the front page.
   published photo crops themselves and flags any that are really sheet
   music or a block of unrelated printed text rather than a photograph — its
   fix drops the crop (and its file) from the page's Photos section, verified
-  by filename before it is applied.
+  by filename before it is applied. The agents also run à la carte: the scan
+  page's checkboxes (or an `agents` list on `POST /api/aiscan`) pick any
+  subset, and a partial run replaces only those agents' findings — the
+  others' findings, statuses included, stay put, with per-agent summaries,
+  usage, and last-run times tracked in aiscan.json.
   Findings persist in `public/<date>/aiscan.json`; apply, dismiss, or leave
   them for hand-editing. Requires `ANTHROPIC_API_KEY` in `.env` (scanning
   fails closed without it; `AISCAN_MODEL` overrides the default model). The

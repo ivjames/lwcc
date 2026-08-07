@@ -585,7 +585,7 @@ try:
     snap = app_mod.aiscan_snapshot()
     assert snap['waiting'] == 1 and snap['scanning'] == [], snap
 
-    app_mod.run_aiscan = lambda d: {'findings': [1, 2]}
+    app_mod.run_aiscan = lambda d, agents=None: {'findings': [1, 2]}
     app_mod.aiscan_process_one(app_mod.AISCAN_Q.get())
     snap = app_mod.aiscan_snapshot()
     assert snap['jobs']['2026-01-04'] == {'status': 'ok', 'findings': 2}, snap
@@ -594,7 +594,34 @@ try:
     assert app_mod.aiscan_enqueue('2026-01-04') is True, 're-scan allowed after done'
     app_mod.aiscan_process_one(app_mod.AISCAN_Q.get())   # settle it again
 
-    def _boom(d):
+    # à la carte queueing: the agent subset rides the durable marker, and a
+    # second request while the date still waits widens the pending run
+    # instead of double-queueing (all three selected = the full bundle).
+    assert app_mod.aiscan_agent_list(None) is None
+    assert app_mod.aiscan_agent_list(['photos', 'article']) == \
+        ['article', 'photos'], 'canonical order'
+    assert app_mod.aiscan_agent_list(['article', 'verses', 'photos']) is None, \
+        'the full bundle canonicalizes to None (= all)'
+    assert app_mod.aiscan_enqueue('2026-01-04', ['photos']) is True
+    _mk = os.path.join(app_mod.AISCAN_QUEUE_DIR, '2026-01-04')
+    assert open(_mk).read() == 'photos', 'agent subset survives a restart'
+    assert app_mod.aiscan_enqueue('2026-01-04', ['verses']) is False, \
+        'still one queued run'
+    assert app_mod.AISCAN_JOBS['2026-01-04']['agents'] == ['verses', 'photos']
+    assert open(_mk).read() == 'verses,photos'
+    _agent_runs = []
+    app_mod.run_aiscan = lambda d, agents=None: \
+        (_agent_runs.append((d, agents)), {'findings': []})[1]
+    app_mod.aiscan_process_one(app_mod.AISCAN_Q.get())
+    assert _agent_runs == [('2026-01-04', ['verses', 'photos'])], \
+        'the widened subset reaches the scan'
+    assert app_mod.aiscan_enqueue('2026-01-04', ['photos']) is True
+    assert app_mod.aiscan_enqueue('2026-01-04') is False
+    assert app_mod.AISCAN_JOBS['2026-01-04']['agents'] is None \
+        and open(_mk).read() == '', 'a full-bundle request widens to all'
+    app_mod.aiscan_process_one(app_mod.AISCAN_Q.get())   # settle it again
+
+    def _boom(d, agents=None):
         raise RuntimeError('rate limited')
     app_mod.run_aiscan = _boom
     app_mod.aiscan_enqueue('2026-01-11')
@@ -607,12 +634,14 @@ try:
     app_mod.AISCAN_JOBS.clear()
     while not app_mod.AISCAN_Q.empty():
         app_mod.AISCAN_Q.get()
-    open(os.path.join(app_mod.AISCAN_QUEUE_DIR, '2026-01-11'), 'w').close()
+    open(os.path.join(app_mod.AISCAN_QUEUE_DIR, '2026-01-11'), 'w').write('photos')
     open(os.path.join(app_mod.AISCAN_QUEUE_DIR, '1999-01-01'), 'w').close()
     open(os.path.join(app_mod.AISCAN_QUEUE_DIR, 'junk'), 'w').close()
     app_mod.aiscan_rescan()
     snap = app_mod.aiscan_snapshot()
     assert list(snap['jobs']) == ['2026-01-11'] and snap['waiting'] == 1, snap
+    assert snap['jobs']['2026-01-11']['agents'] == ['photos'], \
+        'the à la carte selection survives the restart'
     assert app_mod.AISCAN_Q.get() == '2026-01-11'
     assert sorted(os.listdir(app_mod.AISCAN_QUEUE_DIR)) == ['2026-01-11'], \
         'stale markers discarded, live one kept for the worker'
@@ -704,6 +733,44 @@ try:
         merged = _saved['run_aiscan']('2026-01-04')
         assert [f['id'] for f in merged['findings']] == ['f1'] \
             and merged['usage'] == {'input': 10, 'output': 4}, merged
+
+        # à la carte: a photos-only run replaces p… findings and leaves the
+        # other agents' findings — statuses included — and their stored
+        # summaries/usage untouched; resolvedFindings ride along.
+        json.dump({
+            'findings': [{'id': 'f1', 'status': 'applied'},
+                         {'id': 'v1', 'status': 'open'},
+                         {'id': 'p1', 'status': 'dismissed'}],
+            'agents': {
+                'article': {'at': 'T0', 'summary': 'classes look right',
+                            'usage': {'input': 10, 'output': 4}},
+                'verses': {'at': 'T0', 'summary': 'one bare verse number',
+                           'usage': {'input': 7, 'output': 3}},
+                'photos': {'at': 'T0', 'summary': 'stale photo summary',
+                           'usage': {'input': 99, 'output': 99}}},
+            'resolvedFindings': [{'id': 'z9'}]},
+            open(os.path.join(app_mod.PUBLIC, '2026-01-04', 'aiscan.json'), 'w'))
+
+        def _no_call(*a, **k):
+            raise AssertionError('unselected agent must not run')
+        aiscan.scan_guide = aiscan.scan_verses = _no_call
+        aiscan.scan_photos = lambda g, pd, k, model=None: {
+            'model': 'm', 'summary': 'one sheet-music crop',
+            'usage': {'input': 5, 'output': 2},
+            'findings': [{'id': 'p1', 'status': 'open'}]}
+        part = _saved['run_aiscan']('2026-01-04', ['photos'])
+        assert [(pf['id'], pf['status']) for pf in part['findings']] == \
+            [('f1', 'applied'), ('v1', 'open'), ('p1', 'open')], \
+            'kept findings keep their statuses; photo findings replaced'
+        assert part['summary'] == ('classes look right — Scripture verses: '
+                                   'one bare verse number — Photos: '
+                                   'one sheet-music crop'), part['summary']
+        assert part['usage'] == {'input': 22, 'output': 9}, \
+            'usage re-sums from the stored per-agent runs'
+        assert part['agents']['article']['at'] == 'T0' \
+            and part['agents']['photos']['at'] != 'T0', \
+            'only the re-run agent gets a new timestamp'
+        assert part['resolvedFindings'] == [{'id': 'z9'}]
     finally:
         aiscan.scan_guide, aiscan.scan_verses, aiscan.scan_photos = _scanstubs
         if not _had_key:
