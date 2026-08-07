@@ -17,8 +17,11 @@ newest at /) and converts newly uploaded worship-guide PDFs in place:
                       OCR misclassifications (announcements vs page directions
                       vs content) — plus a scripture verse-number agent that
                       reads each passage against its reference and checks
-                      every verse carries its <sup> superscript label — and
-                      apply verified, text-preserving repairs;
+                      every verse carries its <sup> superscript label, and a
+                      photo verifier that looks at the published photo crops
+                      and flags sheet music or unrelated printed text that
+                      slipped through as a "photo" — and apply verified,
+                      text-preserving repairs;
                       POST /api/aiscan queues scans (one date or a batch;
                       needs ANTHROPIC_API_KEY in .env) on a durable queue —
                       up to AISCAN_WORKERS run concurrently, markers in
@@ -784,9 +787,11 @@ def save_guide(d, submitted):
 # filed under the wrong class (announcements vs page/stage directions vs
 # worship content) — the classic OCR-backlog failure. A second agent pass
 # (aiscan.scan_verses) reads the scripture section and checks every verse
-# against its passage reference for its <sup> superscript verse number.
+# against its passage reference for its <sup> superscript verse number. A
+# third (aiscan.scan_photos) looks at the published photo crops themselves
+# and flags any that are really sheet music or unrelated printed text.
 # Findings live in public/<date>/aiscan.json; repairs are verified
-# text-preserving moves or markup-only <sup> adjustments.
+# text-preserving moves, markup-only <sup> adjustments, or photo drops.
 
 def aiscan_load(d):
     try:
@@ -807,11 +812,29 @@ def aiscan_open_count(scan):
                if f.get('status') == 'open')
 
 
+def merge_scan(scan, extra, label):
+    """Fold a follow-up agent's findings/summary/usage into the main scan;
+    a None extra (that agent had nothing to read) merges nothing."""
+    if not extra:
+        return
+    scan['findings'] += extra['findings']
+    if extra.get('summary'):
+        scan['summary'] = (scan.get('summary') or '').strip()
+        scan['summary'] += (' — ' if scan['summary'] else '') \
+            + label + ': ' + extra['summary']
+    for k in ('input', 'output'):
+        a = (scan.get('usage') or {}).get(k)
+        b = (extra.get('usage') or {}).get(k)
+        if a is not None or b is not None:
+            scan.setdefault('usage', {})[k] = (a or 0) + (b or 0)
+
+
 def run_aiscan(d):
-    """Scan one Sunday and persist the result: the classification reviewer
-    plus the scripture verse-number agent, merged into one findings list
-    (ids f1… and v1…). Raises RuntimeError with an operator-readable
-    message when the API is unreachable or declines."""
+    """Scan one Sunday and persist the result: the classification reviewer,
+    the scripture verse-number agent, and the photo verifier run in series,
+    merged into one findings list (ids f1…, v1…, p1…). Raises RuntimeError
+    with an operator-readable message when the API is unreachable or
+    declines."""
     api_key = ENV.get('ANTHROPIC_API_KEY', '')
     if not api_key:
         raise RuntimeError('AI scanner disabled: set ANTHROPIC_API_KEY in '
@@ -820,18 +843,10 @@ def run_aiscan(d):
         guide = json.load(fh)
     model = ENV.get('AISCAN_MODEL') or aiscan.DEFAULT_MODEL
     scan = aiscan.scan_guide(guide, api_key, model=model)
-    verses = aiscan.scan_verses(guide, api_key, model=model)
-    if verses:
-        scan['findings'] += verses['findings']
-        if verses.get('summary'):
-            scan['summary'] = (scan.get('summary') or '').strip()
-            scan['summary'] += (' — ' if scan['summary'] else '') \
-                + 'Scripture verses: ' + verses['summary']
-        for k in ('input', 'output'):
-            a = (scan.get('usage') or {}).get(k)
-            b = (verses.get('usage') or {}).get(k)
-            if a is not None or b is not None:
-                scan.setdefault('usage', {})[k] = (a or 0) + (b or 0)
+    merge_scan(scan, aiscan.scan_verses(guide, api_key, model=model),
+               'Scripture verses')
+    merge_scan(scan, aiscan.scan_photos(guide, os.path.join(PUBLIC, d),
+                                        api_key, model=model), 'Photos')
     scan['at'] = now_pacific().isoformat(timespec='seconds')
     # a re-scan rebuilds the working findings but keeps the archive
     resolved = (aiscan_load(d) or {}).get('resolvedFindings')
@@ -1108,6 +1123,17 @@ def apply_aiscan(d, ids, action='apply'):
                 notes.append(f"AI repair applied: {f.get('issue')} "
                              f"({(f.get('fix') or {}).get('op')})")
         write_guide_json(path, new_guide)
+        if any((f.get('fix') or {}).get('op') == 'drop_photo'
+               for f in findings if f.get('id') in applied):
+            # the dropped entry's crop leaves the disk too, so the photo
+            # inventory keeps mirroring the files (as convert-time pruning does)
+            keep = {im.get('image') for im in new_guide.get('images') or []}
+            for fn in os.listdir(os.path.join(PUBLIC, d)):
+                if re.fullmatch(r'photo-\d+-\d+\.jpg', fn) and fn not in keep:
+                    try:
+                        os.unlink(os.path.join(PUBLIC, d, fn))
+                    except OSError:
+                        pass
         rerender_date(d)
     for f in findings:
         reason = results.get(f.get('id'), '__untouched__')
@@ -1146,9 +1172,13 @@ AISCAN_PAGE = ("""<!DOCTYPE html>
   directions vs worship content. A second agent reads the scripture section
   passage by passage and, from each reference, checks that every verse is
   labeled with its superscript verse number &mdash; flagging bare, missing,
-  or wrongly superscripted numbers. Repairs move the printed text or adjust
-  <code>&lt;sup&gt;</code> markup only; nothing is rewritten, and every fix
-  is verified against the stored text before it is applied.</p>
+  or wrongly superscripted numbers. A third agent looks at this
+  Sunday&#8217;s published photos themselves and flags any crop that is
+  really sheet music or a block of unrelated printed text rather than a
+  photograph &mdash; its fix drops the crop from the page&#8217;s Photos
+  section. Repairs move the printed text, adjust <code>&lt;sup&gt;</code>
+  markup, or drop a misjudged photo; nothing is rewritten, and every fix
+  is verified against the stored guide before it is applied.</p>
   __KEYNOTE__
   <p><button id="scan" __SCANDIS__>__SCANLABEL__</button>
      <span id="scanmsg"></span></p>
@@ -1198,7 +1228,12 @@ function render() {
       (f.status !== 'open'
         ? '<span class="tag ' + esc(f.status) + '">' + esc(f.status) + '</span>' : '') +
       '<div>' + esc(f.issue) + '</div>' +
-      '<blockquote>' + esc(f.quote) + '</blockquote>' +
+      '<blockquote>' + esc(f.quote) +
+      (/^photo-\d+-\d+\.jpg$/.test(f.quote || '')
+        ? '<br><img src="/__DATE__/' + esc(f.quote) + '" alt="" ' +
+          'style="max-width:260px;max-height:200px;margin-top:6px">'
+        : '') +
+      '</blockquote>' +
       '<div class="meta">' + esc(f.path) +
       (f.fix ? ' &middot; fix: ' + esc(f.fix.op)
         : ' &middot; no mechanical fix — <a href="/admin/edit/__DATE__#find=' +
@@ -1300,7 +1335,7 @@ async function pollScan() {
     watching = true;
     $('scan').disabled = true;
     $('scanmsg').textContent = job.status === 'scanning'
-      ? 'Scanning — the article and scripture-verse agents are reading, may take a minute or two…'
+      ? 'Scanning — the article, scripture-verse, and photo agents are reading, may take a minute or two…'
       : 'Queued (' + data.scanning.length + ' scanning, ' + data.waiting + ' waiting)…';
     setTimeout(pollScan, 2000);
     return;

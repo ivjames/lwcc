@@ -399,6 +399,93 @@ _vscan2 = aiscan.scan_verses(_vg, 'test-key', transport=lambda p, k: _canned([
              'number': 18, 'garbled': "'8"}}]))
 assert _vscan2['findings'][0]['fix']['op'] == 'fix_verse'
 
+# --- photo verifier: the crops published in the Photos section go to a
+# vision agent that flags sheet music or unrelated printed text the pixel
+# heuristics let through; the only mechanical fix drops the crop from the
+# inventory (verified by filename), recrop advice stays flag-only.
+import base64  # noqa: E402
+
+_pg = {
+    'dateISO': '2026-08-02', 'order': [], 'announcements': [],
+    'specialEvents': [], 'images': [
+        {'page': 5, 'top': 100, 'left': 50, 'width': 400, 'height': 300,
+         'image': 'photo-5-1.jpg', 'caption': 'The choir in the courtyard.'},
+        {'page': 7, 'top': 200, 'left': 50, 'width': 400, 'height': 300,
+         'image': 'photo-7-2.jpg', 'caption': None},
+        {'page': 9, 'top': 0, 'left': 0, 'width': 10, 'height': 10,
+         'image': None, 'caption': None},          # never materialized
+    ],
+}
+_pdir = tempfile.mkdtemp(prefix='lwcc-photos-')
+open(os.path.join(_pdir, 'photo-5-1.jpg'), 'wb').write(b'\xff\xd8jpegONE')
+open(os.path.join(_pdir, 'photo-7-2.jpg'), 'wb').write(b'\xff\xd8jpegTWO')
+assert aiscan.photo_files(_pg, _pdir) == [
+    (0, 'photo-5-1.jpg', b'\xff\xd8jpegONE'),
+    (1, 'photo-7-2.jpg', b'\xff\xd8jpegTWO')], \
+    'entries without a crop on disk are skipped'
+
+# a guide with nothing materialized is skipped without an API call
+assert aiscan.scan_photos({'images': []}, _pdir, 'test-key',
+                          transport=lambda p, k: (_ for _ in ()).throw(
+                              AssertionError('must not call the API'))) is None
+
+
+def _photo_transport(payload, api_key):
+    assert api_key == 'test-key'
+    assert 'photo reviewer' in payload['system']
+    assert payload['output_config']['format']['type'] == 'json_schema'
+    content = payload['messages'][0]['content']
+    texts = [b for b in content if b['type'] == 'text']
+    images = [b for b in content if b['type'] == 'image']
+    assert len(texts) == 2 and len(images) == 2, 'one label per crop'
+    assert 'The choir in the courtyard.' in texts[0]['text']
+    assert 'photo-7-2.jpg' in texts[1]['text']
+    assert images[1]['source'] == {
+        'type': 'base64', 'media_type': 'image/jpeg',
+        'data': base64.b64encode(b'\xff\xd8jpegTWO').decode('ascii')}, \
+        'the crop bytes reach the agent as an image block'
+    return _canned([
+        {'path': 'images[1]', 'quote': 'photo-7-2.jpg',
+         'issue': 'staff lines and notes fill the crop — engraved music',
+         'current': 'sheet_music', 'proposed': 'drop', 'confidence': 'high',
+         'fix': {'op': 'drop_photo', 'imageIndex': 1,
+                 'image': 'photo-7-2.jpg'}},
+        {'path': 'images[0]', 'quote': 'photo-5-1.jpg',
+         'issue': 'a slice of the announcements column rides along the edge',
+         'current': 'mixed', 'proposed': 'recrop', 'confidence': 'low',
+         'fix': {'op': 'none', 'imageIndex': None, 'image': None}},
+    ])
+
+
+_pscan = aiscan.scan_photos(_pg, _pdir, 'test-key',
+                            transport=_photo_transport)
+assert [f['id'] for f in _pscan['findings']] == ['p1', 'p2'], \
+    'photo ids never collide with the other agents'
+assert _pscan['findings'][1]['fix'] is None, 'recrop advice is flag-only'
+_pg2, _res = aiscan.apply_findings(_pg, _pscan['findings'], ['p1', 'p2'])
+assert _res['p1'] is None and 'no mechanical fix' in _res['p2'], _res
+assert [im['image'] for im in _pg2['images']] == ['photo-5-1.jpg', None], \
+    'the sheet-music crop left the inventory, the real photo stayed'
+assert len(_pg['images']) == 3, 'apply works on a copy'
+
+# a stale image index relocates by filename; an unknown filename refuses
+_pg3, _res = aiscan.apply_findings(_pg, [
+    {'id': 'x1', 'quote': 'photo-7-2.jpg', 'issue': 'x',
+     'current': 'sheet_music', 'proposed': 'drop', 'confidence': 'high',
+     'status': 'open',
+     'fix': {'op': 'drop_photo', 'imageIndex': 0, 'image': 'photo-7-2.jpg'}}],
+    ['x1'])
+assert _res == {'x1': None}, _res
+assert 'photo-7-2.jpg' not in [im['image'] for im in _pg3['images']]
+_pg4, _res = aiscan.apply_findings(_pg, [
+    {'id': 'x2', 'quote': 'photo-9-9.jpg', 'issue': 'x',
+     'current': 'text', 'proposed': 'drop', 'confidence': 'high',
+     'status': 'open',
+     'fix': {'op': 'drop_photo', 'imageIndex': 5, 'image': 'photo-9-9.jpg'}}],
+    ['x2'])
+assert _res['x2'] and len(_pg4['images']) == 3, 'vanished crop refused'
+shutil.rmtree(_pdir, ignore_errors=True)
+
 # --- merge re-convert: the published (hand-edited) guide is the skeleton;
 # a fresh conversion contributes markup/accents for canonically identical
 # text, heading accents, and the page-image inventory. Edited text has no
@@ -581,10 +668,11 @@ try:
         'varying-text findings grouped by error category, quotes carried'
     assert all(i['fixable'] for i in sim['items'])
 
-    # run_aiscan runs both agents — the classifier and the scripture
-    # verse-number checker — and merges their findings (distinct id
-    # prefixes) with summed usage; a guide with no scripture merges nothing.
-    _scanstubs = (aiscan.scan_guide, aiscan.scan_verses)
+    # run_aiscan runs all three agents in series — the classifier, the
+    # scripture verse-number checker, and the photo verifier — and merges
+    # their findings (distinct id prefixes) with summed usage; an agent
+    # with nothing to read (None) merges nothing.
+    _scanstubs = (aiscan.scan_guide, aiscan.scan_verses, aiscan.scan_photos)
     _had_key = 'ANTHROPIC_API_KEY' in app_mod.ENV
     try:
         app_mod.ENV['ANTHROPIC_API_KEY'] = 'test-key'
@@ -596,17 +684,28 @@ try:
             'model': 'm', 'summary': 'one bare verse number',
             'usage': {'input': 7, 'output': 3},
             'findings': [{'id': 'v1', 'status': 'open'}]}
+        _photo_dirs = []
+        def _stub_photos(g, photo_dir, k, model=None):
+            _photo_dirs.append(photo_dir)
+            return {'model': 'm', 'summary': 'one sheet-music crop',
+                    'usage': {'input': 5, 'output': 2},
+                    'findings': [{'id': 'p1', 'status': 'open'}]}
+        aiscan.scan_photos = _stub_photos
         merged = _saved['run_aiscan']('2026-01-04')
-        assert [f['id'] for f in merged['findings']] == ['f1', 'v1'], merged
-        assert merged['usage'] == {'input': 17, 'output': 7}, merged
+        assert [f['id'] for f in merged['findings']] == ['f1', 'v1', 'p1'], merged
+        assert merged['usage'] == {'input': 22, 'output': 9}, merged
         assert merged['summary'] == \
-            'classes look right — Scripture verses: one bare verse number'
+            'classes look right — Scripture verses: one bare verse number' \
+            ' — Photos: one sheet-music crop'
+        assert _photo_dirs == [os.path.join(app_mod.PUBLIC, '2026-01-04')], \
+            'the photo agent reads the published crops for that Sunday'
         aiscan.scan_verses = lambda g, k, model=None: None
+        aiscan.scan_photos = lambda g, pd, k, model=None: None
         merged = _saved['run_aiscan']('2026-01-04')
         assert [f['id'] for f in merged['findings']] == ['f1'] \
             and merged['usage'] == {'input': 10, 'output': 4}, merged
     finally:
-        aiscan.scan_guide, aiscan.scan_verses = _scanstubs
+        aiscan.scan_guide, aiscan.scan_verses, aiscan.scan_photos = _scanstubs
         if not _had_key:
             app_mod.ENV.pop('ANTHROPIC_API_KEY', None)
 finally:
