@@ -23,6 +23,8 @@ newest at /) and converts newly uploaded worship-guide PDFs in place:
                       slipped through as a "photo" — and apply verified,
                       text-preserving repairs;
                       POST /api/aiscan queues scans (one date or a batch;
+                      an optional "agents" subset runs them à la carte, a
+                      partial run replacing only those agents' findings;
                       needs ANTHROPIC_API_KEY in .env) on a durable queue —
                       up to AISCAN_WORKERS run concurrently, markers in
                       queue/aiscan/ survive restarts — GET /api/aiscan-status
@@ -812,29 +814,59 @@ def aiscan_open_count(scan):
                if f.get('status') == 'open')
 
 
-def merge_scan(scan, extra, label):
-    """Fold a follow-up agent's findings/summary/usage into the main scan;
-    a None extra (that agent had nothing to read) merges nothing."""
-    if not extra:
-        return
-    scan['findings'] += extra['findings']
-    if extra.get('summary'):
-        scan['summary'] = (scan.get('summary') or '').strip()
-        scan['summary'] += (' — ' if scan['summary'] else '') \
-            + label + ': ' + extra['summary']
-    for k in ('input', 'output'):
-        a = (scan.get('usage') or {}).get(k)
-        b = (extra.get('usage') or {}).get(k)
-        if a is not None or b is not None:
-            scan.setdefault('usage', {})[k] = (a or 0) + (b or 0)
+# The scanner's three agents, in canonical run/display order, with the id
+# prefix each one's findings carry. Any subset can run à la carte; the
+# prefix is what lets a partial run replace only its own findings.
+AISCAN_AGENTS = ('article', 'verses', 'photos')
+AISCAN_PREFIX = {'article': 'f', 'verses': 'v', 'photos': 'p'}
+AISCAN_LABEL = {'article': None, 'verses': 'Scripture verses',
+                'photos': 'Photos'}
 
 
-def run_aiscan(d):
-    """Scan one Sunday and persist the result: the classification reviewer,
-    the scripture verse-number agent, and the photo verifier run in series,
-    merged into one findings list (ids f1…, v1…, p1…). Raises RuntimeError
-    with an operator-readable message when the API is unreachable or
-    declines."""
+def aiscan_agent_list(agents):
+    """Canonicalize an agent selection: the known names in canonical order,
+    or None for the full bundle (which empty and all-inclusive selections
+    both mean)."""
+    if not agents:
+        return None
+    chosen = [a for a in AISCAN_AGENTS if a in agents]
+    return None if not chosen or len(chosen) == len(AISCAN_AGENTS) else chosen
+
+
+def aiscan_summary(runs):
+    """One display line from the stored per-agent summaries, in canonical
+    order: the article reviewer's leads bare, the others carry their
+    label."""
+    parts = []
+    for name in AISCAN_AGENTS:
+        s = ((runs.get(name) or {}).get('summary') or '').strip()
+        if s:
+            label = AISCAN_LABEL[name]
+            parts.append(label + ': ' + s if label else s)
+    return ' — '.join(parts)
+
+
+def aiscan_usage(runs):
+    """Token usage summed across the stored per-agent runs."""
+    usage = {}
+    for run in runs.values():
+        u = run.get('usage') or {}
+        for k in ('input', 'output'):
+            if u.get(k) is not None:
+                usage[k] = usage.get(k, 0) + u[k]
+    return usage
+
+
+def run_aiscan(d, agents=None):
+    """Scan one Sunday and persist the result. The three agents — the
+    article classifier ('article', ids f…), the scripture verse-number
+    checker ('verses', ids v…), and the photo verifier ('photos', ids p…) —
+    run in series; agents picks a subset for an à la carte run (None = all
+    three). A partial run replaces only the selected agents' findings and
+    keeps the others' findings, statuses included, untouched. Raises
+    RuntimeError with an operator-readable message when the API is
+    unreachable or declines."""
+    agents = aiscan_agent_list(agents) or list(AISCAN_AGENTS)
     api_key = ENV.get('ANTHROPIC_API_KEY', '')
     if not api_key:
         raise RuntimeError('AI scanner disabled: set ANTHROPIC_API_KEY in '
@@ -842,16 +874,36 @@ def run_aiscan(d):
     with open(os.path.join(PUBLIC, d, 'guide.json'), encoding='utf-8') as fh:
         guide = json.load(fh)
     model = ENV.get('AISCAN_MODEL') or aiscan.DEFAULT_MODEL
-    scan = aiscan.scan_guide(guide, api_key, model=model)
-    merge_scan(scan, aiscan.scan_verses(guide, api_key, model=model),
-               'Scripture verses')
-    merge_scan(scan, aiscan.scan_photos(guide, os.path.join(PUBLIC, d),
-                                        api_key, model=model), 'Photos')
-    scan['at'] = now_pacific().isoformat(timespec='seconds')
+    prev = aiscan_load(d) or {}
+    runs = dict(prev.get('agents') or {})
+    at = now_pacific().isoformat(timespec='seconds')
+    fresh = []
+    for name in agents:
+        if name == 'article':
+            res = aiscan.scan_guide(guide, api_key, model=model)
+        elif name == 'verses':
+            res = aiscan.scan_verses(guide, api_key, model=model)
+        else:
+            res = aiscan.scan_photos(guide, os.path.join(PUBLIC, d),
+                                     api_key, model=model)
+        # None = the agent had nothing to read (no scripture, no photos);
+        # the run is still recorded so the page shows the ground is covered
+        runs[name] = {'at': at, 'model': (res or {}).get('model') or model,
+                      'summary': (res or {}).get('summary') or '',
+                      'usage': (res or {}).get('usage')}
+        if res:
+            fresh += res['findings']
+    # findings from agents not in this run survive with their statuses; the
+    # re-run agents' old findings are replaced wholesale (ids restart)
+    rerun = {AISCAN_PREFIX[a] for a in agents}
+    kept = [f for f in prev.get('findings') or []
+            if str(f.get('id') or '')[:1] not in rerun]
+    scan = {'model': model, 'summary': aiscan_summary(runs),
+            'usage': aiscan_usage(runs), 'findings': kept + fresh,
+            'agents': runs, 'at': at}
     # a re-scan rebuilds the working findings but keeps the archive
-    resolved = (aiscan_load(d) or {}).get('resolvedFindings')
-    if resolved:
-        scan['resolvedFindings'] = resolved
+    if prev.get('resolvedFindings'):
+        scan['resolvedFindings'] = prev['resolvedFindings']
     aiscan_save(d, scan)
     return scan
 
@@ -875,16 +927,30 @@ def aiscan_workers():
     return 10
 
 
-def aiscan_enqueue(d):
-    """Queue one Sunday for scanning. A date already waiting or scanning is
-    never queued twice; the marker file makes the request survive restarts."""
+def aiscan_enqueue(d, agents=None):
+    """Queue one Sunday for scanning, optionally for a subset of the agents
+    (an à la carte run). A date already waiting or scanning is never queued
+    twice — a request for a still-waiting date widens its pending run to
+    cover both agent selections instead. The marker file (its content is
+    the agent list; empty = all) makes the request survive restarts."""
+    agents = aiscan_agent_list(agents)
     with AISCAN_LOCK:
-        if (AISCAN_JOBS.get(d) or {}).get('status') in ('queued', 'scanning'):
+        job = AISCAN_JOBS.get(d) or {}
+        if job.get('status') == 'scanning':
             return False
         os.makedirs(AISCAN_QUEUE_DIR, exist_ok=True)
-        with open(os.path.join(AISCAN_QUEUE_DIR, d), 'w'):
-            pass
-        AISCAN_JOBS[d] = {'status': 'queued'}
+        if job.get('status') == 'queued':
+            if agents is None or job.get('agents') is None:
+                agents = None
+            else:
+                agents = aiscan_agent_list(list(job['agents']) + agents)
+            AISCAN_JOBS[d]['agents'] = agents
+            with open(os.path.join(AISCAN_QUEUE_DIR, d), 'w') as fh:
+                fh.write(','.join(agents or ()))
+            return False
+        with open(os.path.join(AISCAN_QUEUE_DIR, d), 'w') as fh:
+            fh.write(','.join(agents or ()))
+        AISCAN_JOBS[d] = {'status': 'queued', 'agents': agents}
     AISCAN_Q.put(d)
     return True
 
@@ -893,16 +959,19 @@ def aiscan_process_one(d):
     """Run one queued scan: update the in-memory job state for the polling
     UIs, record the outcome in the audit log, clear the durable marker."""
     with AISCAN_LOCK:
-        if (AISCAN_JOBS.get(d) or {}).get('status') != 'queued':
+        job = AISCAN_JOBS.get(d) or {}
+        if job.get('status') != 'queued':
             return
-        AISCAN_JOBS[d] = {'status': 'scanning'}
+        agents = job.get('agents')
+        AISCAN_JOBS[d] = {'status': 'scanning', 'agents': agents}
     try:
-        scan = run_aiscan(d)
+        scan = run_aiscan(d, agents)
         with AISCAN_LOCK:
             AISCAN_JOBS[d] = {'status': 'ok',
                               'findings': len(scan['findings'])}
         audit_log({'action': 'aiscan', 'date': d, 'ok': True,
-                   'findings': len(scan['findings'])})
+                   'findings': len(scan['findings']),
+                   **({'agents': agents} if agents else {})})
     except Exception as e:
         if not isinstance(e, RuntimeError):
             traceback.print_exc()
@@ -931,8 +1000,16 @@ def aiscan_rescan():
     for name in sorted(os.listdir(AISCAN_QUEUE_DIR)):
         if DATE_DIR_RE.match(name) and \
                 os.path.exists(os.path.join(PUBLIC, name, 'guide.json')):
+            try:
+                with open(os.path.join(AISCAN_QUEUE_DIR, name)) as fh:
+                    marker = fh.read().strip()
+            except OSError:
+                marker = ''
             with AISCAN_LOCK:
-                AISCAN_JOBS[name] = {'status': 'queued'}
+                AISCAN_JOBS[name] = {
+                    'status': 'queued',
+                    'agents': aiscan_agent_list(marker.split(','))
+                    if marker else None}
             AISCAN_Q.put(name)
         else:
             try:
@@ -1163,6 +1240,8 @@ AISCAN_PAGE = ("""<!DOCTYPE html>
   .tag.skipped{background:#8a6410}
   .meta{color:#54574a;font-size:.88em}
   button.mini{padding:4px 12px;font-size:.82em;margin-left:8px;background:#3f6b82}
+  .agents label{margin-right:14px;font-size:.92em;white-space:nowrap}
+  .agents button{margin-right:10px}
 </style></head>
 <body>
 <h1>AI Article Scanner &mdash; __DATE__</h1>
@@ -1178,9 +1257,16 @@ AISCAN_PAGE = ("""<!DOCTYPE html>
   photograph &mdash; its fix drops the crop from the page&#8217;s Photos
   section. Repairs move the printed text, adjust <code>&lt;sup&gt;</code>
   markup, or drop a misjudged photo; nothing is rewritten, and every fix
-  is verified against the stored guide before it is applied.</p>
+  is verified against the stored guide before it is applied. The agents run
+  &agrave; la carte: untick the ones you don&#8217;t need and a partial
+  re-run refreshes only the ticked agents&#8217; findings, leaving the
+  others&#8217; findings and statuses untouched.</p>
   __KEYNOTE__
-  <p><button id="scan" __SCANDIS__>__SCANLABEL__</button>
+  <p class="agents">
+     <label><input type="checkbox" class="agent" value="article" checked> Article</label>
+     <label><input type="checkbox" class="agent" value="verses" checked> Scripture verses</label>
+     <label><input type="checkbox" class="agent" value="photos" checked> Photos</label>
+     <button id="scan" __SCANDIS__>__SCANLABEL__</button>
      <span id="scanmsg"></span></p>
 </div>
 <div id="results"></div>
@@ -1210,6 +1296,13 @@ function render() {
   let html = '<div class="card"><p><b>Scan from ' + esc(fmtAt(SCAN.at)) + '</b>' +
     ' <span class="meta">(' + esc(SCAN.model) + ')</span></p>' +
     '<p>' + esc(SCAN.summary) + '</p>';
+  if (SCAN.agents) {
+    const NAMES = {article: 'Article', verses: 'Scripture verses', photos: 'Photos'};
+    html += '<p class="meta">' + Object.keys(NAMES).map(k =>
+      NAMES[k] + ': ' + (SCAN.agents[k]
+        ? esc(fmtAt(SCAN.agents[k].at)) : 'not yet run')).join(' &middot; ') +
+      '</p>';
+  }
   if (!SCAN.findings.length) {
     html += '<p class="ok">No misclassifications found.</p>';
   } else {
@@ -1234,7 +1327,9 @@ function render() {
           'style="max-width:260px;max-height:200px;margin-top:6px">'
         : '') +
       '</blockquote>' +
-      '<div class="meta">' + esc(f.path) +
+      '<div class="meta">' +
+      ({f: 'article &middot; ', v: 'verses &middot; ', p: 'photos &middot; '}
+        [(f.id || '')[0]] || '') + esc(f.path) +
       (f.fix ? ' &middot; fix: ' + esc(f.fix.op)
         : ' &middot; no mechanical fix — <a href="/admin/edit/__DATE__#find=' +
           encodeURIComponent(f.quote || '') + '">edit by hand</a>') +
@@ -1352,12 +1447,18 @@ async function pollScan() {
 pollScan();      // a scan may already be queued or running for this date
 
 $('scan').addEventListener('click', async () => {
+  const agents = [...document.querySelectorAll('.agent:checked')].map(c => c.value);
+  if (!agents.length) {
+    $('scanmsg').textContent = 'Tick at least one agent to run.';
+    return;
+  }
   $('scan').disabled = true;
   $('scanmsg').textContent = 'Queueing…';
   try {
     const res = await fetch('/api/aiscan', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({date: '__DATE__'}),
+      body: JSON.stringify(agents.length === 3
+        ? {date: '__DATE__'} : {date: '__DATE__', agents: agents}),
     });
     const data = await res.json().catch(() => ({ok: false, error: 'HTTP ' + res.status}));
     if (!data.ok) throw new Error(data.error || res.statusText);
@@ -3302,12 +3403,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not dates:
                 self.send_json({'ok': False, 'error': 'no dates given'}, status=400)
                 return
+            agents = data.get('agents')     # à la carte subset; missing = all
+            if agents is not None:
+                if not isinstance(agents, list) or not agents or \
+                        any(a not in AISCAN_AGENTS for a in agents):
+                    self.send_json({'ok': False, 'error':
+                                    'agents must be a non-empty list from: '
+                                    + ', '.join(AISCAN_AGENTS)}, status=400)
+                    return
+                agents = aiscan_agent_list(agents)
             queued, skipped = [], {}
             for d in dates:
                 if not DATE_DIR_RE.match(d) or \
                         not os.path.exists(os.path.join(PUBLIC, d, 'guide.json')):
                     skipped[d] = 'no published guide'
-                elif aiscan_enqueue(d):
+                elif aiscan_enqueue(d, agents):
                     queued.append(d)
                 else:
                     skipped[d] = 'already queued or scanning'
