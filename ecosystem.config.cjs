@@ -1,4 +1,6 @@
-// pm2 config for the lwcc.lab980.com site server.
+// pm2 config for the lwcc.lab980.com site server. The operate CLI (bin/lwcc)
+// registers the same process from its START_CMD on a first deploy; this file
+// is the same shape, kept for `pm2 start ecosystem.config.cjs` by hand.
 // Per platform lesson: exec_mode fork, explicitly, and no `instances`.
 module.exports = {
   apps: [
