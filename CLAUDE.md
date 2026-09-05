@@ -21,8 +21,9 @@
 ## Orientation
 
 - `app.py` — the lwcc.lab980.com site + admin + upload/convert app (stdlib
-  only). Deployed on the droplet at `/var/www/lwcc` under pm2; `lwcc redeploy`
-  there pulls `main` and restarts.
+  only). Deployed on the droplet at `/var/www/lwcc` under pm2; `lwcc deploy`
+  there fast-forwards to `origin/main` and restarts (`bin/lwcc`; `redeploy`
+  is an alias). Merging is not deploying.
 - `wgconvert/` — the PDF → guide.json → HTML converter package. Parser
   changes must keep the checked-in samples converting clean; when a new
   format variant is taught, pin it in `test/run.py`.

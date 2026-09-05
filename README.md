@@ -54,7 +54,7 @@ becomes the front page.
   a scan-all for the unscanned backlog (one API request per Sunday). Scans
   run through their own durable server-side queue — up to `AISCAN_WORKERS`
   (default 10) at a time, markers in `queue/aiscan/` re-enqueued at startup —
-  so an `lwcc redeploy` pauses in-flight scans rather than losing them, and
+  so an `lwcc deploy` pauses in-flight scans rather than losing them, and
   the admin pages just watch the queue until it drains. `GET /admin/aiscan`
   aggregates matching findings across Sundays in two tiers — identical
   quoted text flagged the same way on two or more guides (the weekly
@@ -133,10 +133,20 @@ local port, pm2, certbot). First deploy:
 ```
 cd /var/www/lwcc                      # provision-site cloned the repo here
 cp .env.example .env                  # then set UPLOAD_TOKEN=$(openssl rand -hex 16)
-pm2 start ecosystem.config.cjs && pm2 save
 ln -sf /var/www/lwcc/bin/lwcc /usr/local/bin/lwcc
+lwcc deploy                           # first pm2 start (from START_CMD in bin/lwcc), probe, save
 health-check --site lwcc
 ```
+
+`lwcc deploy` sees that nothing named `lwcc` is registered with pm2 and runs
+the `pm2 start` in `START_CMD` at the top of `bin/lwcc` — `app.py` under
+`python3`, `--port 8069`, a 200M memory ceiling, the same shape
+`ecosystem.config.cjs` describes. Every pm2 call the CLI makes is scrubbed
+(`env -i` plus `PATH`, `HOME`, `LANG`, `PORT`, `PYTHONUNBUFFERED`): nothing
+from the shell that ran it reaches pm2, the process, or `~/.pm2/dump.pm2`.
+`UPLOAD_TOKEN` and `ANTHROPIC_API_KEY` reach the app from `.env` only — there
+is no box-level key store. Don't `pm2 start` or `pm2 restart --update-env` by
+hand; use the CLI.
 
 The droplet needs `poppler-utils` and `tesseract-ocr` installed (`apt-get
 install -y poppler-utils tesseract-ocr`) for uploads to convert.
@@ -152,9 +162,28 @@ block with `listen 443` in `/etc/nginx/sites-available/lwcc.lab980.com`:
 
 then `nginx -t && systemctl reload nginx`.
 
-The app listens on **8069** (`--port` in `ecosystem.config.cjs`); make sure it
-matches the `proxy_pass` port in `/etc/nginx/sites-available/lwcc.lab980.com`
-— edit whichever side disagrees. Subsequent deploys: `lwcc redeploy`.
+The app listens on **8069** (`--port` in `START_CMD` and in
+`ecosystem.config.cjs`; `LWCC_PORT` overrides the CLI); make sure it matches
+the `proxy_pass` port in `/etc/nginx/sites-available/lwcc.lab980.com` — edit
+whichever side disagrees.
+
+Subsequent deploys, after a merge to `main` (merging does not deploy):
+
+```
+lwcc deploy          # fast-forward to origin/main, pm2 restart, probe, save
+lwcc restart         # pm2 restart + probe (re-reads .env)
+lwcc logs [n]        # tail pm2 logs (default 100 lines)
+lwcc status          # HEAD, pm2 state, .env key presence, local + public probe, cert
+```
+
+`lwcc redeploy` is kept as an alias of `deploy`. **How `deploy` syncs:** `git
+fetch` then `git merge --ff-only origin/main` — not the lab980 template's
+`reset --hard`, because this repo keeps `main` merge-commits-only and the
+droplet checkout follows the same rule; a diverged checkout makes `deploy`
+stop and say so rather than discard anything. `deploy` exits non-zero (and
+does not `pm2 save`) when nothing answers on `127.0.0.1:8069/healthz`
+afterwards; `pm2 save` also only runs when every registered pm2 process is
+online. Overrides: `LWCC_FQDN`, `LWCC_BRANCH`, `LWCC_PORT`, `LWCC_PROBE_TRIES`.
 
 Tests: `python3 test/run.py` (converter) and `python3 test/test_app.py`
 (upload flow, end to end).
