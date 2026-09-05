@@ -286,11 +286,15 @@ cmd_restart() {
 
 cmd_logs() {
   # `lwcc logs 200` (the old positional form) and `lwcc logs --lines 200`
-  # both work; a bare number becomes --lines.
-  case "${1:-}" in
-    ''|*[!0-9]*) pm2_clean logs "$APP" --lines 100 "$@";;
-    *) local n="$1"; shift; pm2_clean logs "$APP" --lines "$n" "$@";;
-  esac
+  # both work: a bare leading number becomes --lines, and the default of 100
+  # is added only when the caller gave no line count of their own.
+  local args=("$@") a has_lines=0
+  case "${1:-}" in ''|*[!0-9]*) ;; *) args=(--lines "$1" "${@:2}");; esac
+  for a in "${args[@]+"${args[@]}"}"; do
+    case "$a" in --lines|--lines=*|-n) has_lines=1;; esac
+  done
+  [ "$has_lines" -eq 1 ] || args=(--lines 100 "${args[@]+"${args[@]}"}")
+  pm2_clean logs "$APP" "${args[@]}"
 }
 
 cmd_status() {
