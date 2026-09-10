@@ -1056,6 +1056,12 @@ try:
     with open(auth_mod.USERS_FILE, 'wb') as _fh:
         _fh.write(_intact)
 
+    # The password minimum is a boundary, so pin it rather than the number:
+    # one character under is refused, exactly the minimum is accepted.
+    assert auth_mod.password_problem('x' * (auth_mod.MIN_PASSWORD - 1))
+    assert auth_mod.password_problem('x' * auth_mod.MIN_PASSWORD) is None
+    assert auth_mod.password_problem('x' * auth_mod.MIN_PASSWORD, 'mismatch')
+
     # An address is attacker-supplied on the sign-in form and on an open
     # invite link, so its length is bounded and not only its shape.
     assert auth_mod.valid_email('office@example.com')
@@ -1264,7 +1270,9 @@ try:
     assert status == 410, 'an unknown link is gone, not a sign-in prompt'
 
     status, body = redeem(admin_invite, 'short')
-    assert status == 400 and b'at least 10' in body, 'weak password refused'
+    assert status == 400 \
+        and f'at least {auth_mod.MIN_PASSWORD}'.encode() in body, \
+        'weak password refused'
     status, body = redeem(admin_invite, ADMIN_PW, confirm='something else')
     assert status == 400 and b'do not match' in body
 

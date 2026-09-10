@@ -60,7 +60,7 @@ LOCK_FILE = os.path.join(ROOT, '.users.json.lock')
 ROLES = ('admin', 'staff')
 INVITE_TTL = 7 * 24 * 3600          # one week to redeem a link
 SESSION_TTL = 180 * 24 * 3600       # matches the cookie's Max-Age
-MIN_PASSWORD = 10
+MIN_PASSWORD = 8
 MAX_EMAIL = 254                     # RFC 5321's limit on a forward-path
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$')
 
