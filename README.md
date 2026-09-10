@@ -126,7 +126,10 @@ the `pm2 start` in `START_CMD` at the top of `bin/lwcc` — `app.py` under
 from the shell that ran it reaches pm2, the process, or `~/.pm2/dump.pm2`.
 Settings reach the app from `.env` only — there is no box-level key store —
 and accounts from `users.json` beside it (mode 0600, gitignored, never
-committed). Both survive a deploy; neither belongs in git. Don't `pm2 start`
+committed). Both survive a deploy; neither belongs in git. If `users.json`
+is ever left unparseable by a hand edit, the admin area answers 503 with the
+reason and refuses every write rather than treating the damage as an empty
+store — the file keeps every account, and fixing the JSON restores them. Don't `pm2 start`
 or `pm2 restart --update-env` by hand; use the CLI.
 
 The droplet needs `poppler-utils` and `tesseract-ocr` installed (`apt-get

@@ -324,7 +324,7 @@ cmd_status() {
     printf '.env:      (none — every setting is at its default)\n'
   fi
   if [ -s "$ROOT/users.json" ]; then
-    printf 'accounts:  %s\n' "$(python3 "$ROOT/lwccauth.py" users 2>/dev/null | head -1)"
+    printf 'accounts:  %s\n' "$(python3 "$ROOT/lwccauth.py" users 2>&1 | head -1)"
   else
     printf 'accounts:  (none — nobody can sign in; lwcc invite --admin --for you@example.com)\n'
   fi

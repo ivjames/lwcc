@@ -1473,6 +1473,32 @@ def gone_page():
 """
 
 
+def store_error_page(detail):
+    """users.json is present and unreadable. Nobody can sign in, nothing has
+    been written, and the page says which file to go and look at — an
+    operator staring at a blank sign-in form would reasonably conclude the
+    accounts were gone, and mint a new admin over the wreckage."""
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Account store unreadable</title><style>{PAGE_STYLE}</style></head>
+<body>
+<h1>Account store unreadable</h1>
+<div class="card">
+  <p><code>users.json</code> is there but is not valid JSON, so nobody can be
+  signed in and nothing can be written to it.
+  <b>Nothing has been written over it</b> — every account is still in that
+  file, and repairing the JSON brings them all back.</p>
+  <p class="warn">{esc(detail)}</p>
+  <p>On the server: look at <code>users.json</code> in the app directory
+  (usually a hand edit that lost a brace or a comma). <code>lwcc logs</code>
+  carries the same message.</p>
+</div>
+<p><a href="/">Current guide</a></p>
+</body></html>
+"""
+
+
 def forbidden_page():
     """Signed in, but not an administrator."""
     return f"""<!DOCTYPE html>
@@ -2850,6 +2876,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     # -- routes -------------------------------------------------------------
 
     def do_GET(self):
+        try:
+            self.route_get()
+        except lwccauth.StoreError as e:
+            self.store_error(e)
+
+    def do_POST(self):
+        try:
+            self.route_post()
+        except lwccauth.StoreError as e:
+            self.store_error(e)
+
+    def store_error(self, e):
+        """A damaged account store, answered in the shape the caller expects.
+        Raised before any route has replied — every path that touches the
+        store reads it before it writes anything back."""
+        sys.stderr.write(f'ACCOUNT STORE UNREADABLE: {e.detail} — '
+                         f'users.json left untouched; repair it by hand\n')
+        if self.path.startswith('/api/'):
+            self.send_json({'ok': False, 'error': str(e)}, status=503)
+        else:
+            self.send_page(store_error_page(e.detail), status=503,
+                           cache='no-store')
+
+    def route_get(self):
         path, _, query = self.path.partition('?')
         if path == '/healthz':
             missing = missing_deps()
@@ -2946,7 +2996,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
-    def do_POST(self):
+    def route_post(self):
         # One-shot handling: read the (bounded) body before any error reply,
         # otherwise the client hits a broken pipe mid-upload and never sees it.
         self.close_connection = True
@@ -3264,10 +3314,22 @@ def main():
     print(f'conversion workers: {workers} '
           f'(set CONVERT_WORKERS in .env to override)', flush=True)
     server = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
-    accounts = len(lwccauth.list_users())
-    print(f'lwcc serving {PUBLIC} on http://{args.host}:{args.port} — '
-          f'{accounts} account(s)', flush=True)
-    if not accounts:
+    accounts, broken = None, None
+    try:
+        accounts = len(lwccauth.list_users())
+    except lwccauth.StoreError as exc:
+        broken = exc.detail
+    who = 'ACCOUNT STORE UNREADABLE' if broken else f'{accounts} account(s)'
+    print(f'lwcc serving {PUBLIC} on http://{args.host}:{args.port} — {who}',
+          flush=True)
+    if broken:
+        # Serve anyway: the admin area answers 503 with the reason, which is
+        # how the operator finds out. Refusing to boot would take the site's
+        # public guides down over a file only /admin needs.
+        print(f'users.json is present and not valid JSON ({broken}) — nobody '
+              f'can sign in. Nothing has been written to it; repair the file '
+              f'by hand and every account comes back.', flush=True)
+    if accounts == 0:
         # Fail closed, deliberately: there is no bootstrap password, so an
         # app with no accounts admits nobody until an invite is minted here.
         print('NO ACCOUNTS YET — run `lwcc invite --admin --for you@example.com` '

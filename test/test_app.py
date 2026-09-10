@@ -937,6 +937,38 @@ try:
     assert auth_mod.login('someone@example.com', 'a long enough password') \
         == (None, None), 'and the old password is simply dead now'
 
+    # A store that is present and unreadable is damage, not emptiness. Every
+    # save writes the file whole, so treating a bad parse as "no accounts"
+    # would let the next mutation replace a damaged file that still holds
+    # every account with a blank one that holds none — destroying what the
+    # operator needs in order to repair it.
+    _intact = open(auth_mod.USERS_FILE, 'rb').read()
+    with open(auth_mod.USERS_FILE, 'w') as _fh:
+        _fh.write('{"users": {"a@b.co": ')                # truncated by hand
+    try:
+        auth_mod.load()
+        raise AssertionError('a damaged store must not read as an empty one')
+    except auth_mod.StoreError as _e:
+        assert _e.status == 503 and 'not valid JSON' in str(_e)
+    for _op in (lambda: auth_mod.create_invite('x@example.com'),
+                lambda: auth_mod.destroy_session('whatever'),
+                lambda: auth_mod.remove_user('someone@example.com')):
+        try:
+            _op()
+            raise AssertionError('a mutation on a damaged store must refuse')
+        except auth_mod.StoreError:
+            pass
+    assert open(auth_mod.USERS_FILE, 'rb').read() == b'{"users": {"a@b.co": ', \
+        'the damaged file is left exactly as it was'
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
+    assert auth_mod.load()['users'], 'repairing the file brings it all back'
+
+    # A *missing* file is the other thing entirely — a fresh install.
+    os.rename(auth_mod.USERS_FILE, auth_mod.USERS_FILE + '.away')
+    assert auth_mod.load() == {'users': {}, 'invites': {}, 'sessions': {}}
+    os.rename(auth_mod.USERS_FILE + '.away', auth_mod.USERS_FILE)
+
     # Password hashing is bounded. scrypt is memory-hard by design (~16 MB a
     # go) and /admin/login is public with a thread per connection, so without
     # a cap a burst of wrong passwords is gigabytes of transient allocation
@@ -1365,6 +1397,33 @@ try:
 
     # The second browser of the surviving admin is untouched by all of that.
     assert req('/admin', headers=COOKIE2)[0] == 200
+
+    # And end to end: a users.json damaged under the running app (the hand
+    # edit this file invites, being untracked and edited on the box) answers
+    # 503 everywhere it matters and is never written over — an operator who
+    # saw a blank sign-in form instead would reasonably mint a new admin
+    # straight over the accounts that are still in there.
+    _users_json = os.path.join(scratch, 'users.json')
+    _good = open(_users_json, 'rb').read()
+    _damaged = b'{"users": {"boss@example.com": {"role": "admin"'
+    with open(_users_json, 'wb') as fh:
+        fh.write(_damaged)
+    status, body = req('/admin', headers=COOKIE2)
+    assert status == 503 and b'users.json' in body \
+        and b'Nothing has been written over it' in body, (status, body[:200])
+    status, body = req('/admin')
+    assert status == 503, 'the sign-in page does not pretend to be a fresh install'
+    status, body = req('/api/rerender-all', data=b'{}',
+                       headers={**COOKIE2, 'Content-Type': 'application/json'})
+    assert status == 503 and not json.loads(body)['ok'], (status, body)
+    status, body = req('/admin/logout', headers=COOKIE2)
+    assert status == 503, 'even signing out refuses — it is a write'
+    assert open(_users_json, 'rb').read() == _damaged, \
+        'nothing was written over the damaged store'
+    with open(_users_json, 'wb') as fh:
+        fh.write(_good)
+    assert req('/admin', headers=COOKIE2)[0] == 200, \
+        'repairing the file signs everyone back in'
 
     # Every admin page's inline JS must actually parse.
     for js_path in ('/admin', '/admin/history', '/admin/users',

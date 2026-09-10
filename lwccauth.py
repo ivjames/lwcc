@@ -108,6 +108,26 @@ class AuthError(Exception):
         self.status = status
 
 
+class StoreError(AuthError):
+    """users.json is there and cannot be read.
+
+    Never treated as an empty store, which is the tempting shortcut and a
+    destructive one: every save writes the file whole, so one mutation on a
+    pretend-empty store — a `lwcc invite`, or merely someone hitting
+    /admin/logout — would replace a damaged file that still holds every
+    account with a blank one that holds none, destroying the very thing an
+    operator needs in order to repair it. Reads fail closed and writes refuse
+    outright; the file is left exactly as found.
+    """
+
+    def __init__(self, detail):
+        super().__init__(
+            'The account store cannot be read: users.json exists but is not '
+            'valid JSON. Nobody can sign in until it is repaired. Nothing '
+            'has been written — the file is exactly as it was.', 503)
+        self.detail = str(detail)
+
+
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
 
@@ -144,14 +164,20 @@ def _blank():
 def load():
     """The whole store, with expired invites and sessions dropped. Read fresh
     every time: the CLI writes this file behind the running app's back, and a
-    cached copy would answer with accounts that no longer exist."""
+    cached copy would answer with accounts that no longer exist.
+
+    A *missing* file is a blank store — that is a fresh install. A file that
+    is present and unreadable raises StoreError instead, so no caller can
+    mistake damage for emptiness and save over it."""
     try:
         with open(USERS_FILE, encoding='utf-8') as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
-        return _blank()
+    except FileNotFoundError:
+        return _blank()                      # no store yet: fresh install
+    except (OSError, ValueError) as e:
+        raise StoreError(e) from e
     if not isinstance(data, dict):
-        return _blank()
+        raise StoreError('the top level is not a JSON object')
     for key in ('users', 'invites', 'sessions'):
         if not isinstance(data.get(key), dict):
             data[key] = {}
