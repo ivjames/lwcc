@@ -10,16 +10,32 @@ becomes the front page.
 - `GET /<YYYY-MM-DD>/` — any published Sunday (permanent URLs)
 - `GET /archive` — every published Sunday
 - `GET /admin` — the admin area (batch upload with per-file results, review
-  panel, guide editor). Every admin page is behind a sign-in: enter the upload
-  token once at `/admin/login` and a long-lived HttpOnly cookie (~6 months)
-  keeps that browser signed in; `/admin/logout` ends it.
+  panel, guide editor). Every admin page is behind a sign-in: email and
+  password at `/admin/login`, after which an HttpOnly cookie holding a
+  server-side session id (~6 months) keeps that browser signed in.
+  `POST /admin/logout` destroys the session, so the cookie is dead everywhere
+  at once rather than merely forgotten by one browser (the GET only offers
+  the button — a `SameSite=Lax` cookie rides along with any cross-site
+  navigation, so signing out on a GET would let any page, or a link
+  prefetcher, end someone's session). Checking the password and
+  opening the session are one transaction, so a reset landing mid-sign-in
+  cannot be outrun by someone still holding the old password.
+- `GET /invite/<token>` — where accounts come from. There is no sign-up and
+  no shared password: an administrator mints a one-time link, the person
+  opening it chooses their own password and is signed in on the spot. Links
+  work once and expire after seven days. The same mechanism, pinned to an
+  existing address, is the password reset — redeeming one signs that
+  account's other browsers out.
+- `GET /admin/users` — administrators invite, reset, remove and revoke
+  (`POST /api/users`). Removing an account signs it out everywhere
+  immediately. Staff never see the link and get a 403 at the URL.
 - `GET /admin/history` — the per-file upload results (filename, status,
   warnings, errors), browsable long after the upload page is closed:
   every conversion ever run, newest first, filterable by outcome
   (`?status=ok|warned|failed`). Backed by `uploads.log`; the last few also
   appear on `/admin` as a Recent-uploads card.
-- `POST /api/upload` — raw PDF body, authenticated by the admin cookie or an
-  `X-Upload-Token` header (for curl). The bytes are spooled and accepted
+- `POST /api/upload` — raw PDF body, authenticated by the session cookie.
+  There is no API token — a signed-in browser or nothing. The bytes are spooled and accepted
   immediately; a server-side queue converts one file at a time and publishes
   to `public/<date>/`, so batch uploads are bounded by bandwidth, not OCR —
   the admin page polls `GET /api/status?ids=…` for per-file progress, and
@@ -30,54 +46,25 @@ becomes the front page.
   service date; the admin upload table has a per-file date field for this.
   Failed conversions keep their PDF in `queue/failed/` and show on `/admin`
   with a Retry button (optionally pinned to a date) — after a parser fix,
-  no re-upload is needed. Fails closed when no token is configured.
-- `GET /admin/aiscan/<YYYY-MM-DD>` — the AI article scanner: reviews a
-  Sunday's parsed guide with Claude for text the OCR pipeline filed under the
-  wrong class (announcements vs page directions vs worship content) and
-  offers verified, text-preserving repairs — nothing is rewritten, findings
-  are moves only, each checked against the stored text before it is applied.
-  Two more agents run in series with it: a scripture verse-number checker
-  (each passage read against its reference, `<sup>` labels restored with
-  markup-only fixes) and a photo verifier that looks at the Sunday's
-  published photo crops themselves and flags any that are really sheet
-  music or a block of unrelated printed text rather than a photograph — its
-  fix drops the crop (and its file) from the page's Photos section, verified
-  by filename before it is applied. The agents also run à la carte: the scan
-  page's checkboxes (or an `agents` list on `POST /api/aiscan`) pick any
-  subset, and a partial run replaces only those agents' findings — the
-  others' findings, statuses included, stay put, with per-agent summaries,
-  usage, and last-run times tracked in aiscan.json.
-  Findings persist in `public/<date>/aiscan.json`; apply, dismiss, or leave
-  them for hand-editing. Requires `ANTHROPIC_API_KEY` in `.env` (scanning
-  fails closed without it; `AISCAN_MODEL` overrides the default model). The
-  `/admin` panel links every Sunday's scan, badges open findings, and offers
-  a scan-all for the unscanned backlog (one API request per Sunday). Scans
-  run through their own durable server-side queue — up to `AISCAN_WORKERS`
-  (default 10) at a time, markers in `queue/aiscan/` re-enqueued at startup —
-  so an `lwcc deploy` pauses in-flight scans rather than losing them, and
-  the admin pages just watch the queue until it drains. `GET /admin/aiscan`
-  aggregates matching findings across Sundays in two tiers — identical
-  quoted text flagged the same way on two or more guides (the weekly
-  masthead filed as an announcement), and same-error-varying-text groups
-  (the same misclassification with different words each week, grouped by
-  current → proposed and fix op) —
-  and applies or dismisses a whole group at once, each fix still verified
-  against its own Sunday's stored text (typography-tolerant: a plain-ASCII
-  quote matches the printed curly quotes and dashes). Dismissed and skipped
-  findings are both reversible — a Reopen button on the group (and per
-  Sunday) puts them back to open. "Clear resolved" (per Sunday, or across
-  all Sundays from the admin card) archives applied and dismissed findings
-  into `resolvedFindings` in aiscan.json — out of the pages and groups, kept
-  as history, and preserved across re-scans. Skipped fixes are recoverable:
-  "Retry skipped fixes" (per group and per Sunday) reopens them and re-applies
-  through a relocation pass — when a stored position went stale (earlier
-  fixes, hand edits, a re-convert), the quoted text is searched for across
-  the guide and the fix applies only where it matches exactly one target;
-  vanished or ambiguous text still refuses with the reason. A group whose
-  findings carry no mechanical fix offers "Re-scan for fixes": its Sundays re-scan through the
-  queue so the model can pick from the current fix vocabulary, then the
-  group returns applyable.
+  no re-upload is needed.
 - `GET /healthz` — liveness for the platform `health-check` sweep
+
+## Who can do what
+
+Two roles. **Staff** upload, retry a failed conversion, mark a Sunday
+reviewed, and edit a guide's text. **Admins** do all of that plus the
+maintenance side: re-render, re-convert (both kinds), the whole-backlog
+sweeps, cancel pending re-conversions, unpublish, and `/admin/users`.
+
+The split is enforced twice on purpose. The panel doesn't render an
+admin-only button for a staff account (`manage_html` / `recent_uploads_html`
+take the signed-in user), and the API refuses the action anyway with a 403
+(`ADMIN_ONLY_ACTIONS` near the top of `app.py`). The HTML is a courtesy; the
+server is the rule.
+
+Admin is a role, not an address: whoever is invited with `--admin` has it.
+Pinning it to one email instead would be a change to `is_admin` in `app.py`
+and nowhere else.
 
 Every published Sunday links its printed original: the week-nav strip on a
 guide page offers "Original PDF" (`/<date>/original` — an embedded viewer
@@ -109,21 +96,12 @@ backlog through the server queue; each sweep registers a server-side meter
 that the queue banner and the sweep card show live ("37 of 120 done, 3
 failed" with a progress bar, in any browser) until its last job settles.
 
-Batch the backlog from a terminal:
-
-```
-for f in backlog/*.pdf; do
-  curl -X POST --data-binary @"$f" -H "X-Upload-Token: $TOKEN" \
-       -H "Content-Type: application/pdf" \
-       -H "X-Filename: $(basename "$f")" https://lwcc.lab980.com/api/upload
-done
-```
-
-(`X-Filename` is optional but makes `/admin/history` show which PDF produced
-each result.)
-
-(or convert locally with `bin/wg-convert convert backlog/*.pdf -o public/`
-and commit/rsync the output — same result.)
+Batching the backlog: select every PDF at once in the `/admin` upload card
+(the file picker is multiple, and dragging a folder's worth onto the drop
+zone works too) — the uploads go up one after another and the server queue
+converts them, so the page can be closed once the last one has uploaded.
+Or convert locally with `bin/wg-convert convert backlog/*.pdf -o public/` and
+commit/rsync the output — same result, no app involved.
 
 ## Deploy on the droplet
 
@@ -132,11 +110,16 @@ local port, pm2, certbot). First deploy:
 
 ```
 cd /var/www/lwcc                      # provision-site cloned the repo here
-cp .env.example .env                  # then set UPLOAD_TOKEN=$(openssl rand -hex 16)
 ln -sf /var/www/lwcc/bin/lwcc /usr/local/bin/lwcc
 lwcc deploy                           # first pm2 start (from START_CMD in bin/lwcc), probe, save
+lwcc invite --admin --for you@example.com   # open the link it prints, set a password
 health-check --site lwcc
 ```
+
+`.env` is optional — every setting in it has a default (see `.env.example`).
+**Nobody can sign in until that first invite is redeemed**; the app says so
+on startup when `users.json` is empty. That is the intended state of a fresh
+install, not a fault.
 
 `lwcc deploy` sees that nothing named `lwcc` is registered with pm2 and runs
 the `pm2 start` in `START_CMD` at the top of `bin/lwcc` — `app.py` under
@@ -144,9 +127,13 @@ the `pm2 start` in `START_CMD` at the top of `bin/lwcc` — `app.py` under
 `ecosystem.config.cjs` describes. Every pm2 call the CLI makes is scrubbed
 (`env -i` plus `PATH`, `HOME`, `LANG`, `PORT`, `PYTHONUNBUFFERED`): nothing
 from the shell that ran it reaches pm2, the process, or `~/.pm2/dump.pm2`.
-`UPLOAD_TOKEN` and `ANTHROPIC_API_KEY` reach the app from `.env` only — there
-is no box-level key store. Don't `pm2 start` or `pm2 restart --update-env` by
-hand; use the CLI.
+Settings reach the app from `.env` only — there is no box-level key store —
+and accounts from `users.json` beside it (mode 0600, gitignored, never
+committed). Both survive a deploy; neither belongs in git. If `users.json`
+is ever left unparseable by a hand edit, the admin area answers 503 with the
+reason and refuses every write rather than treating the damage as an empty
+store — the file keeps every account, and fixing the JSON restores them. Don't `pm2 start`
+or `pm2 restart --update-env` by hand; use the CLI.
 
 The droplet needs `poppler-utils` and `tesseract-ocr` installed (`apt-get
 install -y poppler-utils tesseract-ocr`) for uploads to convert.
@@ -162,6 +149,20 @@ block with `listen 443` in `/etc/nginx/sites-available/lwcc.lab980.com`:
 
 then `nginx -t && systemctl reload nginx`.
 
+**Rate-limiting sign-ins** is nginx's job here, not the app's: only the vhost
+sees the real client address (the app is behind a proxy, and trusting an
+`X-Forwarded-For` it does not control would be worse than not limiting at
+all). The app bounds the *cost* of a burst — at most
+`MAX_CONCURRENT_HASHES` scrypt hashes run at once, so wrong passwords cannot
+exhaust the process — and sleeps half a second on each failure, but it does
+not count attempts per address. If this site ever faces more than the church
+office, add to `http {}` and the sign-in location:
+
+```
+    limit_req_zone $binary_remote_addr zone=lwcclogin:1m rate=10r/m;
+    location = /admin/login { limit_req zone=lwcclogin burst=5 nodelay; proxy_pass ...; }
+```
+
 The app listens on **8069** (`--port` in `START_CMD` and in
 `ecosystem.config.cjs`; `LWCC_PORT` overrides the CLI); make sure it matches
 the `proxy_pass` port in `/etc/nginx/sites-available/lwcc.lab980.com` — edit
@@ -173,8 +174,22 @@ Subsequent deploys, after a merge to `main` (merging does not deploy):
 lwcc deploy          # fast-forward to origin/main, pm2 restart, probe, save
 lwcc restart         # pm2 restart + probe (re-reads .env)
 lwcc logs [n]        # tail pm2 logs (default 100 lines)
-lwcc status          # HEAD, pm2 state, .env key presence, local + public probe, cert
+lwcc status          # HEAD, pm2 state, .env keys, accounts, local + public probe, cert
 ```
+
+People:
+
+```
+lwcc invite --for office@example.com        # staff: upload, review, edit
+lwcc invite --admin --for you@example.com   # also maintenance + /admin/users
+lwcc invite --reset --for office@example.com  # password reset link
+lwcc users                                  # accounts + links waiting to be used
+lwcc user-remove office@example.com         # deletes the account, signs it out
+lwcc invite-revoke <token>                  # cancels a pending link
+```
+
+Day to day this is easier from `/admin/users`; the CLI is what mints the
+first administrator, and what recovers the site when nobody can sign in.
 
 `lwcc redeploy` is kept as an alias of `deploy`. **How `deploy` syncs:** `git
 fetch` then `git merge --ff-only origin/main` — not the lab980 template's

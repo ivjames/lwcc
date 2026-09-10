@@ -8,31 +8,22 @@ newest at /) and converts newly uploaded worship-guide PDFs in place:
     GET  /YYYY-MM-DD/ any published Sunday
     GET  /archive     list of every published Sunday
     GET  /admin       admin area (upload, review, edit) — every page is gated
-                      by a sign-in cookie; POST /admin/login sets it (long-
-                      lived, HttpOnly) after checking the upload token once
-    POST /api/upload  raw PDF body -> convert -> publish; the admin cookie or
-                      an X-Upload-Token header must match UPLOAD_TOKEN from
-                      .env (fails closed if unset)
-    GET  /admin/aiscan/YYYY-MM-DD   AI article scanner: review a Sunday for
-                      OCR misclassifications (announcements vs page directions
-                      vs content) — plus a scripture verse-number agent that
-                      reads each passage against its reference and checks
-                      every verse carries its <sup> superscript label, and a
-                      photo verifier that looks at the published photo crops
-                      and flags sheet music or unrelated printed text that
-                      slipped through as a "photo" — and apply verified,
-                      text-preserving repairs;
-                      POST /api/aiscan queues scans (one date or a batch;
-                      an optional "agents" subset runs them à la carte, a
-                      partial run replacing only those agents' findings;
-                      needs ANTHROPIC_API_KEY in .env) on a durable queue —
-                      up to AISCAN_WORKERS run concurrently, markers in
-                      queue/aiscan/ survive restarts — GET /api/aiscan-status
-                      reports live progress, POST /api/aiscan-apply
-                      applies/dismisses selected findings (per Sunday, or a
-                      cross-guide batch), and GET /admin/aiscan aggregates
-                      matching findings across Sundays for bulk repair
+                      by a sign-in cookie carrying a server-side session id;
+                      POST /admin/login sets it after checking an email and
+                      password
+    GET  /invite/<token>            redeem a one-time invite or password-reset
+                      link: the person sets their own password and is signed
+                      in; POST redeems it. Accounts exist only this way
+    GET  /admin/users admins invite, reset, remove and sign out accounts
+                      (POST /api/users); staff never see it
+    POST /api/upload  raw PDF body -> convert -> publish; needs a signed-in
+                      session (there is no API token)
     GET  /healthz     liveness for the platform health-check sweep
+
+Accounts, invite links and sessions live in users.json next to this file
+(see lwccauth.py). Two roles: staff upload, review and edit; admins also get
+the maintenance tools (re-render, re-convert, the sweeps, unpublish) and the
+user list — hidden from staff in the HTML *and* refused server-side.
 
 Stdlib only, runs under pm2 behind the site's nginx vhost per lab980
 conventions. Uploads run the wgconvert pipeline synchronously (a few seconds);
@@ -41,17 +32,18 @@ not silently dropped.
 """
 import argparse
 import datetime
-import hmac
 import http.cookies
 import http.server
 import json
 import os
+import posixpath
 import queue
 import re
 import shutil
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import urllib.parse
 
@@ -64,13 +56,32 @@ RECONVERT_QUEUE_DIR = os.path.join(QUEUE_DIR, 'reconvert')  # one marker per
                                                  # so a restart resumes them
 DATE_DIR_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 MAX_UPLOAD = 40 * 1024 * 1024
-COOKIE_NAME = 'wg_token'
+# Signing in and redeeming an invite are the only POSTs served before anyone
+# is authenticated, and an email, a password and a next path come to a few
+# hundred bytes. They are capped far below MAX_UPLOAD because the body is read
+# and form-parsed before the password reaches the hash queue: a thread parked
+# on a hash slot holding 40 MB of "password" (and the copies parse_qs makes of
+# it) is the memory exhaustion that bounding the hashes was meant to close.
+MAX_AUTH_BODY = 8 * 1024
+AUTH_POST_RE = re.compile(
+    r'/admin/(login|logout)|/invite/[A-Za-z0-9_-]{8,128}')
+COOKIE_NAME = 'wg_session'
 COOKIE_MAX_AGE = 180 * 24 * 3600
 # where /admin/login may redirect after sign-in; anything else falls back
-# to /admin so the token can't be used to bounce visitors off-site
-ADMIN_NEXT_RE = re.compile(r'/admin(/edit/\d{4}-\d{2}-\d{2})?')
+# to /admin so the form can't be used to bounce visitors off-site
+ADMIN_NEXT_RE = re.compile(
+    r'/admin(/history|/users|/edit/\d{4}-\d{2}-\d{2})?')
+# The maintenance tools: everything that rewrites or withdraws a published
+# Sunday. Staff never see the buttons (manage_html / recent_uploads_html
+# don't render them) and the API refuses them here too — the panel is a
+# convenience, the server is the rule.
+ADMIN_ONLY_ACTIONS = frozenset((
+    '/api/rerender', '/api/rerender-all', '/api/reconvert',
+    '/api/reconvert-merge', '/api/reconvert-batch', '/api/reconvert-clear',
+    '/api/unpublish', '/api/users'))
 
 sys.path.insert(0, ROOT)
+import lwccauth  # noqa: E402
 from wgconvert import aiscan, extract, parse, render  # noqa: E402
 from wgconvert.extract import render_page_image, render_page_region  # noqa: E402
 from wgconvert.merge import merge_guides  # noqa: E402
@@ -139,6 +150,14 @@ def load_env():
 
 
 ENV = load_env()
+
+
+def is_admin(user):
+    """The maintenance tools and the people list are the admin role's. Admin
+    is a role, not an address: whoever was invited with --admin has it, so
+    an install with one such invite has exactly one admin. Pinning it to a
+    specific address instead would be a change here and nowhere else."""
+    return bool(user) and user.get('role') == 'admin'
 
 
 def published_dates():
@@ -784,7 +803,12 @@ def save_guide(d, submitted):
     rerender_date(d)
 
 
-# --- AI article scanner -----------------------------------------------------
+# --- AI article scanner (dormant) -------------------------------------------
+# NOT REACHABLE OVER HTTP. The scanner's routes, admin card and worker
+# threads were removed; the machinery below is kept intact and still tested
+# in-process, so re-enabling it is a matter of restoring the routes and the
+# worker startup in main() rather than rewriting any of this.
+#
 # Reviews a published Sunday's guide.json with Claude for text the parser
 # filed under the wrong class (announcements vs page/stage directions vs
 # worship content) — the classic OCR-backlog failure. A second agent pass
@@ -1226,485 +1250,6 @@ def apply_aiscan(d, ids, action='apply'):
     return results
 
 
-AISCAN_PAGE = ("""<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Scan __DATE__</title><style>__STYLE__
-  .finding{border-top:1px dashed #d8d6c7;padding:10px 0;margin-top:10px}
-  .finding blockquote{margin:6px 0;padding:6px 10px;background:#f1efe6;
-    border-left:3px solid #76a2bf;border-radius:4px;font-size:.92em}
-  .tag{font-family:Arial,Helvetica,sans-serif;font-size:.72em;border-radius:6px;
-    padding:2px 8px;color:#fff;background:#3f6b82;margin-left:6px}
-  .tag.high{background:#a20816}.tag.medium{background:#8a6410}.tag.low{background:#54574a}
-  .tag.applied{background:#1f7a44}.tag.dismissed{background:#54574a}
-  .tag.skipped{background:#8a6410}
-  .meta{color:#54574a;font-size:.88em}
-  button.mini{padding:4px 12px;font-size:.82em;margin-left:8px;background:#3f6b82}
-  .agents label{margin-right:14px;font-size:.92em;white-space:nowrap}
-  .agents button{margin-right:10px}
-</style></head>
-<body>
-<h1>AI Article Scanner &mdash; __DATE__</h1>
-<div class="card">
-  <p>Reviews this Sunday&#8217;s parsed guide with Claude for text the OCR
-  pipeline filed under the wrong class &mdash; announcements vs page
-  directions vs worship content. A second agent reads the scripture section
-  passage by passage and, from each reference, checks that every verse is
-  labeled with its superscript verse number &mdash; flagging bare, missing,
-  or wrongly superscripted numbers. A third agent looks at this
-  Sunday&#8217;s published photos themselves and flags any crop that is
-  really sheet music or a block of unrelated printed text rather than a
-  photograph &mdash; its fix drops the crop from the page&#8217;s Photos
-  section. Repairs move the printed text, adjust <code>&lt;sup&gt;</code>
-  markup, or drop a misjudged photo; nothing is rewritten, and every fix
-  is verified against the stored guide before it is applied. The agents run
-  &agrave; la carte: untick the ones you don&#8217;t need and a partial
-  re-run refreshes only the ticked agents&#8217; findings, leaving the
-  others&#8217; findings and statuses untouched.</p>
-  __KEYNOTE__
-  <p class="agents">
-     <label><input type="checkbox" class="agent" value="article" checked> Article</label>
-     <label><input type="checkbox" class="agent" value="verses" checked> Scripture verses</label>
-     <label><input type="checkbox" class="agent" value="photos" checked> Photos</label>
-     <button id="scan" __SCANDIS__>__SCANLABEL__</button>
-     <span id="scanmsg"></span></p>
-</div>
-<div id="results"></div>
-<p><a href="/__DATE__/">View page</a> &middot;
-   <a href="/admin/edit/__DATE__">Edit</a> &middot;
-   <a href="/admin">Back to admin</a></p>
-<script id="scan-data" type="application/json">__SCAN__</script>
-<script>
-const $ = id => document.getElementById(id);
-const SCAN = JSON.parse($('scan-data').textContent);
-const esc = s => String(s == null ? '' : s)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-function render() {
-  const box = $('results');
-  if (!SCAN) { box.innerHTML = ''; return; }
-  const open = SCAN.findings.filter(f => f.status === 'open');
-  // Scan times display as Pacific wall-clock. Stamps without an offset are
-  // legacy ones from the droplet's clock, which runs UTC — parse them as
-  // UTC (append Z) so they convert instead of showing 7-8 hours off.
-  const fmtAt = s => {
-    if (!s) return '';
-    const d = new Date(/[+-]\d{2}:\d{2}$|Z$/.test(s) ? s : s + 'Z');
-    if (isNaN(d)) return String(s);
-    return d.toLocaleString('sv-SE', {timeZone: 'America/Los_Angeles'}) + ' PT';
-  };
-  let html = '<div class="card"><p><b>Scan from ' + esc(fmtAt(SCAN.at)) + '</b>' +
-    ' <span class="meta">(' + esc(SCAN.model) + ')</span></p>' +
-    '<p>' + esc(SCAN.summary) + '</p>';
-  if (SCAN.agents) {
-    const NAMES = {article: 'Article', verses: 'Scripture verses', photos: 'Photos'};
-    html += '<p class="meta">' + Object.keys(NAMES).map(k =>
-      NAMES[k] + ': ' + (SCAN.agents[k]
-        ? esc(fmtAt(SCAN.agents[k].at)) : 'not yet run')).join(' &middot; ') +
-      '</p>';
-  }
-  if (!SCAN.findings.length) {
-    html += '<p class="ok">No misclassifications found.</p>';
-  } else {
-    // actionable first: open, then skipped (retryable), dismissed, applied
-    const rank = {open: 0, skipped: 1, dismissed: 2, applied: 3};
-    const sorted = SCAN.findings.map((f, i) => [f, i]).sort((a, b) =>
-      ((rank[a[0].status] ?? 4) - (rank[b[0].status] ?? 4)) || (a[1] - b[1]))
-      .map(p => p[0]);
-    html += sorted.map(f =>
-      '<div class="finding">' +
-      (f.status !== 'applied'
-        ? '<input type="checkbox" class="pick" value="' + esc(f.id) + '"> '
-        : '') +
-      '<b>' + esc(f.current) + ' &rarr; ' + esc(f.proposed) + '</b>' +
-      '<span class="tag ' + esc(f.confidence) + '">' + esc(f.confidence) + '</span>' +
-      (f.status !== 'open'
-        ? '<span class="tag ' + esc(f.status) + '">' + esc(f.status) + '</span>' : '') +
-      '<div>' + esc(f.issue) + '</div>' +
-      '<blockquote>' + esc(f.quote) +
-      (/^photo-\d+-\d+\.jpg$/.test(f.quote || '')
-        ? '<br><img src="/__DATE__/' + esc(f.quote) + '" alt="" ' +
-          'style="max-width:260px;max-height:200px;margin-top:6px">'
-        : '') +
-      '</blockquote>' +
-      '<div class="meta">' +
-      ({f: 'article &middot; ', v: 'verses &middot; ', p: 'photos &middot; '}
-        [(f.id || '')[0]] || '') + esc(f.path) +
-      (f.fix ? ' &middot; fix: ' + esc(f.fix.op)
-        : ' &middot; no mechanical fix — <a href="/admin/edit/__DATE__#find=' +
-          encodeURIComponent(f.quote || '') + '">edit by hand</a>') +
-      (f.statusNote ? ' &middot; ' + esc(f.statusNote) : '') +
-      '</div></div>').join('');
-    const reopenable = SCAN.findings.filter(f =>
-      f.status === 'dismissed' || f.status === 'skipped');
-    const settled = SCAN.findings.filter(f =>
-      f.status === 'applied' || f.status === 'dismissed').length;
-    const skippedFix = SCAN.findings.filter(f =>
-      f.status === 'skipped' && f.fix).length;
-    const buttons =
-      (open.some(f => f.fix) ? '<button id="applysel">Apply selected</button>' : '') +
-      (skippedFix ? '<button id="retryskipped" class="mini">Retry skipped fixes (' +
-        skippedFix + ')</button>' : '') +
-      (open.length ? '<button id="dismisssel" class="mini">Dismiss selected</button>' : '') +
-      (reopenable.length ? '<button id="undismisssel" class="mini">Reopen selected</button>' : '') +
-      (settled ? '<button id="archiveall" class="mini">Clear resolved (' +
-        settled + ')</button>' : '');
-    if (buttons) html += '<p>' + buttons + ' <span id="applymsg"></span></p>';
-  }
-  if (SCAN.findings.some(f => f.status === 'skipped')) {
-    html += '<p class="meta"><b>Skipped?</b> Before a fix is applied, its ' +
-      'quoted text is re-checked against this Sunday&#8217;s stored guide; ' +
-      'a skip means the check failed — usually because the guide changed ' +
-      'after the scan (earlier fixes, a hand-edit, or a re-convert). The ' +
-      'reason is noted on each skipped finding. <b>Retry skipped fixes</b> ' +
-      'relocates the quoted text in the changed guide and applies when it ' +
-      'matches exactly one place; text that is gone or ambiguous still ' +
-      'refuses, and re-running the scan refreshes everything.</p>';
-  }
-  const archived = (SCAN.resolvedFindings || []).length;
-  if (archived) {
-    html += '<p class="meta">' + archived + ' resolved finding' +
-      (archived > 1 ? 's' : '') + ' archived (kept in aiscan.json).</p>';
-  }
-  html += '</div>';
-  box.innerHTML = html;
-  // mode: 'apply' acts on checked open findings with a fix, 'dismiss' on
-  // checked open findings, 'undismiss' reopens checked dismissed/skipped.
-  const act = mode => async () => {
-    const byId = {};
-    for (const f of SCAN.findings) byId[f.id] = f;
-    const want = mode === 'undismiss' ? ['dismissed', 'skipped'] : ['open'];
-    const ids = [...document.querySelectorAll('.pick:checked')]
-      .map(c => c.value)
-      .filter(id => byId[id] && want.includes(byId[id].status) &&
-                    (mode !== 'apply' || byId[id].fix));
-    if (!ids.length) { $('applymsg').textContent = 'Nothing selected for this action.'; return; }
-    $('applymsg').textContent = 'Working…';
-    const res = await fetch('/api/aiscan-apply', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({date: '__DATE__', ids: ids,
-                            dismiss: mode === 'dismiss',
-                            undismiss: mode === 'undismiss'}),
-    });
-    const data = await res.json().catch(() => ({ok: false}));
-    if (!data.ok) { $('applymsg').textContent = 'Failed: ' + (data.error || res.status); return; }
-    location.reload();
-  };
-  const ap = $('applysel'), di = $('dismisssel'), un = $('undismisssel');
-  if (ap) ap.addEventListener('click', act('apply'));
-  if (di) di.addEventListener('click', act('dismiss'));
-  if (un) un.addEventListener('click', act('undismiss'));
-  const oneShot = (id, body) => {
-    const b = $(id);
-    if (b) b.addEventListener('click', async () => {
-      b.disabled = true;
-      const res = await fetch('/api/aiscan-apply', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(body),
-      });
-      const data = await res.json().catch(() => ({ok: false}));
-      if (!data.ok) { $('applymsg').textContent = 'Failed: ' + (data.error || res.status); return; }
-      location.reload();
-    });
-  };
-  oneShot('archiveall', {date: '__DATE__', archive: true});
-  oneShot('retryskipped', {date: '__DATE__', retry: true});
-}
-render();
-
-// Scans run from the server-side queue (up to 10 concurrently) and survive
-// app restarts; this page just watches the queue until this date settles.
-let watching = false;
-async function pollScan() {
-  let job = null, data = null;
-  try {
-    const res = await fetch('/api/aiscan-status');
-    if (res.status === 401) return;          // signed out — stop quietly
-    data = await res.json();
-    job = (data.jobs || {})['__DATE__'];
-  } catch (e) {
-    if (watching) setTimeout(pollScan, 2000);
-    return;
-  }
-  if (job && (job.status === 'queued' || job.status === 'scanning')) {
-    watching = true;
-    $('scan').disabled = true;
-    $('scanmsg').textContent = job.status === 'scanning'
-      ? 'Scanning — the article, scripture-verse, and photo agents are reading, may take a minute or two…'
-      : 'Queued (' + data.scanning.length + ' scanning, ' + data.waiting + ' waiting)…';
-    setTimeout(pollScan, 2000);
-    return;
-  }
-  if (!watching) return;
-  watching = false;
-  if (job && job.status === 'failed') {
-    $('scanmsg').textContent = 'Scan failed: ' + (job.error || 'unknown error');
-    $('scan').disabled = false;
-  } else {
-    location.reload();
-  }
-}
-pollScan();      // a scan may already be queued or running for this date
-
-$('scan').addEventListener('click', async () => {
-  const agents = [...document.querySelectorAll('.agent:checked')].map(c => c.value);
-  if (!agents.length) {
-    $('scanmsg').textContent = 'Tick at least one agent to run.';
-    return;
-  }
-  $('scan').disabled = true;
-  $('scanmsg').textContent = 'Queueing…';
-  try {
-    const res = await fetch('/api/aiscan', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(agents.length === 3
-        ? {date: '__DATE__'} : {date: '__DATE__', agents: agents}),
-    });
-    const data = await res.json().catch(() => ({ok: false, error: 'HTTP ' + res.status}));
-    if (!data.ok) throw new Error(data.error || res.statusText);
-    watching = true;
-    pollScan();
-  } catch (e) {
-    $('scanmsg').textContent = 'Failed: ' + e.message;
-    $('scan').disabled = false;
-  }
-});
-</script>
-</body></html>
-""")   # __STYLE__ is filled in aiscan_page (PAGE_STYLE is defined below)
-
-
-def aiscan_page(d):
-    scan = aiscan_load(d)
-    scan_json = json.dumps(scan, ensure_ascii=False).replace('</', '<\\/')
-    key_set = bool(ENV.get('ANTHROPIC_API_KEY'))
-    keynote = ('' if key_set else
-               '<p class="warn">Scanning is disabled: set '
-               '<code>ANTHROPIC_API_KEY</code> in the app&#8217;s '
-               '<code>.env</code> and restart. Stored findings below are '
-               'still browsable.</p>')
-    return (AISCAN_PAGE
-            .replace('__STYLE__', PAGE_STYLE)
-            .replace('__SCAN__', scan_json)
-            .replace('__KEYNOTE__', keynote)
-            .replace('__SCANDIS__', '' if key_set else 'disabled')
-            .replace('__SCANLABEL__', 'Re-run AI scan' if scan else 'Run AI scan')
-            .replace('__DATE__', d))
-
-
-AISCAN_AGG_PAGE = ("""<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Scan — Matching Findings</title><style>__STYLE__
-  .group{border-top:1px dashed #d8d6c7;padding:12px 0;margin-top:12px}
-  .group blockquote{margin:6px 0;padding:6px 10px;background:#f1efe6;
-    border-left:3px solid #76a2bf;border-radius:4px;font-size:.92em}
-  .tag{font-family:Arial,Helvetica,sans-serif;font-size:.72em;border-radius:6px;
-    padding:2px 8px;color:#fff;background:#3f6b82;margin-left:6px}
-  .tag.high{background:#a20816}.tag.medium{background:#8a6410}.tag.low{background:#54574a}
-  .tag.applied{background:#1f7a44}.tag.dismissed{background:#54574a}
-  .tag.skipped{background:#8a6410}.tag.open{background:#3f6b82}
-  a.datechip{font-family:Arial,Helvetica,sans-serif;font-size:.82em;
-    background:#eaf1f5;border:1px solid #76a2bf;border-radius:6px;
-    padding:2px 8px;margin:2px 6px 2px 0;display:inline-block;
-    text-decoration:none;color:#054253}
-  a.editlink{font-family:Arial,Helvetica,sans-serif;font-size:.78em;
-    margin:2px 10px 2px -2px;display:inline-block}
-  .meta{color:#54574a;font-size:.88em}
-  button.mini{padding:4px 12px;font-size:.82em;margin-right:8px;background:#3f6b82}
-  h2.sec{font-family:Arial,Helvetica,sans-serif;font-size:.95rem;letter-spacing:2px;
-    text-transform:uppercase;color:#054253;border-bottom:2px solid #0a5a6e;
-    display:inline-block;padding-bottom:3px;margin:22px 0 2px}
-  .itemrow{margin:5px 0}
-</style></head>
-<body>
-<h1>AI Article Scanner &mdash; Matching Findings</h1>
-<div class="card">
-  <p>Findings that recur across Sundays, in two tiers: <b>identical text</b>
-  (the same quoted text flagged the same way on two or more guides — the
-  weekly masthead, a repeated page direction) and <b>same error, varying
-  text</b> (the same misclassification with different words each week —
-  every announcement misfiled as a special event, say). Apply or dismiss a
-  whole group at once; each fix is still verified against its own
-  Sunday&#8217;s stored text before anything changes, and one-off findings
-  stay on their Sunday&#8217;s scan page. Applied fixes drop off this page
-  — each Sunday&#8217;s own scan page keeps their history.</p>
-  <div id="groups"></div>
-</div>
-<p><a href="/admin">Back to admin</a> &middot; <a href="/archive">Archive</a></p>
-<script id="agg-data" type="application/json">__GROUPS__</script>
-<script>
-const $ = id => document.getElementById(id);
-const GROUPS = JSON.parse($('agg-data').textContent);
-const esc = s => String(s == null ? '' : s)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-const cut = (s, n) => {
-  s = String(s == null ? '' : s);
-  return s.length > n ? s.slice(0, n) + '…' : s;
-};
-
-function groupHtml(g, gi) {
-  const openFix = g.items.filter(i => i.status === 'open' && i.fixable).length;
-  const open = g.items.filter(i => i.status === 'open').length;
-  const reopenable = g.items.filter(i =>
-    i.status === 'dismissed' || i.status === 'skipped').length;
-  const noFixDates = [...new Set(g.items
-    .filter(i => i.status === 'open' && !i.fixable).map(i => i.date))];
-  const btn = (mode, label) =>
-    '<button class="mini" data-gi="' + gi + '" data-mode="' + mode + '">' +
-    label + '</button>';
-  const skippedFix = g.items.filter(i =>
-    i.status === 'skipped' && i.fixable).length;
-  const buttons =
-    (openFix ? btn('apply', 'Apply all open fixes (' + openFix + ')') : '') +
-    (skippedFix ? btn('retry', 'Retry skipped fixes (' + skippedFix + ')') : '') +
-    (noFixDates.length ? btn('rescan', 'Re-scan for fixes (' +
-      noFixDates.length + ' Sundays)') : '') +
-    (open ? btn('dismiss', 'Dismiss all open (' + open + ')') : '') +
-    (reopenable ? btn('undismiss', 'Reopen (' + reopenable + ')') : '');
-  const dates = new Set(g.items.map(i => i.date)).size;
-  const head = '<b>' + esc(g.current) + ' &rarr; ' + esc(g.proposed) + '</b>' +
-    (g.kind === 'similar' && g.op !== 'none'
-      ? ' <span class="meta">fix: ' + esc(g.op) + '</span>' : '') +
-    ' <span class="meta">' + g.items.length + ' finding' +
-    (g.items.length > 1 ? 's' : '') + ' on ' + dates + ' Sunday' +
-    (dates > 1 ? 's' : '') + '</span>';
-  const chip = (i, quote) =>
-    '<a class="datechip" href="/admin/aiscan/' + esc(i.date) + '"' +
-    (i.note ? ' title="' + esc(i.note) + '"' : '') + '>' +
-    esc(i.date) + '<span class="tag ' + esc(i.status) + '">' +
-    esc(i.status) + '</span></a>' +
-    (i.status === 'open' && !i.fixable
-      ? '<a class="editlink" href="/admin/edit/' + esc(i.date) +
-        (quote ? '#find=' + encodeURIComponent(quote) : '') +
-        '" title="No mechanical fix — edit this Sunday by hand">edit</a>' : '');
-  let body;
-  if (g.kind === 'exact') {
-    body = '<div>' + esc(g.issue) + '</div>' +
-      '<blockquote>' + esc(g.quote) + '</blockquote>' +
-      '<div>' + g.items.map(i => chip(i, g.quote)).join('') + '</div>';
-  } else {
-    body = g.items.map(i =>
-      '<div class="itemrow" title="' + esc(i.issue) + '">' +
-      chip(i, i.quote) + ' ' +
-      '<span class="meta">&#8220;' + esc(cut(i.quote, 100)) + '&#8221;</span>' +
-      '<span class="tag ' + esc(i.confidence) + '">' + esc(i.confidence) +
-      '</span>' +
-      (i.note ? '<div class="meta" style="margin-left:12px">&#8627; ' +
-        esc(i.note) + '</div>' : '') +
-      '</div>').join('');
-  }
-  return '<div class="group">' + head + body +
-    (buttons ? '<p>' + buttons + '<span id="msg' + gi + '"></span></p>' : '') +
-    '</div>';
-}
-
-function render() {
-  if (!GROUPS.length) {
-    $('groups').innerHTML = '<p>No matching findings across Sundays yet — ' +
-      'run AI scans from the <a href="/admin">admin panel</a> first.</p>';
-    return;
-  }
-  const sections = [
-    ['exact', 'Identical text across Sundays'],
-    ['similar', 'Same error, varying text'],
-  ];
-  let html = sections.map(([kind, title]) => {
-    const withIdx = GROUPS.map((g, gi) => [g, gi]).filter(p => p[0].kind === kind);
-    if (!withIdx.length) return '';
-    return '<h2 class="sec">' + title + '</h2>' +
-      withIdx.map(p => groupHtml(p[0], p[1])).join('');
-  }).join('');
-  if (GROUPS.some(g => g.items.some(i => i.status === 'skipped'))) {
-    html += '<p class="meta"><b>Skipped?</b> Before a fix is applied, its ' +
-      'quoted text is re-checked against that Sunday&#8217;s stored guide. ' +
-      'A skip means the check failed — usually because the guide changed ' +
-      'after the scan (earlier fixes applied, a hand-edit, or a re-convert ' +
-      'moved the text). Each skipped finding carries its reason. ' +
-      '<b>Retry skipped fixes</b> relocates the quoted text in the changed ' +
-      'guide and applies when it matches exactly one place; text that is ' +
-      'gone or ambiguous still refuses, and a re-scan refreshes everything.</p>';
-  }
-  $('groups').innerHTML = html;
-  document.querySelectorAll('#groups button[data-mode]').forEach(b =>
-    b.addEventListener('click', () => b.dataset.mode === 'rescan'
-      ? rescan(+b.dataset.gi) : act(+b.dataset.gi, b.dataset.mode)));
-}
-render();
-
-// A group of flag-only findings can't be applied from the stored scan —
-// re-scan its Sundays (through the durable queue) so the model can pick a
-// mechanical fix now that the vocabulary covers it, then reload.
-async function rescan(gi) {
-  const g = GROUPS[gi];
-  const dates = [...new Set(g.items
-    .filter(i => i.status === 'open' && !i.fixable).map(i => i.date))];
-  if (!dates.length) return;
-  $('msg' + gi).textContent = ' Queueing re-scans…';
-  const res = await fetch('/api/aiscan', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({dates: dates}),
-  });
-  if (res.status === 401) { location.reload(); return; }
-  const data = await res.json().catch(() => ({ok: false}));
-  if (!data.ok) { $('msg' + gi).textContent = ' Failed: ' + (data.error || res.status); return; }
-  const poll = async () => {
-    try {
-      const r = await fetch('/api/aiscan-status');
-      if (r.status === 401) return;
-      const s = await r.json();
-      const busy = dates.filter(d => s.jobs[d] &&
-        (s.jobs[d].status === 'queued' || s.jobs[d].status === 'scanning'));
-      if (!busy.length) { location.reload(); return; }
-      $('msg' + gi).textContent = ' Re-scanning: ' + busy.length + ' of ' +
-        dates.length + ' Sundays left…';
-    } catch (e) { /* transient — keep polling */ }
-    setTimeout(poll, 3000);
-  };
-  poll();
-}
-
-// mode: 'apply' (open findings with a fix), 'retry' (skipped findings with
-// a fix — reopened, relocated, re-applied), 'dismiss' (open findings),
-// 'undismiss' (dismissed or skipped findings back to open)
-async function act(gi, mode) {
-  const g = GROUPS[gi];
-  const want = mode === 'undismiss' ? ['dismissed', 'skipped']
-    : mode === 'retry' ? ['skipped'] : ['open'];
-  const needFix = mode === 'apply' || mode === 'retry';
-  const byDate = {};
-  for (const i of g.items) {
-    if (!want.includes(i.status) || (needFix && !i.fixable)) continue;
-    (byDate[i.date] = byDate[i.date] || []).push(i.id);
-  }
-  const items = Object.entries(byDate).map(([date, ids]) => ({date: date, ids: ids}));
-  if (!items.length) return;
-  $('msg' + gi).textContent = ' Working…';
-  const res = await fetch('/api/aiscan-apply', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({items: items, dismiss: mode === 'dismiss',
-                          undismiss: mode === 'undismiss',
-                          retry: mode === 'retry'}),
-  });
-  if (res.status === 401) { location.reload(); return; }
-  const data = await res.json().catch(() => ({ok: false}));
-  if (!data.ok) { $('msg' + gi).textContent = ' Failed: ' + (data.error || res.status); return; }
-  location.reload();
-}
-</script>
-</body></html>
-""")
-
-
-def aiscan_aggregate_page():
-    groups_json = json.dumps(aiscan_aggregate(),
-                             ensure_ascii=False).replace('</', '<\\/')
-    return (AISCAN_AGG_PAGE
-            .replace('__STYLE__', PAGE_STYLE)
-            .replace('__GROUPS__', groups_json))
-
-
 PAGE_STYLE = """
   body{font-family:Georgia,'Times New Roman',serif;background:#fbfaf5;color:#26241d;
     max-width:680px;margin:0 auto;padding:40px 20px;line-height:1.6}
@@ -1718,6 +1263,9 @@ PAGE_STYLE = """
   button{background:#054253;color:#fff;border:none;cursor:pointer}
   button:disabled{opacity:.5;cursor:default}
   button.busy{opacity:.85}
+  form.inline{display:inline}
+  button.linkish{background:none;border:none;color:#a20816;font:inherit;
+    padding:0;cursor:pointer;text-decoration:underline}
   button.busy::after{content:'';display:inline-block;width:.75em;height:.75em;
     margin-left:7px;vertical-align:-.08em;border:2px solid #fff;
     border-top-color:transparent;border-radius:50%;
@@ -1877,27 +1425,324 @@ def search_page(query):
 """
 
 
-def login_page(next_path, error=None):
-    err = f'<p class="err">{error}</p>\n' if error else ''
+def login_page(next_path, error=None, email=''):
+    """The sign-in gate every admin page falls back to. Fails closed before
+    the first invite is redeemed: there is no bootstrap password, only the
+    CLI."""
+    err = f'<p class="err">{esc(error)}</p>\n' if error else ''
     next_attr = esc(next_path)
+    if lwccauth.any_users():
+        note = ('<p><small style="color:#54574a">One sign-in lasts about six '
+                'months on this browser. No account? Ask an administrator for '
+                'an invite link — nobody can create one for you from this '
+                'page.</small></p>')
+    else:
+        note = ('<p class="warn">There are no accounts yet. The first one is '
+                'minted on the server:<br>'
+                '<code>lwcc invite --admin --for you@example.com</code></p>')
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Admin Sign-in</title><style>{PAGE_STYLE}</style></head>
+<title>Sign in</title><style>{PAGE_STYLE}
+  label.f{{display:block;margin:10px 0;font-size:.9em;color:#54574a}}
+  label.f input{{width:100%;max-width:320px;margin-top:3px}}
+</style></head>
 <body>
-<h1>Admin Sign-in</h1>
+<h1>Sign in</h1>
 <div class="card">
 {err}<form method="POST" action="/admin/login">
   <input type="hidden" name="next" value="{next_attr}">
-  <p><label>Upload token<br>
-    <input type="password" name="token" size="28" autofocus
-           autocomplete="current-password"></label></p>
+  <label class="f">Email
+    <input type="email" name="email" autofocus autocomplete="username"
+           value="{esc(email)}"></label>
+  <label class="f">Password
+    <input type="password" name="password" autocomplete="current-password"></label>
   <p><button>Sign in</button></p>
-  <p><small style="color:#54574a">One sign-in unlocks uploading, reviewing,
-  and editing on this browser for about six months.</small></p>
+{note}
 </form>
 </div>
 <p><a href="/">Current guide</a></p>
+</body></html>
+"""
+
+
+def gone_page():
+    """A spent or expired invite link. 410, not 404: the link was real."""
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Link no longer works</title><style>{PAGE_STYLE}</style></head>
+<body>
+<h1>Link no longer works</h1>
+<div class="card">
+  <p>Invite and password-reset links work once and expire seven days after
+  they are issued. This one has been used already, was revoked, or is past
+  its week.</p>
+  <p>Ask an administrator for a fresh link. If you already have an account,
+  you can <a href="/admin">sign in</a>.</p>
+</div>
+<p><a href="/">Current guide</a></p>
+</body></html>
+"""
+
+
+def store_error_page(detail):
+    """users.json is present and unreadable. Nobody can sign in, nothing has
+    been written, and the page says which file to go and look at — an
+    operator staring at a blank sign-in form would reasonably conclude the
+    accounts were gone, and mint a new admin over the wreckage."""
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Account store unreadable</title><style>{PAGE_STYLE}</style></head>
+<body>
+<h1>Account store unreadable</h1>
+<div class="card">
+  <p><code>users.json</code> is there but is not valid JSON, so nobody can be
+  signed in and nothing can be written to it.
+  <b>Nothing has been written over it</b> — every account is still in that
+  file, and repairing the JSON brings them all back.</p>
+  <p class="warn">{esc(detail)}</p>
+  <p>On the server: look at <code>users.json</code> in the app directory
+  (usually a hand edit that lost a brace or a comma). <code>lwcc logs</code>
+  carries the same message.</p>
+</div>
+<p><a href="/">Current guide</a></p>
+</body></html>
+"""
+
+
+def logout_page():
+    """GET /admin/logout asks; the POST does it. Following a link must never
+    be enough to end someone's session."""
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign out</title><style>{PAGE_STYLE}</style></head>
+<body>
+<h1>Sign out</h1>
+<div class="card">
+  <p>Signing out ends this browser&#8217;s session on the server, so the
+  cookie it holds stops working everywhere at once.</p>
+  <form method="POST" action="/admin/logout">
+    <p><button>Sign out</button></p>
+  </form>
+</div>
+<p><a href="/admin">Back to admin</a> · <a href="/">Current guide</a></p>
+</body></html>
+"""
+
+
+def forbidden_page():
+    """Signed in, but not an administrator."""
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Administrators only</title><style>{PAGE_STYLE}</style></head>
+<body>
+<h1>Administrators only</h1>
+<div class="card">
+  <p>Your account can upload, review and edit worship guides. This page is
+  part of the maintenance side, which is kept to administrators.</p>
+</div>
+<p><a href="/admin">Back to admin</a> · <a href="/">Current guide</a></p>
+</body></html>
+"""
+
+
+def invite_page(token, invite, error=None):
+    """Where an account is actually created: the person opening the link
+    chooses their own password, so it never passes through whoever invited
+    them. The same page, with a reset invite, re-keys an existing account."""
+    err = f'<p class="err">{esc(error)}</p>\n' if error else ''
+    reset = bool(invite.get('reset'))
+    email = invite.get('email') or ''
+    heading = 'Choose a new password' if reset else 'Set up your account'
+    if email:
+        who = (f'<p>For <b>{esc(email)}</b>'
+               + ('' if reset else f' — {esc(invite.get("role") or "staff")} access')
+               + '.</p>')
+        email_field = f'<input type="hidden" name="email" value="{esc(email)}">'
+    else:
+        who = '<p>This link is not pinned to an address — choose the one you will sign in with.</p>'
+        email_field = ('<label class="f">Email\n'
+                       '    <input type="email" name="email" required '
+                       'autocomplete="username"></label>')
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{heading}</title><style>{PAGE_STYLE}
+  label.f{{display:block;margin:10px 0;font-size:.9em;color:#54574a}}
+  label.f input{{width:100%;max-width:320px;margin-top:3px}}
+</style></head>
+<body>
+<h1>{heading}</h1>
+<div class="card">
+{who}
+{err}<form method="POST" action="/invite/{esc(token)}" id="setpw">
+  {email_field}
+  <label class="f">Password (at least {lwccauth.MIN_PASSWORD} characters)
+    <input type="password" name="password" id="pw" autofocus required
+           minlength="{lwccauth.MIN_PASSWORD}" autocomplete="new-password"></label>
+  <label class="f">Repeat it
+    <input type="password" name="confirm" id="pw2" required
+           autocomplete="new-password"></label>
+  <p><button>{'Change password' if reset else 'Create account'} and sign in</button></p>
+  <p><small style="color:#54574a">This link works once and expires seven days
+  after it was issued.</small></p>
+</form>
+</div>
+<script>
+const _f = document.getElementById('setpw');
+_f.addEventListener('submit', e => {{
+  if (document.getElementById('pw').value !== document.getElementById('pw2').value) {{
+    e.preventDefault();
+    alert('The two passwords do not match.');
+  }}
+}});
+</script>
+</body></html>
+"""
+
+
+def users_page(user):
+    """/admin/users — admins only. Invites, resets, removals and the pending
+    links, all minted server-side so the issuer never handles a password."""
+    rows = []
+    for u in lwccauth.list_users():
+        me = u['email'] == user['email']
+        actions = (
+            f'<button class="mini" data-op="reset" data-email="{esc(u["email"])}">'
+            f'Send reset link</button>')
+        if not me:
+            actions += (f'<button class="mini del" data-op="remove" '
+                        f'data-email="{esc(u["email"])}">Remove</button>')
+        rows.append(
+            f'<tr><td class="st">{esc(u["email"])}'
+            + (' <small>(you)</small>' if me else '') +
+            f'</td><td>{esc(u.get("role") or "staff")}</td>'
+            f'<td class="st">{esc(fmt_at(u.get("created")))}</td>'
+            f'<td class="st">{u.get("sessions", 0)}</td>'
+            f'<td class="acts">{actions}</td></tr>')
+    pending = []
+    for i in lwccauth.list_invites():
+        kind = 'password reset' if i.get('reset') else f'invite ({esc(i.get("role") or "staff")})'
+        pending.append(
+            f'<li style="margin:8px 0"><b>{esc(i.get("email") or "(open link)")}</b> '
+            f'— {kind}, issued {esc(fmt_at(i.get("created")))}<br>'
+            f'<code class="link">{esc(lwccauth.invite_url(i["token"]))}</code> '
+            f'<button class="mini" data-op="revoke" data-token="{esc(i["token"])}">'
+            f'Revoke</button></li>')
+    pending_html = ('<ul style="list-style:none;padding-left:0">'
+                    + ''.join(pending) + '</ul>') if pending else         '<p><small style="color:#54574a">No links waiting to be used.</small></p>'
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>People</title><style>{PAGE_STYLE}
+  body{{max-width:820px}}
+  table{{width:100%;border-collapse:collapse;font-size:.95em}}
+  td,th{{padding:6px 8px;border-bottom:1px solid #d8d6c7;text-align:left;vertical-align:top}}
+  .st{{white-space:nowrap}}
+  td.acts{{text-align:right;white-space:nowrap}}
+  button.mini{{padding:3px 10px;font-size:.8em;margin-left:6px;background:#3f6b82}}
+  button.mini.del{{background:#a20816}}
+  code.link{{word-break:break-all;font-size:.8em}}
+  label.f{{display:inline-block;margin:6px 12px 6px 0;font-size:.9em;color:#54574a}}
+  select{{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid #d8d6c7}}
+  #newlink{{margin-top:10px}}
+</style></head>
+<body>
+<h1>People</h1>
+<div class="card">
+  <p><b>Invite someone</b> — they get a one-time link, choose their own
+  password, and the account exists from that moment. Nobody but them ever
+  types it.</p>
+  <p><label class="f">Email <input type="email" id="email"
+       placeholder="office@example.com"></label>
+     <label class="f">Access <select id="role">
+       <option value="staff">Staff — upload, review, edit</option>
+       <option value="admin">Admin — also maintenance and this page</option>
+     </select></label>
+     <button id="invite">Create invite link</button></p>
+  <div id="newlink"></div>
+</div>
+<div class="card">
+  <p><b>Accounts</b> — removing one signs it out of every browser
+  immediately. A reset link does the same to that account's other sessions
+  once it is used.</p>
+  <div style="overflow-x:auto"><table><thead><tr><th>Email</th><th>Access</th>
+    <th>Created</th><th>Sessions</th><th></th></tr></thead>
+  <tbody>{''.join(rows)}</tbody></table></div>
+</div>
+<div class="card">
+  <p><b>Links waiting to be used</b> — each works once, for seven days.</p>
+  {pending_html}
+</div>
+<p><a href="/admin">Back to admin</a> ·
+   <form class="inline" method="POST" action="/admin/logout">
+     <button class="linkish">Sign out</button></form></p>
+<script>
+const $ = id => document.getElementById(id);
+const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+async function users(op, extra) {{
+  const res = await fetch('/api/users', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(Object.assign({{op: op}}, extra || {{}})),
+  }});
+  if (res.status === 401) {{ location.reload(); return null; }}
+  const data = await res.json().catch(() => ({{ok: false, error: res.statusText}}));
+  if (!data.ok) throw new Error(data.error || 'failed');
+  return data;
+}}
+
+$('invite').addEventListener('click', async () => {{
+  const email = $('email').value.trim();
+  if (!email) {{ alert('An email address, please.'); return; }}
+  $('invite').disabled = true;
+  try {{
+    const data = await users('invite', {{email: email, role: $('role').value}});
+    if (!data) return;
+    $('newlink').innerHTML =
+      '<p class="ok">Link for ' + escHtml(email) + ' — copy it to them; it ' +
+      'works once.</p><p><code class="link">' + escHtml(data.url) + '</code></p>';
+    $('email').value = '';
+  }} catch (e) {{
+    alert('Could not create the invite: ' + e.message);
+  }} finally {{
+    $('invite').disabled = false;
+  }}
+}});
+
+for (const btn of document.querySelectorAll('button[data-op]')) {{
+  btn.addEventListener('click', async () => {{
+    const op = btn.dataset.op;
+    if (op === 'remove' && !confirm('Remove ' + btn.dataset.email +
+        '? They are signed out everywhere straight away.')) return;
+    if (op === 'revoke' && !confirm('Revoke this link? It stops working.')) return;
+    btn.disabled = true;
+    try {{
+      const data = await users(op, op === 'revoke'
+        ? {{token: btn.dataset.token}} : {{email: btn.dataset.email}});
+      if (!data) return;
+      if (op === 'reset') {{
+        $('newlink').innerHTML =
+          '<p class="ok">Password-reset link for ' + escHtml(btn.dataset.email) +
+          ' — it works once, and signs their other browsers out.</p>' +
+          '<p><code class="link">' + escHtml(data.url) + '</code></p>';
+        window.scrollTo(0, 0);
+        btn.disabled = false;
+        return;
+      }}
+      location.reload();
+    }} catch (e) {{
+      alert('Failed: ' + e.message);
+      btn.disabled = false;
+    }}
+  }});
+}}
+</script>
 </body></html>
 """
 
@@ -1953,7 +1798,9 @@ __FAILED__
 __REVIEW__
 __HISTORY__
 <p><a href="/">Current guide</a> · <a href="/archive">Archive</a> ·
-   <a href="/admin/logout">Sign out</a></p>
+   <a href="/admin/history">Upload history</a>__NAV__ ·
+   <form class="inline" method="POST" action="/admin/logout">
+     <button class="linkish">Sign out (__WHO__)</button></form></p>
 <script>
 const $ = id => document.getElementById(id);
 const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -2140,65 +1987,6 @@ for (const _id of ['reconvertall', 'reconverteverything', 'refresheverything']) 
   });
 }
 
-// AI scans run from a server-side queue (up to 10 at a time) that survives
-// restarts — queue the batch, then watch until it drains.
-const _ab = document.getElementById('aiscanbanner');
-const _scanBtns = [...document.querySelectorAll('.aiscanqueue')];
-async function pollAiscan() {
-  try {
-    const res = await fetch('/api/aiscan-status');
-    if (res.status === 401) return;          // signed out — stop quietly
-    const data = await res.json();
-    if (!data.waiting && !data.scanning.length) { location.reload(); return; }
-    const txt = data.scanning.length + ' scanning, ' + data.waiting + ' waiting…';
-    if (_ab) _ab.textContent = 'AI scans in progress: ' + txt;
-    for (const b of _scanBtns) if (b.disabled) b.textContent = 'AI scans: ' + txt;
-  } catch (e) { /* transient — keep polling */ }
-  setTimeout(pollAiscan, 3000);
-}
-if (_ab) pollAiscan();
-
-const _ac = document.getElementById('aiscanclear');
-if (_ac) _ac.addEventListener('click', async () => {
-  const dates = _ac.dataset.dates.split(' ').filter(Boolean);
-  const undo = setBusy(_ac, 'Clearing…');
-  try {
-    const res = await fetch('/api/aiscan-apply', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({items: dates.map(d => ({date: d})), archive: true}),
-    });
-    const data = await res.json().catch(() => ({ok: false}));
-    if (!data.ok) throw new Error(data.error || res.statusText);
-    location.reload();
-  } catch (e) {
-    alert('Could not clear resolved findings: ' + e.message);
-    undo();
-  }
-});
-
-for (const _btn of _scanBtns) _btn.addEventListener('click', async () => {
-  const dates = _btn.dataset.dates.split(' ').filter(Boolean);
-  if (!confirm('AI-scan ' + dates.length + ' Sundays? This runs the agents ' +
-               'once per Sunday, up to 10 Sundays at a time.')) return;
-  const undo = setBusy(_btn, 'Queueing ' + dates.length + ' scans…');
-  try {
-    const res = await fetch('/api/aiscan', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({dates: dates}),
-    });
-    const data = await res.json().catch(() => ({ok: false}));
-    if (!data.ok) throw new Error(data.error || res.statusText);
-    // The server queue takes it from here — scans survive restarts and this
-    // page can be closed; results land in each Sunday's scan page.
-    pollAiscan();
-  } catch (e) {
-    alert('Could not queue AI scans: ' + e.message);
-    undo();
-  }
-});
-
 const _ra = document.getElementById('rerenderall');
 if (_ra) _ra.addEventListener('click', async () => {
   const undo = setBusy(_ra, 'Re-rendering every Sunday…');
@@ -2349,10 +2137,15 @@ $('go').addEventListener('click', async () => {
 """).replace('__STYLE__', PAGE_STYLE)
 
 
-def manage_html():
+def manage_html(user):
     """Server-rendered management panel for /admin: Sundays needing review
     (with their warnings and a Mark-reviewed action) plus a compact list of
-    everything published with re-render/unpublish actions."""
+    everything published with re-render/unpublish actions.
+
+    The maintenance actions are admin-only, so staff are never handed a button
+    the API would refuse: the buttons and their bulk sweeps simply are not in
+    the HTML. ADMIN_ONLY_ACTIONS is the enforcement; this is the courtesy."""
+    admin = is_admin(user)
     dates = published_dates()
     if not dates:
         return ''
@@ -2377,7 +2170,7 @@ def manage_html():
                        if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf'))),
                       reverse=True)
         bulk_html = ''
-        if bulk:
+        if bulk and admin:
             bulk_html = (
                 f'<p><button class="mini" id="reconvertall"{busy} '
                 f'data-dates="{" ".join(bulk)}">Re-convert all listed '
@@ -2396,67 +2189,6 @@ def manage_html():
                    '<ul style="list-style:none;padding-left:0">'
                    + ''.join(items) + '</ul></div>')
 
-    scans = {d: aiscan_load(d) for d in dates}
-    flagged_ai = [(d, aiscan_open_count(scans[d])) for d in dates
-                  if aiscan_open_count(scans[d])]
-    key_set = bool(ENV.get('ANTHROPIC_API_KEY'))
-    ai_items = ''.join(
-        f'<li style="margin:6px 0"><a href="/admin/aiscan/{d}">{date_label(d)}</a> '
-        f'<span class="warn">— {n} open finding{"s" if n > 1 else ""}</span></li>'
-        for d, n in flagged_ai)
-    if ai_items:
-        ai_items = ('<ul style="list-style:none;padding-left:0">'
-                    + ai_items + '</ul>')
-    unscanned = ' '.join(d for d in dates if scans[d] is None)
-    scan_all = ''
-    if key_set and unscanned:
-        n = len(unscanned.split())
-        scan_all = (f'<p><button class="mini aiscanqueue" id="aiscanall" '
-                    f'data-dates="{unscanned}">Scan all unscanned ({n})'
-                    f'</button> — runs the agents once per Sunday.</p>')
-    if key_set and any(scans[d] is not None for d in dates):
-        scan_all += (f'<p><button class="mini aiscanqueue" id="aiscanredo" '
-                     f'data-dates="{" ".join(dates)}">Re-scan every Sunday '
-                     f'({len(dates)})</button> — re-runs both agents on the '
-                     f'whole backlog after a scanner upgrade; open findings '
-                     f'are rebuilt, resolved history is kept.</p>')
-    key_note = ('' if key_set else
-                '<p class="warn">Scanning is disabled: set '
-                '<code>ANTHROPIC_API_KEY</code> in <code>.env</code> and '
-                'restart.</p>')
-    settled_dates = [d for d in dates
-                     if any(f.get('status') in ('applied', 'dismissed')
-                            for f in (scans[d] or {}).get('findings') or [])]
-    settled_total = sum(1 for d in settled_dates
-                        for f in scans[d].get('findings') or []
-                        if f.get('status') in ('applied', 'dismissed'))
-    clear_all = ''
-    if settled_total:
-        clear_all = (f'<p><button class="mini" id="aiscanclear" '
-                     f'data-dates="{" ".join(settled_dates)}">Clear resolved '
-                     f'findings ({settled_total})</button> — archives applied '
-                     f'and dismissed findings into each Sunday&#8217;s scan '
-                     f'history (kept in aiscan.json).</p>')
-    snap = aiscan_snapshot()
-    active = ''
-    if snap['waiting'] or snap['scanning']:
-        active = (f'<p class="warn"><span id="aiscanbanner">AI scans in '
-                  f'progress: {len(snap["scanning"])} scanning, '
-                  f'{snap["waiting"]} waiting…</span> — the queue survives '
-                  f'restarts and this page can be closed; it reloads when '
-                  f'the scans finish.</p>')
-    out.append('<div class="card"><p><b>AI article scanner</b> — reviews each '
-               'Sunday&#8217;s parsed guide for text the OCR pipeline filed '
-               'under the wrong class (announcements vs page directions vs '
-               'worship content), and reads the scripture section to check '
-               'every verse is labeled with its superscript verse number. '
-               'Open each Sunday&#8217;s scan page from the '
-               'list below to review and apply repairs.</p>'
-               '<p><a href="/admin/aiscan">Matching findings across '
-               'Sundays</a> — recurring misclassifications grouped, with '
-               'their fixes applied in bulk.</p>'
-               + key_note + active + scan_all + clear_all + ai_items + '</div>')
-
     rows = []
     year = None
     for d in dates:
@@ -2467,36 +2199,32 @@ def manage_html():
                         f'<span>({n} Sunday{"s" if n > 1 else ""})</span></th></tr>')
         m = metas.get(d)
         title = esc(m['title']) if m and m['title'] else ''
-        reconvert = ''
-        if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf')):
-            reconvert = (f'<button class="mini" onclick="adminAction(this, \'reconvert-merge\', '
-                         f'\'{d}\')">Re-convert, keep edits</button>'
-                         f'<button class="mini" onclick="adminAction(this, \'reconvert\', '
-                         f'\'{d}\')">Re-convert</button>')
-        n_open = aiscan_open_count(scans[d])
-        ai_badge = (f' <span class="warn" style="font-size:.85em">🔎 {n_open}'
-                    f'</span>' if n_open else '')
+        acts = f'<a class="minilink" href="/admin/edit/{d}">Edit</a>'
+        if admin:
+            acts += (f'<button class="mini" onclick="adminAction(this, \'rerender\', '
+                     f'\'{d}\')">Re-render</button>')
+            if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf')):
+                acts += (f'<button class="mini" onclick="adminAction(this, '
+                         f'\'reconvert-merge\', \'{d}\')">Re-convert, keep '
+                         f'edits</button>'
+                         f'<button class="mini" onclick="adminAction(this, '
+                         f'\'reconvert\', \'{d}\')">Re-convert</button>')
+            acts += (f'<button class="mini" onclick="adminAction(this, \'unpublish\', '
+                     f'\'{d}\')">Unpublish</button>')
         rows.append(
             f'<tr><td class="st"><a href="/{d}/">{d}</a></td>'
             f'<td>{title}</td>'
-            f'<td class="acts">'
-            f'<a class="minilink" href="/admin/edit/{d}">Edit</a>'
-            f'<a class="minilink" href="/admin/aiscan/{d}">AI scan</a>{ai_badge}'
-            f'<button class="mini" onclick="adminAction(this, \'rerender\', \'{d}\')">'
-            f'Re-render</button>'
-            f'{reconvert}'
-            f'<button class="mini" onclick="adminAction(this, \'unpublish\', \'{d}\')">'
-            f'Unpublish</button></td></tr>')
+            f'<td class="acts">{acts}</td></tr>')
     src_dates = [d for d in dates
                  if os.path.exists(os.path.join(PUBLIC, d, 'source.pdf'))]
     sweep = ''
-    if dates:
+    if dates and admin:
         sweep += (f'<p><button class="mini" id="rerenderall">Re-render every '
                   f'Sunday ({len(dates)})</button> — rebuilds each page from '
                   f'its stored guide.json with the current template, so a '
                   f'template or styling upgrade reaches the whole backlog '
                   f'without re-converting; hand-edits are kept.</p>')
-    if src_dates:
+    if src_dates and admin:
         sweep += (f'<p><button class="mini" id="refresheverything"{busy} '
                   f'data-dates="{" ".join(src_dates)}">Refresh every Sunday, '
                   f'keep edits ({len(src_dates)})</button> — merge re-convert '
@@ -2509,13 +2237,17 @@ def manage_html():
                   f'queue after a converter fix, flagged or not '
                   f'(discards hand-edits).</p>'
                   f'<p class="warn" id="sweepstatus" hidden></p>')
-    out.append('<div class="card"><p><b>Published Sundays</b> — re-render '
-               'rebuilds the page from its guide.json (after hand-edits); '
-               're-convert re-runs the converter on the stored source PDF '
-               '(picks up parser upgrades, discards hand-edits); '
-               're-convert-keep-edits does the same but merges: hand-edits '
-               'win, everything else gains the latest markup and colors; '
-               'unpublish sets the folder aside without deleting it.</p>'
+    blurb = ('<p><b>Published Sundays</b> — re-render rebuilds the page from '
+             'its guide.json (after hand-edits); re-convert re-runs the '
+             'converter on the stored source PDF (picks up parser upgrades, '
+             'discards hand-edits); re-convert-keep-edits does the same but '
+             'merges: hand-edits win, everything else gains the latest markup '
+             'and colors; unpublish sets the folder aside without deleting '
+             'it.</p>') if admin else \
+        ('<p><b>Published Sundays</b> — open one to edit its text. Re-render, '
+         're-convert and unpublish are administrator tools; ask an '
+         'administrator if a Sunday needs one.</p>')
+    out.append('<div class="card">' + blurb
                + sweep +
                '<div style="overflow-x:auto"><table class="pub"><tbody>'
                + ''.join(rows) + '</tbody></table></div></div>')
@@ -2635,7 +2367,7 @@ def batch_meter_html(b):
             f'<progress max="{b["total"]}" value="{b["done"]}"></progress> ')
 
 
-def recent_uploads_html():
+def recent_uploads_html(user):
     """Compact last-few-uploads card for the bottom of /admin — the batch
     results table in the upload card is per-visit, this one survives leaving
     the page. When the server queue is still working, say so (this page
@@ -2650,14 +2382,14 @@ def recent_uploads_html():
                               for c in snap['converting'])
             now = f', converting {names}'
         meters = ''.join(batch_meter_html(b) for b in snap['batches'])
+        cancel = ('<button class="mini" id="clearreconverts">Cancel pending '
+                  're-conversions</button>' if is_admin(user) else '')
         active = (f'<p class="warn"><b>Server queue active:</b> '
                   f'<span id="queuebanner">{meters}{snap["waiting"]} '
                   f'file{"s" if snap["waiting"] != 1 else ""} '
                   f'waiting{now}</span> — updates live; finished results appear '
                   f'below and in the history, and this page reloads when the '
-                  f'queue empties. '
-                  f'<button class="mini" id="clearreconverts">Cancel pending '
-                  f're-conversions</button></p>')
+                  f'queue empties. {cancel}</p>')
     if not entries and not active:
         return ''
     table = (HISTORY_TABLE_HEAD + history_rows(entries) + HISTORY_TABLE_FOOT) if entries else ''
@@ -3031,15 +2763,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_page(json.dumps(obj), status=status, ctype='application/json',
                        cache='no-store')
 
-    # -- admin session ------------------------------------------------------
+    # -- accounts and sessions ----------------------------------------------
 
-    def cookie_token(self):
+    def session_id(self):
+        """The cookie's session id — a random string that means nothing on its
+        own; the account it belongs to is looked up server-side, so signing
+        out or removing a user takes effect at once."""
         try:
             jar = http.cookies.SimpleCookie(self.headers.get('Cookie', ''))
         except http.cookies.CookieError:
             return ''
         morsel = jar.get(COOKIE_NAME)
         return morsel.value if morsel else ''
+
+    def current_user(self):
+        return lwccauth.session_user(self.session_id())
 
     def session_cookie(self, value, max_age):
         cookie = (f'{COOKIE_NAME}={value}; Path=/; Max-Age={max_age}; '
@@ -3057,45 +2795,153 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Content-Length', '0')
         self.end_headers()
 
-    def require_admin(self):
-        """Gate for every admin page: True with a valid session cookie;
-        otherwise the sign-in page (or disabled notice) has been sent."""
-        expected = ENV.get('UPLOAD_TOKEN', '')
-        if not expected:
-            self.send_page('admin disabled: set UPLOAD_TOKEN in .env and restart\n',
-                           status=503, ctype='text/plain; charset=utf-8',
-                           cache='no-store')
-            return False
-        if hmac.compare_digest(self.cookie_token(), expected):
-            return True
+    def require_user(self):
+        """Gate for every admin page: the signed-in account, or None once the
+        sign-in page has been sent."""
+        user = self.current_user()
+        if user:
+            return user
         self.send_page(login_page(self.path.split('?', 1)[0]), status=401,
                        cache='no-store')
-        return False
+        return None
+
+    def require_admin(self):
+        """As require_user, plus the admin role — the maintenance tools and
+        the people list. Pinning admin to a single address would be a change
+        to is_admin and nothing else."""
+        user = self.require_user()
+        if user is None or is_admin(user):
+            return user
+        self.send_page(forbidden_page(), status=403, cache='no-store')
+        return None
+
+    def api_user(self):
+        """The signed-in account for a JSON endpoint, or None once the 401
+        has been sent. There is no API token: a session or nothing."""
+        user = self.current_user()
+        if not user:
+            self.send_json({'ok': False, 'error': 'not signed in'}, status=401)
+        return user
 
     def handle_login(self, body):
         form = urllib.parse.parse_qs(body.decode('utf-8', 'replace'))
-        token = (form.get('token') or [''])[0].strip()
+        email = lwccauth.norm_email((form.get('email') or [''])[0])
+        password = (form.get('password') or [''])[0]
         nxt = (form.get('next') or [''])[0]
         if not ADMIN_NEXT_RE.fullmatch(nxt):
             nxt = '/admin'
-        expected = ENV.get('UPLOAD_TOKEN', '')
-        if not expected:
-            self.send_page('admin disabled: set UPLOAD_TOKEN in .env and restart\n',
-                           status=503, ctype='text/plain; charset=utf-8',
-                           cache='no-store')
+        sid, user = (lwccauth.login(email, password) if email and password
+                     else (None, None))
+        if not user:
+            # The whole of the rate limiting: enough to make a password
+            # guessing run through this form pointless, cheap enough that a
+            # mistyped password is barely noticeable. The attempted address
+            # goes to uploads.log so a run is visible afterwards.
+            time.sleep(0.5)
+            # The attempted address is recorded so a guessing run is visible
+            # afterwards. It is bounded first: this is attacker-supplied text
+            # going into a log nothing rotates, and a password is not even
+            # needed to reach this line, so an unbounded address here is a
+            # few kilobytes of disk per unauthenticated request.
+            audit_log({'action': 'login', 'ok': False,
+                       **({'email': email[:lwccauth.MAX_EMAIL]} if email else {})})
+            self.send_page(login_page(nxt, error='Wrong email or password.',
+                                      email=email), status=401, cache='no-store')
             return
-        if token and hmac.compare_digest(token, expected):
-            audit_log({'action': 'login', 'ok': True})
-            self.redirect_303(nxt, cookie=self.session_cookie(token, COOKIE_MAX_AGE))
-        else:
-            audit_log({'action': 'login', 'ok': False})
-            self.send_page(login_page(nxt, error='Wrong token — check '
-                                      'UPLOAD_TOKEN in the app&#8217;s .env.'),
-                           status=401, cache='no-store')
+        audit_log({'action': 'login', 'ok': True, 'email': user['email']})
+        self.redirect_303(nxt, cookie=self.session_cookie(sid, COOKIE_MAX_AGE))
+
+    def handle_invite(self, token, body):
+        """Redeem a one-time link: the password is chosen here and nowhere
+        else, and redeeming signs that browser in."""
+        invite = lwccauth.get_invite(token)
+        if not invite:
+            self.send_page(gone_page(), status=410, cache='no-store')
+            return
+        form = urllib.parse.parse_qs(body.decode('utf-8', 'replace'))
+        try:
+            sid, user = lwccauth.redeem_invite(
+                token, (form.get('password') or [''])[0],
+                (form.get('confirm') or [''])[0],
+                (form.get('email') or [''])[0])
+        except lwccauth.AuthError as e:
+            if e.status == 410:
+                self.send_page(gone_page(), status=410, cache='no-store')
+                return
+            self.send_page(invite_page(token, invite, error=str(e)),
+                           status=e.status, cache='no-store')
+            return
+        audit_log({'action': 'invite-redeem', 'ok': True, 'email': user['email'],
+                   **({'reset': True} if invite.get('reset') else
+                      {'role': user.get('role')})})
+        self.redirect_303('/admin', cookie=self.session_cookie(sid, COOKIE_MAX_AGE))
+
+    def handle_users(self, user, body):
+        """/api/users — invite, reset, remove, revoke. Admin-only (the gate is
+        ADMIN_ONLY_ACTIONS); every reply that carries a link carries no
+        password, because there is never one to carry."""
+        try:
+            data = json.loads(body or b'{}')
+        except ValueError:
+            self.send_json({'ok': False, 'error': 'invalid JSON body'}, status=400)
+            return
+        op = str(data.get('op') or '')
+        email = lwccauth.norm_email(data.get('email'))
+        try:
+            if op in ('invite', 'reset'):
+                role = str(data.get('role') or 'staff')
+                inv = lwccauth.create_invite(email, role=role, reset=op == 'reset')
+                audit_log({'action': f'user-{op}', 'ok': True, 'email': email,
+                           'by': user['email'],
+                           **({'role': inv['role']} if op == 'invite' else {})})
+                self.send_json({'ok': True, 'email': email, 'url': inv['url'],
+                                'token': inv['token']})
+                return
+            if op == 'remove':
+                lwccauth.remove_user(email, by=user['email'])
+                audit_log({'action': 'user-remove', 'ok': True, 'email': email,
+                           'by': user['email']})
+                self.send_json({'ok': True, 'email': email})
+                return
+            if op == 'revoke':
+                lwccauth.revoke_invite(str(data.get('token') or ''))
+                audit_log({'action': 'invite-revoke', 'ok': True,
+                           'by': user['email']})
+                self.send_json({'ok': True})
+                return
+        except lwccauth.AuthError as e:
+            self.send_json({'ok': False, 'error': str(e)}, status=e.status)
+            return
+        self.send_json({'ok': False, 'error':
+                        'op must be invite, reset, remove or revoke'}, status=400)
 
     # -- routes -------------------------------------------------------------
 
     def do_GET(self):
+        try:
+            self.route_get()
+        except lwccauth.StoreError as e:
+            self.store_error(e)
+
+    def do_POST(self):
+        try:
+            self.route_post()
+        except lwccauth.StoreError as e:
+            self.store_error(e)
+
+    def store_error(self, e):
+        """A damaged account store, answered in the shape the caller expects.
+        Raised before any route has replied — every path that touches the
+        store reads it before it writes anything back."""
+        sys.stderr.write(f'ACCOUNT STORE UNREADABLE: {e.detail} — '
+                         f'users.json left untouched; repair it by hand\n')
+        if self.path.startswith('/api/'):
+            self.send_json({'ok': False, 'error': str(e)}, status=503)
+        else:
+            self.send_page(store_error_page(e.detail), status=503,
+                           cache='no-store')
+
+    def route_get(self):
         path, _, query = self.path.partition('?')
         if path == '/healthz':
             missing = missing_deps()
@@ -3105,24 +2951,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_page(body, ctype='text/plain')
             return
         if path == '/api/status':
-            expected = ENV.get('UPLOAD_TOKEN', '')
-            got = self.headers.get('X-Upload-Token') or self.cookie_token()
-            if not expected or not hmac.compare_digest(got, expected):
-                self.send_json({'ok': False, 'error': 'bad upload token'}, status=401)
+            if not self.api_user():
                 return
             ids = [i for i in urllib.parse.parse_qs(query).get('ids', [''])[0].split(',') if i]
             with JOBS_LOCK:
                 jobs = {i: {k: v for k, v in JOBS.get(i, {'status': 'unknown'}).items()
                             if k not in ('path', 'marker')} for i in ids}
             self.send_json({'ok': True, 'jobs': jobs, 'queue': queue_snapshot()})
-            return
-        if path == '/api/aiscan-status':
-            expected = ENV.get('UPLOAD_TOKEN', '')
-            got = self.headers.get('X-Upload-Token') or self.cookie_token()
-            if not expected or not hmac.compare_digest(got, expected):
-                self.send_json({'ok': False, 'error': 'bad upload token'}, status=401)
-                return
-            self.send_json({'ok': True, **aiscan_snapshot()})
             return
         if path == '/archive':
             self.send_page(archive_page())
@@ -3132,48 +2967,71 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_page(search_page(q))
             return
         if path == '/admin':
-            if self.require_admin():
+            user = self.require_user()
+            if user:
+                nav = (' · <a href="/admin/users">People</a>'
+                       if is_admin(user) else '')
                 self.send_page(ADMIN_PAGE
                                .replace('__FAILED__', failed_uploads_html())
-                               .replace('__REVIEW__', manage_html())
-                               .replace('__HISTORY__', recent_uploads_html()),
+                               .replace('__REVIEW__', manage_html(user))
+                               .replace('__HISTORY__', recent_uploads_html(user))
+                               .replace('__NAV__', nav)
+                               .replace('__WHO__', esc(user['email'])),
                                cache='no-store')
             return
         if path == '/admin/history':
-            if self.require_admin():
+            if self.require_user():
                 self.send_page(history_page(query), cache='no-store')
             return
+        if path == '/admin/users':
+            user = self.require_admin()
+            if user:
+                self.send_page(users_page(user), cache='no-store')
+            return
         if path == '/admin/logout':
-            self.redirect_303('/', cookie=self.session_cookie('', 0))
+            # Signing out is a write, so it does not happen on a GET. A
+            # SameSite=Lax cookie rides along with any cross-site top-level
+            # navigation, which would let any page — or a link prefetcher,
+            # or a mail scanner following the URL — end someone's session.
+            # The GET asks; the POST below does it.
+            self.send_page(logout_page(), cache='no-store')
             return
         m = re.fullmatch(r'/admin/edit/(\d{4}-\d{2}-\d{2})', path)
         if m:
-            if not self.require_admin():
+            if not self.require_user():
                 return
             if os.path.exists(os.path.join(PUBLIC, m.group(1), 'guide.json')):
                 self.send_page(edit_page(m.group(1)), cache='no-store')
             else:
                 self.send_error(404, 'Not Found')
             return
-        if path == '/admin/aiscan':
-            if self.require_admin():
-                self.send_page(aiscan_aggregate_page(), cache='no-store')
-            return
-        m = re.fullmatch(r'/admin/aiscan/(\d{4}-\d{2}-\d{2})', path)
+        m = re.fullmatch(r'/invite/([A-Za-z0-9_-]{8,128})', path)
         if m:
-            if not self.require_admin():
-                return
-            if os.path.exists(os.path.join(PUBLIC, m.group(1), 'guide.json')):
-                self.send_page(aiscan_page(m.group(1)), cache='no-store')
+            invite = lwccauth.get_invite(m.group(1))
+            if invite:
+                self.send_page(invite_page(m.group(1), invite), cache='no-store')
             else:
-                self.send_error(404, 'Not Found')
+                self.send_page(gone_page(), status=410, cache='no-store')
             return
         if path == '/':
             dates = published_dates()
             if dates:
                 self.send_page(guide_with_nav(dates[0]))
                 return
-        if '/.' in path:
+        # Deny by the name the static handler will actually resolve, not by
+        # the one in the request line. SimpleHTTPRequestHandler percent-
+        # decodes and normalizes before it opens a file, so a rule matched
+        # against the raw target is one that %69 steps around.
+        try:
+            served = urllib.parse.unquote(path, errors='surrogatepass')
+        except UnicodeDecodeError:
+            served = urllib.parse.unquote(path)
+        served = posixpath.normpath(served)
+        # A published Sunday's directory IS the static root, so a scanner
+        # artifact left in one from before the scanner was stood down is
+        # served to anyone who asks for it by name — the routes being gone
+        # is not the same as the scanner being unreachable.
+        if '/.' in path or '/.' in served or served.endswith('/aiscan.json'):
             self.send_error(404, 'Not Found')
             return
         m = re.fullmatch(r'/(\d{4}-\d{2}-\d{2})/original/?', path)
@@ -3195,40 +3053,53 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
-    def do_POST(self):
+    def route_post(self):
         # One-shot handling: read the (bounded) body before any error reply,
         # otherwise the client hits a broken pipe mid-upload and never sees it.
+        # The bound is per-route and is applied before the read, so an
+        # oversized body is refused rather than held.
         self.close_connection = True
+        path, _, query = self.path.partition('?')
+        limit = MAX_AUTH_BODY if AUTH_POST_RE.fullmatch(path) else MAX_UPLOAD
         try:
             length = int(self.headers.get('Content-Length', '0'))
         except ValueError:
             length = 0
-        if length < 0 or length > MAX_UPLOAD:
-            self.send_json({'ok': False, 'error': f'body must be 1..{MAX_UPLOAD} bytes'},
+        if length < 0 or length > limit:
+            self.send_json({'ok': False, 'error': f'body must be 1..{limit} bytes'},
                            status=413)
             return
         body = self.rfile.read(length)
-        path, _, query = self.path.partition('?')
         if path == '/admin/login':
             self.handle_login(body)
+            return
+        if path == '/admin/logout':
+            # Server-side: the session is gone for every browser holding it,
+            # not merely forgotten by this one. No session needed to sign
+            # out — presenting a dead cookie is not an error.
+            lwccauth.destroy_session(self.session_id())
+            self.redirect_303('/', cookie=self.session_cookie('', 0))
+            return
+        m = re.fullmatch(r'/invite/([A-Za-z0-9_-]{8,128})', path)
+        if m:
+            self.handle_invite(m.group(1), body)
             return
         if path not in ('/api/upload', '/api/retry', '/api/review', '/api/rerender',
                         '/api/rerender-all',
                         '/api/reconvert', '/api/reconvert-merge',
                         '/api/reconvert-batch',
                         '/api/reconvert-clear', '/api/unpublish', '/api/save',
-                        '/api/aiscan', '/api/aiscan-apply'):
+                        '/api/users'):
             self.send_json({'ok': False, 'error': 'not found'}, status=404)
             return
-        expected = ENV.get('UPLOAD_TOKEN', '')
-        if not expected:
-            self.send_json({'ok': False, 'error':
-                            'uploads disabled: set UPLOAD_TOKEN in .env and restart'},
-                           status=503)
+        user = self.api_user()
+        if not user:
             return
-        got = self.headers.get('X-Upload-Token') or self.cookie_token()
-        if not hmac.compare_digest(got, expected):
-            self.send_json({'ok': False, 'error': 'bad upload token'}, status=401)
+        if path in ADMIN_ONLY_ACTIONS and not is_admin(user):
+            self.send_json({'ok': False, 'error': 'admin role required'}, status=403)
+            return
+        if path == '/api/users':
+            self.handle_users(user, body)
             return
         if path == '/api/retry':
             self.handle_retry(body)
@@ -3266,9 +3137,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                        **({'failed': failed} if failed else {})})
             self.send_json({'ok': True, 'rendered': len(rendered),
                             **({'failed': failed} if failed else {})})
-            return
-        if path in ('/api/aiscan', '/api/aiscan-apply'):
-            self.handle_aiscan(path, body)
             return
         if path != '/api/upload':
             self.handle_action(path.rsplit('/', 1)[1], body)
@@ -3380,113 +3248,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                    **({'alreadyQueued': len(already)} if already else {})})
         self.send_json({'ok': True, 'queued': len(queued), 'skipped': skipped,
                         'alreadyQueued': already})
-
-    def handle_aiscan(self, path, body):
-        """Queue AI misclassification scans (one date or a batch — they run
-        from the durable scan queue, up to AISCAN_WORKERS at a time), or
-        apply/dismiss selected findings from a stored scan."""
-        try:
-            data = json.loads(body or b'{}')
-        except ValueError:
-            self.send_json({'ok': False, 'error': 'invalid JSON body'}, status=400)
-            return
-        if path == '/api/aiscan':
-            if not ENV.get('ANTHROPIC_API_KEY'):
-                self.send_json({'ok': False, 'error':
-                                'AI scanner disabled: set ANTHROPIC_API_KEY in '
-                                '.env and restart'}, status=503)
-                return
-            dates = [str(d) for d in (data.get('dates') or [])]
-            if data.get('date'):
-                dates.insert(0, str(data.get('date')))
-            dates = list(dict.fromkeys(dates))[:500]
-            if not dates:
-                self.send_json({'ok': False, 'error': 'no dates given'}, status=400)
-                return
-            agents = data.get('agents')     # à la carte subset; missing = all
-            if agents is not None:
-                if not isinstance(agents, list) or not agents or \
-                        any(a not in AISCAN_AGENTS for a in agents):
-                    self.send_json({'ok': False, 'error':
-                                    'agents must be a non-empty list from: '
-                                    + ', '.join(AISCAN_AGENTS)}, status=400)
-                    return
-                agents = aiscan_agent_list(agents)
-            queued, skipped = [], {}
-            for d in dates:
-                if not DATE_DIR_RE.match(d) or \
-                        not os.path.exists(os.path.join(PUBLIC, d, 'guide.json')):
-                    skipped[d] = 'no published guide'
-                elif aiscan_enqueue(d, agents):
-                    queued.append(d)
-                else:
-                    skipped[d] = 'already queued or scanning'
-            if not queued and any(v == 'no published guide' for v in skipped.values()):
-                self.send_json({'ok': False, 'error':
-                                'no published guide for the requested date(s)',
-                                'skipped': skipped}, status=404)
-                return
-            audit_log({'action': 'aiscan-queue', 'ok': True,
-                       'queued': len(queued),
-                       **({'skipped': skipped} if skipped else {})})
-            self.send_json({'ok': True, 'queued': queued, 'skipped': skipped})
-            return
-        action = ('retry' if data.get('retry')
-                  else 'archive' if data.get('archive')
-                  else 'undismiss' if data.get('undismiss')
-                  else 'dismiss' if data.get('dismiss') else 'apply')
-        if isinstance(data.get('items'), list):
-            # Cross-guide batch (the aggregate view): apply/dismiss/undismiss
-            # matching findings on each of their own Sundays independently.
-            results = {}
-            for entry in data['items'][:200]:
-                if not isinstance(entry, dict):
-                    continue
-                d = str(entry.get('date') or '')
-                ids = [str(i) for i in (entry.get('ids') or [])][:200]
-                if not ids and action not in ('archive', 'retry'):
-                    continue      # archive/retry with no ids = all eligible
-                if not DATE_DIR_RE.match(d) or \
-                        not os.path.exists(os.path.join(PUBLIC, d, 'guide.json')):
-                    results[d or '?'] = {'error': 'no published guide'}
-                    continue
-                try:
-                    r = apply_aiscan(d, ids, action=action)
-                    results[d] = {
-                        'applied': sorted(i for i, v in r.items() if v is None),
-                        'skipped': {i: v for i, v in r.items() if v is not None}}
-                except Exception as e:
-                    traceback.print_exc()
-                    results[d] = {'error': str(e)}
-            audit_log({'action': f'aiscan-{action}', 'ok': True,
-                       'dates': sorted(results)})
-            self.send_json({'ok': True, 'results': results})
-            return
-        date = str(data.get('date') or '')
-        if not DATE_DIR_RE.match(date) or \
-                not os.path.exists(os.path.join(PUBLIC, date, 'guide.json')):
-            self.send_json({'ok': False, 'error': f'no published guide for {date!r}'},
-                           status=404)
-            return
-        try:
-            ids = [str(i) for i in (data.get('ids') or [])][:200]
-            results = apply_aiscan(date, ids, action=action)
-            applied = sorted(i for i, r in results.items() if r is None)
-            skipped = {i: r for i, r in results.items() if r is not None}
-            audit_log({'action': f'aiscan-{action}',
-                       'date': date, 'ok': True, 'ids': ids,
-                       **({'skipped': skipped} if skipped else {})})
-            self.send_json({'ok': True, 'date': date,
-                            'applied': applied, 'skipped': skipped})
-        except RuntimeError as e:
-            audit_log({'action': 'aiscan-apply', 'date': date, 'ok': False,
-                       'error': str(e)})
-            self.send_json({'ok': False, 'error': str(e)}, status=502)
-        except Exception as e:
-            traceback.print_exc()
-            audit_log({'action': 'aiscan-apply', 'date': date, 'ok': False,
-                       'error': str(e)})
-            self.send_json({'ok': False, 'error': str(e)}, status=500)
 
     def handle_retry(self, body):
         """Re-enqueue a failed conversion from queue/failed/ — the PDF was
@@ -3619,17 +3380,27 @@ def main():
                          name=f'convert-worker-{i + 1}').start()
     print(f'conversion workers: {workers} '
           f'(set CONVERT_WORKERS in .env to override)', flush=True)
-    aiscan_rescan()
-    scan_workers = aiscan_workers()
-    for i in range(scan_workers):
-        threading.Thread(target=aiscan_worker, daemon=True,
-                         name=f'aiscan-worker-{i + 1}').start()
-    print(f'AI scan workers: {scan_workers} '
-          f'(set AISCAN_WORKERS in .env to override, max 10)', flush=True)
     server = http.server.ThreadingHTTPServer((args.host, args.port), Handler)
-    token = 'set' if ENV.get('UPLOAD_TOKEN') else 'NOT SET (uploads disabled)'
-    print(f'lwcc serving {PUBLIC} on http://{args.host}:{args.port} — upload token {token}',
+    accounts, broken = None, None
+    try:
+        accounts = len(lwccauth.list_users())
+    except lwccauth.StoreError as exc:
+        broken = exc.detail
+    who = 'ACCOUNT STORE UNREADABLE' if broken else f'{accounts} account(s)'
+    print(f'lwcc serving {PUBLIC} on http://{args.host}:{args.port} — {who}',
           flush=True)
+    if broken:
+        # Serve anyway: the admin area answers 503 with the reason, which is
+        # how the operator finds out. Refusing to boot would take the site's
+        # public guides down over a file only /admin needs.
+        print(f'users.json is present and not valid JSON ({broken}) — nobody '
+              f'can sign in. Nothing has been written to it; repair the file '
+              f'by hand and every account comes back.', flush=True)
+    if accounts == 0:
+        # Fail closed, deliberately: there is no bootstrap password, so an
+        # app with no accounts admits nobody until an invite is minted here.
+        print('NO ACCOUNTS YET — run `lwcc invite --admin --for you@example.com` '
+              'and open the link it prints', flush=True)
     missing = missing_deps()
     if missing:
         print(f"WARNING: missing converter deps: {', '.join(missing)} — "

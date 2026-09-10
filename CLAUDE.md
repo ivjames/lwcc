@@ -24,6 +24,16 @@
   only). Deployed on the droplet at `/var/www/lwcc` under pm2; `lwcc deploy`
   there fast-forwards to `origin/main` and restarts (`bin/lwcc`; `redeploy`
   is an alias). Merging is not deploying.
+- `lwccauth.py` — accounts, one-time invite/reset links and server-side
+  sessions, all in `users.json` beside the app (0600, gitignored, never
+  committed). Accounts exist only by redeeming an invite link, so no password
+  passes through whoever issued it. Two roles: staff upload/review/edit,
+  admins also get the maintenance tools and `/admin/users` — enforced in the
+  rendered HTML *and* server-side (`ADMIN_ONLY_ACTIONS`).
+- The AI article scanner is dormant: no routes, no UI, no worker threads.
+  `wgconvert/aiscan.py` and the `aiscan_*` helpers in `app.py` are kept
+  intact and still tested in-process, so re-enabling it means restoring the
+  routes and the worker startup, not rewriting it.
 - `wgconvert/` — the PDF → guide.json → HTML converter package. Parser
   changes must keep the checked-in samples converting clean; when a new
   format variant is taught, pin it in `test/run.py`.

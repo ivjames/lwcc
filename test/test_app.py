@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 import urllib.error
@@ -854,13 +855,264 @@ finally:
         setattr(app_mod, k, v)
     shutil.rmtree(_rscratch, ignore_errors=True)
 
+# --- the account store is written by two processes: the app (many threads)
+# and the `lwcc invite|user-remove|invite-revoke` CLI. Every write replaces
+# the whole file, so a mutation that read the store before another one saved
+# would erase it — a sign-in restoring the account a `user-remove` had just
+# revoked. Each mutation therefore takes an OS-level lock across its whole
+# load-modify-save, and hashing is bounded because scrypt is memory-hard and
+# the pages that hash are public.
+import lwccauth as auth_mod  # noqa: E402
+
+_HOLD_LOCK = (
+    'import fcntl, os, sys, time\n'
+    'fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n'
+    'fcntl.flock(fd, fcntl.LOCK_EX)\n'
+    'open(sys.argv[2], "w").close()\n'          # tell the parent we hold it
+    'time.sleep(1.0)\n')
+
+_ascratch = tempfile.mkdtemp(prefix='lwcc-auth-')
+_asaved = (auth_mod.ROOT, auth_mod.USERS_FILE, auth_mod.LOCK_FILE)
+try:
+    auth_mod.ROOT = _ascratch
+    auth_mod.USERS_FILE = os.path.join(_ascratch, 'users.json')
+    auth_mod.LOCK_FILE = os.path.join(_ascratch, '.users.json.lock')
+
+    _inv = auth_mod.create_invite('someone@example.com', role='admin')
+    _sid, _u = auth_mod.redeem_invite(_inv['token'], 'a long enough password',
+                                      'a long enough password')
+    assert _u['role'] == 'admin' and auth_mod.session_user(_sid)
+
+    # Another process holding the lock blocks a mutation here until it lets
+    # go: the app waits for the CLI rather than racing it to the last write.
+    _ready = os.path.join(_ascratch, 'held')
+    _holder = subprocess.Popen([sys.executable, '-c', _HOLD_LOCK,
+                                auth_mod.LOCK_FILE, _ready])
+    try:
+        for _ in range(200):
+            if os.path.exists(_ready):
+                break
+            time.sleep(0.02)
+        assert os.path.exists(_ready), 'the other process never took the lock'
+        _t0 = time.monotonic()
+        auth_mod.create_invite('later@example.com')
+        _waited = time.monotonic() - _t0
+        assert _waited > 0.3, \
+            f'the mutation did not wait for the other process ({_waited:.2f}s)'
+    finally:
+        _holder.wait(timeout=15)
+    _store = auth_mod.load()
+    assert len(_store['sessions']) == 1 and len(_store['invites']) == 1, \
+        'both writes survive — neither snapshot erased the other'
+
+    # Verifying a password and opening a session for it are one transaction.
+    # A reset landing between them would otherwise hand a fresh session to
+    # someone logging in with the password the reset just replaced — exactly
+    # the eviction the reset exists for. Forced here by resetting from
+    # inside the password check, which is the whole of the race window.
+    _reset = auth_mod.create_invite('someone@example.com', reset=True)
+    _real_check = auth_mod.check_password
+    _after = []
+
+    def _check_then_reset(password, stored):
+        ok = _real_check(password, stored)
+        auth_mod.check_password = _real_check        # fire once
+        _after.append(auth_mod.redeem_invite(
+            _reset['token'], 'the replacement password',
+            'the replacement password')[0])
+        return ok
+
+    auth_mod.check_password = _check_then_reset
+    try:
+        _sid2, _u2 = auth_mod.login('someone@example.com',
+                                    'a long enough password')
+    finally:
+        auth_mod.check_password = _real_check
+    assert _u2 is None and _sid2 is None, \
+        'a login that verified the pre-reset password must not open a session'
+    assert auth_mod.session_user(_sid) is None, 'the reset evicted the old one'
+    assert len(auth_mod.load()['sessions']) == 1 \
+        and auth_mod.session_user(_after[0]), \
+        'only the session the reset itself opened is left'
+    assert auth_mod.login('someone@example.com', 'a long enough password') \
+        == (None, None), 'and the old password is simply dead now'
+
+    # A store that is present and unreadable is damage, not emptiness. Every
+    # save writes the file whole, so treating a bad parse as "no accounts"
+    # would let the next mutation replace a damaged file that still holds
+    # every account with a blank one that holds none — destroying what the
+    # operator needs in order to repair it.
+    _intact = open(auth_mod.USERS_FILE, 'rb').read()
+    with open(auth_mod.USERS_FILE, 'w') as _fh:
+        _fh.write('{"users": {"a@b.co": ')                # truncated by hand
+    try:
+        auth_mod.load()
+        raise AssertionError('a damaged store must not read as an empty one')
+    except auth_mod.StoreError as _e:
+        assert _e.status == 503 and 'not valid JSON' in str(_e)
+    for _op in (lambda: auth_mod.create_invite('x@example.com'),
+                lambda: auth_mod.destroy_session('whatever'),
+                lambda: auth_mod.remove_user('someone@example.com')):
+        try:
+            _op()
+            raise AssertionError('a mutation on a damaged store must refuse')
+        except auth_mod.StoreError:
+            pass
+    assert open(auth_mod.USERS_FILE, 'rb').read() == b'{"users": {"a@b.co": ', \
+        'the damaged file is left exactly as it was'
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
+    assert auth_mod.load()['users'], 'repairing the file brings it all back'
+
+    # A section of the wrong type is damage in the same way: valid JSON, but
+    # defaulting it to {} would let the next write save "no users at all"
+    # over accounts that are still in the file.
+    for _bad in ('{"users": null, "invites": {}, "sessions": {}}',
+                 '{"users": [], "invites": {}, "sessions": {}}',
+                 '{"users": {}, "invites": "nope", "sessions": {}}'):
+        with open(auth_mod.USERS_FILE, 'w') as _fh:
+            _fh.write(_bad)
+        try:
+            auth_mod.load()
+            raise AssertionError(f'a malformed section must not be cleared: {_bad}')
+        except auth_mod.StoreError as _e:
+            assert 'not a JSON object' in _e.detail, _e.detail
+        try:
+            auth_mod.create_invite('x@example.com')
+            raise AssertionError('and a mutation must refuse')
+        except auth_mod.StoreError:
+            pass
+        assert open(auth_mod.USERS_FILE).read() == _bad, 'left as found'
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
+
+    # Records inside a section get the same treatment, and for a sharper
+    # reason: reading a field off a malformed one raises AttributeError or
+    # ValueError, which main() does not catch — a hand edit leaving one
+    # session as `null` took the whole site down at startup, public guides
+    # and all, instead of the admin area answering 503.
+    for _bad in ('{"users":{},"invites":{"tok":"bad"},"sessions":{}}',
+                 '{"users":{},"invites":{},"sessions":{"sid":null}}',
+                 '{"users":{"a@b.co":null},"invites":{},"sessions":{}}',
+                 '{"users":{},"invites":{"tok":{"expires":"soon"}},"sessions":{}}',
+                 '{"users":{},"invites":{},"sessions":{"sid":{"created":null}}}',
+                 # A live session whose email is unhashable: `email in users`
+                 # raised TypeError, which is not a StoreError, so it killed
+                 # the process at startup rather than answering 503. (An
+                 # expired stamp short-circuits before the membership test,
+                 # so the stamp here has to be a live one.)
+                 '{"users":{},"invites":{},'
+                 '"sessions":{"sid":{"email":[],"created":9999999999}}}',
+                 '{"users":{},"invites":{},'
+                 '"sessions":{"sid":{"email":{"a":1},"created":9999999999}}}',
+                 # A number is not enough: JSON admits 1e999, which parses as
+                 # inf and outlives every expiry check, so a seven-day link
+                 # becomes permanent. NaN is the mirror image — it compares
+                 # false against everything, so the record is pruned as though
+                 # expired and deleted by the next save.
+                 '{"users":{},"invites":{"tok":{"expires":1e999}},"sessions":{}}',
+                 '{"users":{},"invites":{"tok":{"expires":NaN}},"sessions":{}}',
+                 '{"users":{},"invites":{"tok":{"expires":Infinity}},"sessions":{}}'):
+        with open(auth_mod.USERS_FILE, 'w') as _fh:
+            _fh.write(_bad)
+        try:
+            auth_mod.load()
+            raise AssertionError(f'a malformed record must not slip through: {_bad}')
+        except auth_mod.StoreError:
+            pass
+        assert open(auth_mod.USERS_FILE).read() == _bad, 'left as found'
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
+
+    # Secrets never begin with '-' or '_': token_urlsafe's alphabet includes
+    # both, and a leading dash makes the value look like an option to
+    # argparse — `lwcc invite-revoke <token>` failed outright on about one
+    # token in thirty-two, which is the kind of bug that shows up as "the CLI
+    # is broken sometimes".
+    for _ in range(400):
+        assert auth_mod.new_token()[:1] not in ('-', '_')
+    # And a link already issued with a leading dash still revokes. Run the
+    # scratch copy: the CLI keys its store off its own path, and the repo's
+    # own directory is not a scratch dir.
+    shutil.copyfile(os.path.join(ROOT, 'lwccauth.py'),
+                    os.path.join(_ascratch, 'lwccauth.py'))
+    _r = subprocess.run([sys.executable, os.path.join(_ascratch, 'lwccauth.py'),
+                         'invite-revoke', '-notarealtoken'],
+                        capture_output=True, text=True)
+    assert 'No such pending link' in _r.stderr, (_r.returncode, _r.stderr)
+    assert 'usage:' not in _r.stderr, 'a dashed token is a value, not an option'
+
+    # And a shape none of those checks anticipated is damage too, rather
+    # than an exception of some other type reaching main() — which catches
+    # StoreError alone, and would exit.
+    with open(auth_mod.USERS_FILE, 'w') as _fh:
+        _fh.write('{"users":{},"invites":{},"sessions":{"sid":{"created":'
+                  '[1,2],"email":"a@b.co"}}}')
+    try:
+        auth_mod.load()
+        raise AssertionError('an unanticipated shape must still be StoreError')
+    except auth_mod.StoreError:
+        pass
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
+
+    # An address is attacker-supplied on the sign-in form and on an open
+    # invite link, so its length is bounded and not only its shape.
+    assert auth_mod.valid_email('office@example.com')
+    assert not auth_mod.valid_email('a' * 250 + '@example.com')
+    try:
+        auth_mod.create_invite('a' * 250 + '@example.com')
+        raise AssertionError('an over-long address must be refused')
+    except auth_mod.AuthError:
+        pass
+
+    # A section that is simply absent is not damage — an older store, or one
+    # written by hand — and still defaults.
+    with open(auth_mod.USERS_FILE, 'w') as _fh:
+        _fh.write('{"users": {}}')
+    assert auth_mod.load() == {'users': {}, 'invites': {}, 'sessions': {}}
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
+
+    # A *missing* file is the other thing entirely — a fresh install.
+    os.rename(auth_mod.USERS_FILE, auth_mod.USERS_FILE + '.away')
+    assert auth_mod.load() == {'users': {}, 'invites': {}, 'sessions': {}}
+    os.rename(auth_mod.USERS_FILE + '.away', auth_mod.USERS_FILE)
+
+    # Password hashing is bounded. scrypt is memory-hard by design (~16 MB a
+    # go) and /admin/login is public with a thread per connection, so without
+    # a cap a burst of wrong passwords is gigabytes of transient allocation
+    # against a 200 MB process ceiling — an attacker restarting the app.
+    assert auth_mod.MAX_CONCURRENT_HASHES <= 8, 'the cap is a cap'
+    for _ in range(auth_mod.MAX_CONCURRENT_HASHES):
+        assert auth_mod.HASH_SLOTS.acquire(timeout=5)
+    _hashed = []
+    _th = threading.Thread(
+        target=lambda: _hashed.append(auth_mod.hash_password('x' * 12)))
+    _th.start()
+    _th.join(0.4)
+    assert _th.is_alive() and not _hashed, \
+        'a hash beyond the cap waits for a slot instead of allocating'
+    for _ in range(auth_mod.MAX_CONCURRENT_HASHES):
+        auth_mod.HASH_SLOTS.release()
+    _th.join(20)
+    assert _hashed and not _th.is_alive(), 'and runs once one frees up'
+finally:
+    auth_mod.ROOT, auth_mod.USERS_FILE, auth_mod.LOCK_FILE = _asaved
+    shutil.rmtree(_ascratch, ignore_errors=True)
+
+
 PORT = 8972
 BASE = f'http://127.0.0.1:{PORT}'
-TOKEN = 'test-token-123'
+ADMIN_PW = 'a good long password'
+STAFF_PW = 'office password 1'
 
-# Run the app from a scratch copy so the repo's public/ and .env are untouched.
+# Run the app from a scratch copy so the repo's public/, .env and users.json
+# are untouched. No accounts are seeded: the app starts with nobody able to
+# sign in, which is what a fresh install looks like, and the first account is
+# minted through the CLI below exactly as an operator would.
 scratch = tempfile.mkdtemp(prefix='lwcc-app-test-')
-for name in ('app.py', 'wgconvert', 'config', 'assets', 'template'):
+for name in ('app.py', 'lwccauth.py', 'wgconvert', 'config', 'assets', 'template'):
     src = os.path.join(ROOT, name)
     dst = os.path.join(scratch, name)
     if os.path.isdir(src):
@@ -868,7 +1120,7 @@ for name in ('app.py', 'wgconvert', 'config', 'assets', 'template'):
     else:
         shutil.copyfile(src, dst)
 with open(os.path.join(scratch, '.env'), 'w') as fh:
-    fh.write(f'UPLOAD_TOKEN={TOKEN}\n')
+    fh.write(f'SITE_URL={BASE}\n')      # invite links point at this instance
 
 proc = subprocess.Popen(
     [sys.executable, os.path.join(scratch, 'app.py'), '--port', str(PORT)],
@@ -895,14 +1147,51 @@ def req(path, data=None, headers=None, method=None):
         return e.code, e.read()
 
 
-def login(token, nxt='/admin'):
+def login(email, password, nxt='/admin'):
     return req('/admin/login', method='POST',
-               data=urllib.parse.urlencode({'token': token, 'next': nxt}).encode(),
+               data=urllib.parse.urlencode({'email': email, 'password': password,
+                                            'next': nxt}).encode(),
                headers={'Content-Type': 'application/x-www-form-urlencoded'})
+
+
+def redeem(token, password, confirm=None, email=None):
+    form = {'password': password,
+            'confirm': password if confirm is None else confirm}
+    if email:
+        form['email'] = email
+    return req(f'/invite/{token}', method='POST',
+               data=urllib.parse.urlencode(form).encode(),
+               headers={'Content-Type': 'application/x-www-form-urlencoded'})
+
+
+def cookie_of(headers):
+    """The session cookie from a 303, as a browser would send it back."""
+    return {'Cookie': (headers.get('Set-Cookie') or '').split(';', 1)[0]}
+
+
+def users_api(op, cookie, **kw):
+    return req('/api/users', data=json.dumps({'op': op, **kw}).encode(),
+               headers={**cookie, 'Content-Type': 'application/json'})
 
 
 import re as re_mod  # noqa: E402
 import subprocess as sp_mod  # noqa: E402
+
+
+def cli(*args):
+    """The account side of the lwcc CLI, run the way the operator does — it
+    is what mints the first admin, and the only way back in if nobody can
+    sign in."""
+    r = sp_mod.run([sys.executable, os.path.join(scratch, 'lwccauth.py'), *args],
+                   capture_output=True, text=True)
+    assert r.returncode == 0, (args, r.stdout, r.stderr)
+    return r.stdout
+
+
+def invite_token(text):
+    m = re_mod.search(r'/invite/([A-Za-z0-9_-]+)', text)
+    assert m, f'no invite link in: {text!r}'
+    return m.group(1)
 NODE = shutil.which('node')
 SCRIPT_RE = re_mod.compile(
     rb'<script(?![^>]*type="application/json")[^>]*>(.*?)</script>', re_mod.S)
@@ -946,49 +1235,111 @@ try:
     status, body = req('/archive')
     assert status == 200 and b'Nothing published yet' in body
 
-    # The whole admin area is behind a sign-in: pages answer 401 with the
-    # login form until the session cookie is set.
+    # A fresh install admits nobody: there is no shared token and no
+    # bootstrap password, so the gate says how to mint the first account
+    # rather than pretending one exists.
     status, body = req('/admin')
-    assert status == 401 and b'Admin Sign-in' in body and b'name="token"' in body
+    assert status == 401 and b'Sign in' in body and b'name="password"' in body \
+        and b'name="email"' in body
+    assert b'no accounts yet' in body.lower() and b'lwcc invite --admin' in body
     assert b'Publish Worship Guides' not in body
     assert 'no-store' in (LAST['headers'].get('Cache-Control') or '')
+    assert not os.path.exists(os.path.join(scratch, 'users.json'))
 
-    status, body = login('wrong')
-    assert status == 401 and b'Wrong token' in body
+    # The first account: minted from the CLI, and it does not exist until
+    # the link is redeemed — the password is chosen by whoever opens it, so
+    # it never passes through the person who issued the invite.
+    out = cli('invite', '--admin', '--for', 'Boss@Example.com')
+    assert BASE + '/invite/' in out, 'SITE_URL points links at this instance'
+    admin_invite = invite_token(out)
+    status, body = login('boss@example.com', ADMIN_PW)
+    assert status == 401, 'an unredeemed invite is not an account'
 
-    # Right token: 303 + long-lived HttpOnly cookie; an off-site "next" is
-    # ignored in favor of /admin.
-    status, body = login(TOKEN, nxt='https://evil.example/')
-    assert status == 303, (status, body)
+    status, body = req(f'/invite/{admin_invite}')
+    assert status == 200 and b'Set up your account' in body \
+        and b'boss@example.com' in body, 'the link is pinned to the invited address'
+    check_page_js(body, '/invite')
+
+    status, body = req('/invite/nosuchtoken-nosuchtoken')
+    assert status == 410, 'an unknown link is gone, not a sign-in prompt'
+
+    status, body = redeem(admin_invite, 'short')
+    assert status == 400 and b'at least 10' in body, 'weak password refused'
+    status, body = redeem(admin_invite, ADMIN_PW, confirm='something else')
+    assert status == 400 and b'do not match' in body
+
+    status, body = redeem(admin_invite, ADMIN_PW)
+    assert status == 303 and LAST['headers'].get('Location') == '/admin', (status, body)
     setc = LAST['headers'].get('Set-Cookie') or ''
-    assert 'wg_token=' in setc and 'HttpOnly' in setc and 'Max-Age=15552000' in setc, setc
-    assert LAST['headers'].get('Location') == '/admin'
-    COOKIE = {'Cookie': setc.split(';', 1)[0]}
+    assert 'wg_session=' in setc and 'HttpOnly' in setc and 'SameSite=Lax' in setc \
+        and 'Max-Age=15552000' in setc, setc
+    COOKIE = cookie_of(LAST['headers'])
+
+    status, body = redeem(admin_invite, ADMIN_PW)
+    assert status == 410, 'an invite link works exactly once'
+    status, body = req(f'/invite/{admin_invite}')
+    assert status == 410, 'and its page goes with it'
 
     status, body = req('/admin', headers=COOKIE)
     assert status == 200 and b'Publish Worship Guides' in body and b'multiple' in body
-    assert b'id="token"' not in body, 'no per-action token field anymore'
+    assert b'name="token"' not in body, 'no token field anywhere anymore'
+    assert b'boss@example.com' in body, 'the panel says who is signed in'
     assert 'no-store' in (LAST['headers'].get('Cache-Control') or '')
+    assert oct(os.stat(os.path.join(scratch, 'users.json')).st_mode & 0o777) == '0o600', \
+        'users.json is readable only by the app'
+
+    # Sign-in is email + password. The address is case-insensitive, a wrong
+    # password is refused, and an off-site "next" is ignored in favor of
+    # /admin so the form cannot bounce a visitor away.
+    status, body = login('boss@example.com', 'not the password')
+    assert status == 401 and b'Wrong email or password' in body
+    status, body = login('nobody@example.com', ADMIN_PW)
+    assert status == 401 and b'Wrong email or password' in body, \
+        'an unknown address is refused the same way as a wrong password'
+    status, body = login('BOSS@EXAMPLE.COM', ADMIN_PW, nxt='https://evil.example/')
+    assert status == 303 and LAST['headers'].get('Location') == '/admin', (status, body)
+    COOKIE2 = cookie_of(LAST['headers'])     # the same account, a second browser
+    status, body = login('boss@example.com', ADMIN_PW, nxt='/admin/history')
+    assert status == 303 and LAST['headers'].get('Location') == '/admin/history'
+    assert req('/admin', headers=cookie_of(LAST['headers']))[0] == 200
+
+    # A staff account, invited from the panel the way the church office is.
+    status, body = users_api('invite', COOKIE, email='Office@Example.com',
+                             role='staff')
+    assert status == 200, (status, body)
+    staff_invite = invite_token(json.loads(body)['url'])
+    status, body = redeem(staff_invite, STAFF_PW)
+    assert status == 303, (status, body)
+    STAFF = cookie_of(LAST['headers'])
+    status, body = users_api('invite', COOKIE, email='office@example.com')
+    assert status == 409 and b'already has an account' in body, \
+        'inviting an address that already has an account is refused'
 
     with open(SAMPLE, 'rb') as fh:
         pdf = fh.read()
 
-    # Fails closed / bad token.
+    # No session, no upload — and the header token the shared-token era used
+    # is not a credential any more.
     status, body = req('/api/upload', data=pdf,
-                       headers={'X-Upload-Token': 'wrong', 'Content-Type': 'application/pdf'})
+                       headers={'Content-Type': 'application/pdf'})
     assert status == 401, (status, body)
+    status, body = req('/api/upload', data=pdf,
+                       headers={'X-Upload-Token': 'test-token-123',
+                                'Content-Type': 'application/pdf'})
+    assert status == 401, 'the old X-Upload-Token header authenticates nothing'
 
     status, body = req('/api/upload?sync=1', data=b'%PDF-not really',
-                       headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/pdf'})
+                       headers={**COOKIE, 'Content-Type': 'application/pdf'})
     assert status == 422, (status, body)
 
     status, body = req('/api/upload', data=b'hello',
-                       headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/pdf'})
+                       headers={**COOKIE, 'Content-Type': 'application/pdf'})
     assert status == 400, (status, body)
 
     # The real upload converts and publishes (?sync=1: result inline).
+    # Uploading is staff work, so it goes up on the staff session.
     status, body = req('/api/upload?sync=1', data=pdf,
-                       headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/pdf'})
+                       headers={**STAFF, 'Content-Type': 'application/pdf'})
     assert status == 200, (status, body)
     data = json.loads(body)
     assert data['ok'] and data['dateISO'] == '2026-08-02' and data['warnings'] == [], data
@@ -1041,278 +1392,211 @@ try:
                        headers={**COOKIE, 'Content-Type': 'application/pdf'})
     assert status == 400, 'malformed override rejected'
 
-    # AI article scanner: page and endpoints are gated; scanning is refused
-    # without ANTHROPIC_API_KEY; applying repairs from a stored scan works
-    # end-to-end (moves are verified against the guide text, guide.json is
-    # rewritten, the page re-renders, statuses persist).
-    status, body = req('/admin/aiscan/2026-08-02')
-    assert status == 401 and b'Admin Sign-in' in body, 'aiscan page gated'
-    status, body = req('/admin/aiscan/2026-08-02', headers=COOKIE)
-    assert status == 200 and b'AI Article Scanner' in body
-    assert b'ANTHROPIC_API_KEY' in body, 'page says how to enable scanning'
-    status, body = req('/admin/aiscan/1999-01-01', headers=COOKIE)
-    assert status == 404
-    status, body = req('/api/aiscan', data=json.dumps({'date': '2026-08-02'}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 503 and b'ANTHROPIC_API_KEY' in body, 'scan fails closed without a key'
-    status, body = req('/api/aiscan', data=json.dumps({'date': '2026-08-02'}).encode(),
-                       headers={'Content-Type': 'application/json'})
-    assert status == 401, 'aiscan API needs the admin token'
-    status, body = req('/api/aiscan-status')
-    assert status == 401, 'scan-queue status gated like /api/status'
-    status, body = req('/api/aiscan-status', headers=COOKIE)
-    assert status == 200, (status, body)
-    ss = json.loads(body)
-    assert ss['ok'] and ss['jobs'] == {} and ss['waiting'] == 0 \
-        and ss['scanning'] == [], ss
+    # --- the AI scanner is gone from the web -------------------------------
+    # Its machinery is kept in app.py (and exercised in-process above), but
+    # nothing reaches it over HTTP any more: every route it had is a 404,
+    # signed in or not, and the admin page carries no trace of it.
+    for path in ('/admin/aiscan', '/admin/aiscan/2026-08-02'):
+        assert req(path, headers=COOKIE)[0] == 404, path
+        assert req(path)[0] == 404, f'{path} is not even a sign-in prompt'
+    for path in ('/api/aiscan', '/api/aiscan-apply'):
+        status, body = req(path, data=json.dumps({'date': '2026-08-02'}).encode(),
+                           headers={**COOKIE, 'Content-Type': 'application/json'})
+        assert status == 404, (path, status, body)
+    assert req('/api/aiscan-status', headers=COOKIE)[0] == 404
     status, body = req('/admin', headers=COOKIE)
-    assert b'AI article scanner' in body and b'/admin/aiscan/2026-08-02' in body, \
-        'admin page carries the scanner card and per-Sunday links'
+    assert b'aiscan' not in body.lower() and b'AI scan' not in body, \
+        'no scanner card, per-row link, badge or JS left on the admin page'
 
-    # Stored-scan repair flow on the 2020-01-05 copy: move one real order
-    # item into announcements, dismiss a second flag-only finding.
-    ai_dir = os.path.join(scratch, 'public', '2020-01-05')
-    ai_guide = json.load(open(os.path.join(ai_dir, 'guide.json')))
-    idx, item = next((i, o) for i, o in enumerate(ai_guide['order'])
-                     if o['kind'] == 'item' and o.get('label') and o.get('body')
-                     and '<' not in o['body'][0]['text'])
-    scan_fixture = {
-        'at': '2026-08-05T10:00:00', 'model': 'claude-opus-5',
-        'summary': 'test fixture', 'usage': {'input': 1, 'output': 1},
-        'findings': [
-            {'id': 'f1', 'path': f'order[{idx}]',
-             'quote': item['body'][0]['text'][:80],
-             'issue': 'misfiled as order-of-worship content',
-             'current': 'content', 'proposed': 'announcement',
-             'confidence': 'high', 'status': 'open',
-             'fix': {'op': 'item_to_announcement', 'orderIndex': idx,
-                     'blockIndex': None, 'annIndex': None,
-                     'heading': 'Moved by scanner'}},
-            {'id': 'f2', 'path': 'welcome', 'quote': 'x', 'issue': 'flag only',
-             'current': 'content', 'proposed': 'announcement',
-             'confidence': 'low', 'status': 'open', 'fix': None},
-            {'id': 'f3', 'path': 'order[0]', 'quote': 'TEXT THAT IS NOT THERE',
-             'issue': 'stale quote must be skipped, then reopenable',
-             'current': 'content', 'proposed': 'stage',
-             'confidence': 'high', 'status': 'open',
-             'fix': {'op': 'item_to_stage', 'orderIndex': 0,
-                     'blockIndex': None, 'annIndex': None, 'eventIndex': None,
-                     'heading': None}},
-        ],
-    }
-    json.dump(scan_fixture, open(os.path.join(ai_dir, 'aiscan.json'), 'w'))
+    # --- roles: the maintenance tools are the admin's ----------------------
+    # Two enforcement points, deliberately. First: staff are never handed a
+    # button the API would refuse.
+    status, body = req('/admin', headers=STAFF)
+    assert status == 200 and b'Publish Worship Guides' in body, (status, body)
+    assert b'office@example.com' in body and b'/admin/users' not in body, \
+        'staff see who they are, not the people page'
+    assert b'Published Sundays' in body and b'/admin/edit/2026-08-02' in body, \
+        'staff still get the panel and the editor'
+    for absent in (b"adminAction(this, 'unpublish'", b"adminAction(this, 'rerender'",
+                   b"adminAction(this, 'reconvert'", b'id="rerenderall"',
+                   b'id="reconverteverything"', b'id="refresheverything"',
+                   b'id="clearreconverts"'):
+        assert absent not in body, (absent, 'admin-only control rendered for staff')
     status, body = req('/admin', headers=COOKIE)
-    assert '🔎 3'.encode() in body, 'open-findings badge on the Sundays list'
-    assert b'3 open findings' in body, 'scanner card lists the flagged Sunday'
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'date': '2020-01-05',
-                                        'ids': ['f1', 'f3']}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 200, (status, body)
-    ap = json.loads(body)
-    assert ap['ok'] and ap['applied'] == ['f1'] and list(ap['skipped']) == ['f3'], ap
-    g_after = json.load(open(os.path.join(ai_dir, 'guide.json')))
-    assert len(g_after['order']) == len(ai_guide['order']) - 1, 'item moved out'
-    moved = g_after['announcements'][-1]
-    assert moved['heading'] == 'Moved by scanner'
-    _norm = lambda s: ' '.join(app_mod.clean_plain(s).split())  # noqa: E731
-    assert _norm(item['body'][0]['text'])[:40] in _norm(moved['text']), \
-        'printed text preserved, not rewritten'
-    assert any('AI repair applied' in n for n in g_after['notes'])
-    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
-    assert scan_after['findings'][0]['status'] == 'applied'
-    assert 'Moved by scanner' in open(os.path.join(ai_dir, 'index.html')).read(), \
-        'apply re-rendered the page'
+    assert b"adminAction(this, 'unpublish'" in body and b'id="rerenderall"' in body, \
+        'the same panel, for an admin, has them'
 
-    # Retry skipped fixes: one call reopens them and re-applies through the
-    # relocation path; a quote gone from the guide re-skips with the clearer
-    # reason rather than being guessed at.
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'date': '2020-01-05',
-                                        'retry': True}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 200, (status, body)
-    rt = json.loads(body)
-    assert rt['ok'] and rt['applied'] == [] \
-        and 'no longer exists' in rt['skipped']['f3'], rt
-    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
-    assert scan_after['findings'][2]['status'] == 'skipped', \
-        'unrecoverable fix re-skips instead of applying blind'
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'date': '2020-01-05', 'ids': ['f2'],
-                                        'dismiss': True}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 200 and json.loads(body)['ok'], body
-    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
-    assert scan_after['findings'][1]['status'] == 'dismissed'
-    status, body = req('/admin/aiscan/2020-01-05', headers=COOKIE)
-    assert status == 200 and b'misfiled as order-of-worship content' in body, \
-        'scan page embeds the stored findings'
-    assert b'"applied"' in body and b'"dismissed"' in body, 'statuses persisted'
+    # Second: the API refuses them whatever the page rendered — and nothing
+    # on disk moves when it does.
+    guard_page = os.path.join(scratch, 'public', '2026-08-02', 'index.html')
+    guard_guide = os.path.join(scratch, 'public', '2026-08-02', 'guide.json')
+    before = {f: open(f, 'rb').read() for f in (guard_page, guard_guide)}
+    published_before = sorted(os.listdir(os.path.join(scratch, 'public')))
+    for path, payload in (('/api/rerender', {'date': '2026-08-02'}),
+                          ('/api/reconvert', {'date': '2026-08-02'}),
+                          ('/api/reconvert-merge', {'date': '2026-08-02'}),
+                          ('/api/unpublish', {'date': '2026-08-02'}),
+                          ('/api/rerender-all', {}),
+                          ('/api/reconvert-batch', {'dates': ['2026-08-02']}),
+                          ('/api/reconvert-clear', {}),
+                          ('/api/users', {'op': 'invite', 'email': 'x@example.com'})):
+        status, body = req(path, data=json.dumps(payload).encode(),
+                           headers={**STAFF, 'Content-Type': 'application/json'})
+        assert status == 403 and b'admin role required' in body, (path, status, body)
+    for f, was in before.items():
+        assert open(f, 'rb').read() == was, (f, 'refused call changed the file')
+    assert sorted(os.listdir(os.path.join(scratch, 'public'))) == published_before, \
+        'a refused unpublish set nothing aside'
 
-    # Dismissed and skipped findings are both reopenable; an applied finding
-    # is refused, not silently touched.
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'date': '2020-01-05',
-                                        'ids': ['f2', 'f3'],
-                                        'undismiss': True}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 200 and json.loads(body)['applied'] == ['f2', 'f3'], body
-    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
-    assert scan_after['findings'][1]['status'] == 'open', 'dismissal reversed'
-    assert scan_after['findings'][2]['status'] == 'open', 'skip reversed'
-    assert 'statusNote' not in scan_after['findings'][2], 'skip note cleared'
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'date': '2020-01-05', 'ids': ['f1'],
-                                        'undismiss': True}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert json.loads(body)['skipped'] == {'f1': 'not dismissed or skipped'}, body
-
-    # "Clear resolved" archives settled findings (no re-scan needed): out of
-    # the working list, kept as history, open findings untouched.
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'date': '2020-01-05',
-                                        'archive': True}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 200 and json.loads(body)['applied'] == ['f1'], body
-    scan_after = json.load(open(os.path.join(ai_dir, 'aiscan.json')))
-    assert [f['id'] for f in scan_after['findings']] == ['f2', 'f3'], \
-        'settled finding out of the way, open ones untouched'
-    assert [f['id'] for f in scan_after['resolvedFindings']] == ['f1'], \
-        'archived into history, not deleted'
-    status, body = req('/admin/aiscan/2020-01-05', headers=COOKIE)
-    assert status == 200 and b'"resolvedFindings"' in body, \
-        'scan page carries the archive'
-
-    # Matching findings across guides: the same quoted text flagged the same
-    # way on several Sundays aggregates at /admin/aiscan, and one action
-    # applies each Sunday's fix on its own guide.
-    import re as _re
-
-    def _mkquote(t):
-        return ' '.join(_re.sub(r'<[^>]+>', '', t).split()[:8])
-
-    agg_dates = ['2026-08-02', '2020-01-05']
-    for d in agg_dates:
-        gg = json.load(open(os.path.join(scratch, 'public', d, 'guide.json')))
-        json.dump(
-            {'at': '2026-08-05T10:05:00', 'model': 'claude-opus-5',
-             'summary': 'fixture', 'usage': {},
-             'findings': [{'id': 'g1', 'path': 'announcements[0]',
-                           'quote': _mkquote(gg['announcements'][0]['text']),
-                           'issue': 'recurring flowers blurb',
-                           'current': 'announcement', 'proposed': 'discard',
-                           'confidence': 'high', 'status': 'open',
-                           'fix': {'op': 'discard_announcement',
-                                   'orderIndex': None, 'blockIndex': None,
-                                   'annIndex': 0, 'heading': None}}]},
-            open(os.path.join(scratch, 'public', d, 'aiscan.json'), 'w'))
-    status, body = req('/admin/aiscan')
-    assert status == 401 and b'Admin Sign-in' in body, 'aggregate page gated'
-    status, body = req('/admin/aiscan', headers=COOKIE)
-    assert status == 200 and b'Matching Findings' in body
-    assert b'recurring flowers blurb' in body and b'2026-08-02' in body \
-        and b'2020-01-05' in body, 'both Sundays in the group'
-    before_counts = {
-        d: len(json.load(open(os.path.join(scratch, 'public', d,
-                                           'guide.json')))['announcements'])
-        for d in agg_dates}
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'items': [{'date': d, 'ids': ['g1']}
-                                                  for d in agg_dates]}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 200, (status, body)
-    br = json.loads(body)
-    assert br['ok'] and all(br['results'][d]['applied'] == ['g1']
-                            for d in agg_dates), br
-    for d in agg_dates:
-        gg = json.load(open(os.path.join(scratch, 'public', d, 'guide.json')))
-        assert len(gg['announcements']) == before_counts[d] - 1, \
-            'recurring block discarded on each Sunday'
-        sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
-        assert sc['findings'][0]['status'] == 'applied'
-    status, body = req('/admin/aiscan', headers=COOKIE)
-    assert status == 200 and b'recurring flowers blurb' not in body \
-        and b'"applied"' not in body, \
-        'a fully-applied group drops off the aggregate view'
-    status, body = req('/admin', headers=COOKIE)
-    assert b'Matching findings across' in body, \
-        'admin card links the aggregate view'
-
-    # Group-level dismiss/undismiss round-trip across guides.
-    for d in agg_dates:
-        sp = os.path.join(scratch, 'public', d, 'aiscan.json')
-        sc = json.load(open(sp))
-        sc['findings'].append({'id': 'g2', 'path': 'order[0]',
-                               'quote': 'RECURRING POSTER FRAGMENT',
-                               'issue': 'poster residue kept as content',
-                               'current': 'content', 'proposed': 'discard',
-                               'confidence': 'low', 'status': 'open',
-                               'fix': None})
-        json.dump(sc, open(sp, 'w'))
-    items = [{'date': d, 'ids': ['g2']} for d in agg_dates]
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'items': items, 'dismiss': True}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 200 and json.loads(body)['ok'], body
-    for d in agg_dates:
-        sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
-        assert sc['findings'][-1]['status'] == 'dismissed', (d, sc['findings'][-1])
-    status, body = req('/admin/aiscan', headers=COOKIE)
-    assert status == 200 and b'RECURRING POSTER FRAGMENT' in body \
-        and b'Reopen' in body, 'dismissed group offers reopen'
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'items': items, 'undismiss': True}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
-    assert status == 200, (status, body)
-    br = json.loads(body)
-    assert br['ok'] and all(br['results'][d]['applied'] == ['g2']
-                            for d in agg_dates), br
-    for d in agg_dates:
-        sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
-        assert sc['findings'][-1]['status'] == 'open', 'group dismissal reversed'
-
-    # The admin card offers clear-resolved across Sundays; the batch archive
-    # sweeps each Sunday's settled findings without needing ids.
-    status, body = req('/admin', headers=COOKIE)
-    assert b'id="aiscanclear"' in body \
-        and b'Clear resolved findings (2)' in body, 'clear-all offered'
-    status, body = req('/api/aiscan-apply',
-                       data=json.dumps({'items': [{'date': d} for d in agg_dates],
-                                        'archive': True}).encode(),
-                       headers={**COOKIE, 'Content-Type': 'application/json'})
+    # Staff work is staff work: review, save and retry all go through.
+    status, body = req('/api/review', data=json.dumps({'date': '2026-08-02'}).encode(),
+                       headers={**STAFF, 'Content-Type': 'application/json'})
     assert status == 200 and json.loads(body)['ok'], (status, body)
-    for d in agg_dates:
-        sc = json.load(open(os.path.join(scratch, 'public', d, 'aiscan.json')))
-        assert [f['id'] for f in sc['findings']] == ['g2'], (d, sc['findings'])
-        assert [f['id'] for f in sc['resolvedFindings']] == ['g1']
-    status, body = req('/admin', headers=COOKIE)
-    assert b'id="aiscanclear"' not in body, 'nothing settled left to clear'
 
-    # Varying-text findings with the same error category group in the
-    # "similar" tier of the aggregate view.
-    for d, q in zip(agg_dates, ('Concert this Sunday at 3 PM',
-                                'Church picnic next Saturday')):
-        sp = os.path.join(scratch, 'public', d, 'aiscan.json')
-        sc = json.load(open(sp))
-        sc['findings'].append({'id': 'h1', 'quote': q,
-                               'issue': 'event misfiled as announcement',
-                               'current': 'announcement', 'proposed': 'event',
-                               'confidence': 'medium', 'status': 'open',
-                               'fix': {'op': 'announcement_to_event',
-                                       'orderIndex': None, 'blockIndex': None,
-                                       'annIndex': 0, 'eventIndex': None,
-                                       'heading': None}})
-        json.dump(sc, open(sp, 'w'))
-    status, body = req('/admin/aiscan', headers=COOKIE)
-    assert status == 200 and b'"kind": "similar"' in body \
-        and b'Church picnic next Saturday' in body, \
-        'varying-text category appears in the similar tier'
+    # The people page: admins only, and staff cannot mint an invite by
+    # calling the API directly either (covered by the 403 sweep above).
+    status, body = req('/admin/users', headers=STAFF)
+    assert status == 403 and b'Administrators only' in body, (status, body)
+    status, body = req('/admin/users')
+    assert status == 401 and b'Sign in' in body, 'the people page is gated too'
+    status, body = req('/admin/users', headers=COOKIE)
+    assert status == 200 and b'boss@example.com' in body \
+        and b'office@example.com' in body, (status, body)
+    assert b'Invite someone' in body and b'(you)' in body
 
-    # Every admin page's inline JS must actually parse (all scanner states
-    # are populated at this point: open, applied, dismissed, groups).
-    for js_path in ('/admin', '/admin/history', '/admin/aiscan',
-                    '/admin/aiscan/2020-01-05', '/admin/edit/2026-08-02'):
+    # A pending link shows on the page and the CLI can revoke it.
+    status, body = users_api('invite', COOKIE, email='temp@example.com',
+                             role='staff')
+    assert status == 200, (status, body)
+    temp_tok = json.loads(body)['token']
+    status, body = req('/admin/users', headers=COOKIE)
+    assert temp_tok.encode() in body, 'pending link listed for copying'
+    check_page_js(body, '/admin/users')
+    assert req(f'/invite/{temp_tok}')[0] == 200
+    assert 'temp@example.com' in cli('users'), 'the CLI sees the same store'
+    cli('invite-revoke', temp_tok)
+    assert req(f'/invite/{temp_tok}')[0] == 410, 'a revoked link is dead'
+    status, body = req('/admin/users', headers=COOKIE)
+    assert temp_tok.encode() not in body
+
+    # Password reset: same one-time-link mechanism, pinned to an account.
+    # Redeeming it kills that account's other sessions and its old password.
+    status, body = users_api('reset', COOKIE, email='office@example.com')
+    assert status == 200, (status, body)
+    reset_tok = invite_token(json.loads(body)['url'])
+    status, body = req(f'/invite/{reset_tok}')
+    assert status == 200 and b'Choose a new password' in body
+    assert req('/admin', headers=STAFF)[0] == 200, 'still signed in until it is used'
+    status, body = redeem(reset_tok, 'a different office password')
+    assert status == 303, (status, body)
+    STAFF = cookie_of(LAST['headers'])
+    assert req('/admin', headers=STAFF)[0] == 200, 'redeeming signs that browser in'
+    assert login('office@example.com', STAFF_PW)[0] == 401, 'the old password is dead'
+    assert login('office@example.com', 'a different office password')[0] == 303
+
+    # Sessions are server-side, so removing an account signs it out
+    # everywhere at once — and an admin cannot remove themselves.
+    status, body = users_api('remove', COOKIE, email='boss@example.com')
+    assert status == 400 and b'your own account' in body, (status, body)
+    status, body = users_api('remove', COOKIE, email='office@example.com')
+    assert status == 200, (status, body)
+    assert req('/admin', headers=STAFF)[0] == 401, \
+        'a removed account is signed out of every browser it held'
+    assert login('office@example.com', 'a different office password')[0] == 401
+    assert 'office@example.com' not in cli('users')
+
+    # The second browser of the surviving admin is untouched by all of that.
+    assert req('/admin', headers=COOKIE2)[0] == 200
+
+    # An oversized address costs no scrypt (no password is even needed to
+    # reach the audit line) and lands in a log nothing rotates, so what gets
+    # recorded is bounded.
+    _log_path = os.path.join(scratch, 'uploads.log')
+    _before = os.path.getsize(_log_path)
+    status, body = req(
+        '/admin/login', method='POST',
+        data=urllib.parse.urlencode({'email': 'a' * 3000 + '@x.com'}).encode(),
+        headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    assert status == 401, (status, body[:120])
+    _grew = os.path.getsize(_log_path) - _before
+    assert _grew < 600, f'one bad sign-in wrote {_grew} bytes of log'
+    _last = json.loads(open(_log_path).read().rstrip().rsplit('\n', 1)[-1])
+    assert _last['action'] == 'login' and not _last['ok']
+    assert len(_last['email']) <= 254, len(_last['email'])
+
+    # The scanner is dormant, and that has to hold for its artifacts too: a
+    # published Sunday's directory is the static root, so an aiscan.json left
+    # in one from before is served by name unless it is denied.
+    with open(os.path.join(scratch, 'public', '2026-08-02', 'aiscan.json'),
+              'w') as fh:
+        json.dump({'findings': [{'quote': 'left over from the scanner'}]}, fh)
+    # Denied by the name the static handler resolves, not the one in the
+    # request line: it percent-decodes and normalizes before opening a file,
+    # so matching the raw target is a rule that %69 walks straight around.
+    for _enc in ('/2026-08-02/aiscan.json',
+                 '/2026-08-02/a%69scan.json',
+                 '/2026-08-02/aiscan%2ejson',
+                 '/2026-08-02%2faiscan.json',
+                 '/2026-08-02/./aiscan.json',
+                 '/2026-08-02/x/../aiscan.json'):
+        assert req(_enc)[0] == 404, f'{_enc} served a retained scan file'
+        assert req(_enc, headers=COOKIE)[0] == 404, _enc
+    assert req('/2026-08-02/source.pdf')[0] == 200, \
+        'and the files that are meant to be served still are'
+    assert req('/2026-08-02/index.html')[0] == 200
+
+    # The two POSTs served before anyone is authenticated cap their bodies
+    # far below the upload limit. Without that, one request can park a thread
+    # on the hash queue holding 40 MB of "password" plus everything parse_qs
+    # copies out of it — the memory exhaustion that bounding the hashes was
+    # supposed to close, arriving by another door.
+    _big = urllib.parse.urlencode(
+        {'email': 'boss@example.com', 'password': 'x' * 20000}).encode()
+    status, body = req('/admin/login', method='POST', data=_big,
+                       headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    assert status == 413 and b'8192' in body, (status, body[:200])
+    status, body = req(f'/invite/{"a" * 43}', method='POST', data=_big,
+                       headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    assert status == 413, 'redeeming a link is capped the same way'
+    # The cap is auth-only: a PDF is still a PDF.
+    status, body = req('/api/upload?sync=1', data=pdf,
+                       headers={**COOKIE, 'Content-Type': 'application/pdf'})
+    assert status == 200 and json.loads(body)['ok'], \
+        'the upload limit is untouched by the auth cap'
+    # And a normal-sized sign-in still goes through.
+    assert login('boss@example.com', ADMIN_PW)[0] == 303
+
+    # And end to end: a users.json damaged under the running app (the hand
+    # edit this file invites, being untracked and edited on the box) answers
+    # 503 everywhere it matters and is never written over — an operator who
+    # saw a blank sign-in form instead would reasonably mint a new admin
+    # straight over the accounts that are still in there.
+    _users_json = os.path.join(scratch, 'users.json')
+    _good = open(_users_json, 'rb').read()
+    _damaged = b'{"users": {"boss@example.com": {"role": "admin"'
+    with open(_users_json, 'wb') as fh:
+        fh.write(_damaged)
+    status, body = req('/admin', headers=COOKIE2)
+    assert status == 503 and b'users.json' in body \
+        and b'Nothing has been written over it' in body, (status, body[:200])
+    status, body = req('/admin')
+    assert status == 503, 'the sign-in page does not pretend to be a fresh install'
+    status, body = req('/api/rerender-all', data=b'{}',
+                       headers={**COOKIE2, 'Content-Type': 'application/json'})
+    assert status == 503 and not json.loads(body)['ok'], (status, body)
+    status, body = req('/admin/logout', method='POST', data=b'',
+                       headers=COOKIE2)
+    assert status == 503, 'even signing out refuses — it is a write'
+    assert open(_users_json, 'rb').read() == _damaged, \
+        'nothing was written over the damaged store'
+    with open(_users_json, 'wb') as fh:
+        fh.write(_good)
+    assert req('/admin', headers=COOKIE2)[0] == 200, \
+        'repairing the file signs everyone back in'
+
+    # Every admin page's inline JS must actually parse.
+    for js_path in ('/admin', '/admin/history', '/admin/users',
+                    '/admin/edit/2026-08-02'):
         status, body = req(js_path, headers=COOKIE)
         assert status == 200, (js_path, status)
         check_page_js(body, js_path)
@@ -1370,7 +1654,7 @@ try:
                                 'X-Filename': 'WG%202026%2008%2002.pdf'})
     assert status == 200 and json.loads(body)['ok'], (status, body)
     status, body = req('/admin/history')
-    assert status == 401 and b'Admin Sign-in' in body, 'history gated like admin'
+    assert status == 401 and b'Sign in' in body, 'history gated like admin'
     status, body = req('/admin/history', headers=COOKIE)
     assert status == 200 and b'Upload History' in body
     assert 'no-store' in (LAST['headers'].get('Cache-Control') or '')
@@ -1487,11 +1771,12 @@ try:
     assert b'id="reviewall"' in body, 'bulk mark-reviewed offered too'
 
     # Mark reviewed: warnings move to reviewedWarnings, panel and badge clear.
-    def action(name, date, token=TOKEN):
+    def action(name, date, headers=None):
         return req(f'/api/{name}', data=json.dumps({'date': date}).encode(),
-                   headers={'X-Upload-Token': token, 'Content-Type': 'application/json'})
-    status, body = action('review', '2026-08-09', token='wrong')
-    assert status == 401
+                   headers={**(COOKIE if headers is None else headers),
+                            'Content-Type': 'application/json'})
+    status, body = action('review', '2026-08-09', headers={})
+    assert status == 401, 'no session, no action' 
     status, body = action('review', '2026-08-09')
     assert status == 200 and json.loads(body)['ok'], body
     g = json.load(open(gj))
@@ -1614,7 +1899,7 @@ try:
     # Form editor: gated like the rest of admin; page loads with embedded
     # data; save sanitizes server-side, preserves protected fields, re-renders.
     status, body = req('/admin/edit/2026-08-09')
-    assert status == 401 and b'Admin Sign-in' in body, 'editor gated too'
+    assert status == 401 and b'Sign in' in body, 'editor gated too'
     status, body = req('/admin/edit/2026-08-09', headers=COOKIE)
     assert status == 200 and b'guide-data' in body and b'Love Unleashed' in body
     status, body = req('/admin/edit/1999-01-01', headers=COOKIE)
@@ -1636,7 +1921,7 @@ try:
     g['announcements'][2]['color'] = 'hotpink'             # off-palette: dropped
     status, body = req('/api/save',
                        data=json.dumps({'date': '2026-08-09', 'guide': g}).encode(),
-                       headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/json'})
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
     assert status == 200 and json.loads(body)['ok'], body
     saved = json.load(open(gj))
     assert '<b>kept</b>' in saved['welcome']['body'][0]['text']
@@ -1660,7 +1945,7 @@ try:
     g['prayerRequests'][0]['nameColor'] = '#0070c0'
     status, body = req('/api/save',
                        data=json.dumps({'date': '2026-08-09', 'guide': g}).encode(),
-                       headers={'X-Upload-Token': TOKEN, 'Content-Type': 'application/json'})
+                       headers={**COOKIE, 'Content-Type': 'application/json'})
     assert status == 200 and json.loads(body)['ok'], body
     saved = json.load(open(gj))
     assert saved['announcements'][1]['color'] == '#e36c0a', 'exact ink kept, lowercased'
@@ -1714,15 +1999,49 @@ try:
     assert b'2026-08-02' in body or b'August 2, 2026' in body
     status, body = req(f'/{aside[0]}/index.html')
     assert status == 404, 'unpublished folder is not served'
+    # Including when the leading dot is spelled as an escape. The static
+    # handler decodes before it resolves, so a deny that reads the request
+    # line served withdrawn guides to anyone who asked for them this way.
+    status, body = req('/%2e' + aside[0][1:] + '/index.html')
+    assert status == 404, 'nor through a percent-encoded dot'
+    status, body = req('/' + aside[0] + '/./index.html')
+    assert status == 404
     status, body = action('unpublish', '2026-08-09')
     assert status == 404, 'acting on a gone date reports not found'
 
     # Sign out clears the cookie and the browser lands back on the login gate.
+    # Signing out is a write, so a GET only offers the button. A
+    # SameSite=Lax cookie rides along with any cross-site top-level
+    # navigation, so a GET that destroyed the session would let any page —
+    # or a link prefetcher — sign the office out.
+    stale = dict(COOKIE)
     status, body = req('/admin/logout', headers=COOKIE)
+    assert status == 200 and b'<form method="POST"' in body, (status, body[:160])
+    assert req('/admin', headers=COOKIE)[0] == 200, 'the GET changed nothing'
+    check_page_js(body, '/admin/logout')
+
+    status, body = req('/admin/logout', method='POST', data=b'', headers=COOKIE)
     assert status == 303 and LAST['headers'].get('Location') == '/'
     assert 'Max-Age=0' in (LAST['headers'].get('Set-Cookie') or '')
-    status, body = req('/admin', headers={'Cookie': 'wg_token='})
+    status, body = req('/admin', headers={'Cookie': 'wg_session='})
     assert status == 401, 'cleared cookie no longer signs in'
+
+    # Signing out with a cookie that is not a session writes nothing: a
+    # save is a whole-file write under the exclusive lock, and this path is
+    # reachable without any credential at all.
+    _users_json = os.path.join(scratch, 'users.json')
+    _mtime = os.stat(_users_json).st_mtime_ns
+    time.sleep(0.02)
+    for _ in range(3):
+        status, body = req('/admin/logout', method='POST', data=b'',
+                           headers={'Cookie': 'wg_session=not-a-real-session'})
+        assert status == 303, status
+    assert os.stat(_users_json).st_mtime_ns == _mtime, \
+        'an unknown session id rewrote the account store'
+    status, body = req('/admin', headers=stale)
+    assert status == 401, 'the signed-out session id is revoked, not just forgotten'
+    assert req('/admin', headers=COOKIE2)[0] == 200, \
+        'signing out one browser leaves the account\'s others alone'
 
     # Sermon search: title, scripture, and no-hit cases.
     status, body = req('/search?q=Unleashed')

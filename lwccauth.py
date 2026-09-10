@@ -1,0 +1,674 @@
+#!/usr/bin/env python3
+"""Accounts, invite links and sessions for the lwcc app — stdlib only.
+
+Everything lives in users.json next to the app (mode 0600, gitignored, never
+committed):
+
+    {"users":    {"<email>": {role, pw, created, passwordSet}},
+     "invites":  {"<token>": {email, role, reset, created, expires}},
+     "sessions": {"<id>":    {email, created}}}
+
+Two rules shape the design:
+
+  * **Nobody types someone else's password.** An account exists only once an
+    invite link has been redeemed, and the person redeeming it chooses the
+    password on the spot — so whoever issued the invite never sees it. The
+    same mechanism, pinned to an existing email, is the password reset.
+  * **Sessions are server-side.** The cookie carries a random id and nothing
+    else, so signing out, resetting a password or removing a user revokes
+    access immediately instead of waiting for a cookie to expire.
+
+Passwords are scrypt (n=16384, r=8, p=1) over a 16-byte salt. scrypt is
+memory-hard on purpose — each hash holds ~16 MB — so the number running at
+once is capped (HASH_SLOTS): the sign-in page is public and the app runs a
+thread per connection, and an unbounded burst of wrong passwords would be
+gigabytes of transient allocation against a 200 MB process ceiling.
+
+The app and this file's CLI write users.json from *different processes*, and
+every write replaces the whole file, so each mutation takes an OS-level lock
+across its whole load-modify-save (_exclusive). Without it a `lwcc
+user-remove` and a simultaneous sign-in each save their own snapshot of the
+store and the later one wins — quietly restoring the account, and the
+sessions, that were just revoked.
+
+CLI:
+
+    lwccauth.py invite [--admin] [--for EMAIL]   one-time sign-up link
+    lwccauth.py invite --reset --for EMAIL       password-reset link
+    lwccauth.py users                            accounts + pending links
+    lwccauth.py user-remove EMAIL
+    lwccauth.py invite-revoke TOKEN
+"""
+import argparse
+import contextlib
+import datetime
+import fcntl
+import hashlib
+import hmac
+import math
+import json
+import os
+import re
+import secrets
+import sys
+import tempfile
+import threading
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+USERS_FILE = os.path.join(ROOT, 'users.json')
+LOCK_FILE = os.path.join(ROOT, '.users.json.lock')
+ROLES = ('admin', 'staff')
+INVITE_TTL = 7 * 24 * 3600          # one week to redeem a link
+SESSION_TTL = 180 * 24 * 3600       # matches the cookie's Max-Age
+MIN_PASSWORD = 10
+MAX_EMAIL = 254                     # RFC 5321's limit on a forward-path
+EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$')
+
+# scrypt work factor. 16384/8/1 needs ~16 MB per hash — comfortably under
+# OpenSSL's 32 MB default ceiling, and slow enough to make an offline guess
+# at a stolen users.json expensive.
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 16384, 8, 1
+
+# How many scrypt hashes may run at once. Each costs 128 * N * r bytes —
+# 16 MB here — and both public entry points (sign-in, redeeming a link) hash
+# before they know whether the caller is anyone at all. The app serves each
+# connection on its own thread, so nothing else bounds this: a few dozen
+# simultaneous wrong passwords would be the app's whole 200 MB pm2 ceiling in
+# transient allocation, and the restart that follows is the outage the
+# attacker wanted. Four at a time is ~64 MB of headroom and, at ~60 ms a
+# hash, still far more sign-ins per second than this site will ever see.
+MAX_CONCURRENT_HASHES = 4
+HASH_SLOTS = threading.Semaphore(MAX_CONCURRENT_HASHES)
+
+_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _exclusive():
+    """Serialize one whole load-modify-save against every other writer.
+
+    The thread lock covers the app's own worker threads; the flock covers the
+    CLI, which mutates the same file from another process while the app is
+    live. Both are needed: a save writes the entire store, so two writers
+    that each read before the other wrote will not merge — the second simply
+    erases the first.
+    """
+    with _LOCK:
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)            # releases the flock with it
+
+
+class AuthError(Exception):
+    """Something the caller should show the person, with an HTTP status."""
+
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
+class StoreError(AuthError):
+    """users.json is there and cannot be read.
+
+    Never treated as an empty store, which is the tempting shortcut and a
+    destructive one: every save writes the file whole, so one mutation on a
+    pretend-empty store — a `lwcc invite`, or merely someone hitting
+    /admin/logout — would replace a damaged file that still holds every
+    account with a blank one that holds none, destroying the very thing an
+    operator needs in order to repair it. Reads fail closed and writes refuse
+    outright; the file is left exactly as found.
+    """
+
+    def __init__(self, detail):
+        super().__init__(
+            'The account store cannot be read: users.json exists but is not '
+            'valid JSON. Nobody can sign in until it is repaired. Nothing '
+            'has been written — the file is exactly as it was.', 503)
+        self.detail = str(detail)
+
+
+def now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+
+
+def _epoch():
+    return datetime.datetime.now(datetime.timezone.utc).timestamp()
+
+
+def site_url():
+    """Where invite links point. SITE_URL in .env wins; the live host is the
+    default so a link minted on the droplet is clickable as printed."""
+    path = os.path.join(ROOT, '.env')
+    try:
+        with open(path, encoding='utf-8') as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith('SITE_URL=') and line.split('=', 1)[1].strip():
+                    return line.split('=', 1)[1].strip().rstrip('/')
+    except OSError:
+        pass
+    return 'https://lwcc.lab980.com'
+
+
+def norm_email(email):
+    return str(email or '').strip().lower()
+
+
+def valid_email(email):
+    """Shape *and* length. The length matters on its own: an address is
+    attacker-supplied on the sign-in form and on an open invite link, and
+    without a bound it reaches the audit log, and an account key, at whatever
+    size the request body allows."""
+    email = str(email or '')
+    return len(email) <= MAX_EMAIL and bool(EMAIL_RE.match(email))
+
+
+# -- storage ----------------------------------------------------------------
+
+def _blank():
+    return {'users': {}, 'invites': {}, 'sessions': {}}
+
+
+def load():
+    """The whole store, with expired invites and sessions dropped. Read fresh
+    every time: the CLI writes this file behind the running app's back, and a
+    cached copy would answer with accounts that no longer exist.
+
+    A *missing* file is a blank store — that is a fresh install. A file that
+    is present and unreadable raises StoreError instead, so no caller can
+    mistake damage for emptiness and save over it."""
+    try:
+        with open(USERS_FILE, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return _blank()                      # no store yet: fresh install
+    except (OSError, ValueError) as e:
+        raise StoreError(e) from e
+    try:
+        return _checked(data)
+    except StoreError:
+        raise
+    except Exception as e:
+        # Whatever the checks below did not anticipate is damage as well.
+        # The alternative is an exception of some other type reaching main(),
+        # which catches StoreError only and would exit — taking the public
+        # guide site down over a file that only /admin reads. Every specific
+        # check that follows exists to give a better message than this; this
+        # exists so that a shape nobody thought of is still a 503.
+        raise StoreError(f'unexpected structure '
+                         f'({type(e).__name__}: {e})') from e
+
+
+def _checked(data):
+    """The parsed store, validated and pruned. Raises StoreError on anything
+    malformed rather than repairing it, because every repair here is written
+    back over the original by the next save."""
+    if not isinstance(data, dict):
+        raise StoreError('the top level is not a JSON object')
+    for key in ('users', 'invites', 'sessions'):
+        # Absent is fine — a store written before this section existed, or by
+        # hand. Present but the wrong shape is damage, and defaulting it to
+        # {} here is the same destructive shortcut as treating a bad parse as
+        # an empty store: `{"users": null}` would be saved back as no users
+        # at all by the next write.
+        if key not in data:
+            data[key] = {}
+        elif not isinstance(data[key], dict):
+            raise StoreError(f'"{key}" is present but is not a JSON object')
+    # Every record, before anything reads a field off one. A malformed record
+    # would otherwise raise AttributeError or ValueError from the filtering
+    # below — which main() does not catch, so a hand edit that left one
+    # session as `null` took the whole site down at startup, public guides
+    # included, instead of the admin area answering 503.
+    for section in ('users', 'invites', 'sessions'):
+        for rid, record in data[section].items():
+            if not isinstance(record, dict):
+                raise StoreError(f'{section}["{rid}"] is not a JSON object')
+    now = _epoch()
+    data['invites'] = {
+        t: i for t, i in data['invites'].items()
+        if _stamp(i.get('expires'), f'invites["{t}"].expires') > now}
+    data['sessions'] = {
+        s: v for s, v in data['sessions'].items()
+        if _stamp(v.get('created'), f'sessions["{s}"].created') + SESSION_TTL > now
+        and _text(v.get('email'), f'sessions["{s}"].email') in data['users']}
+    return data
+
+
+def new_token():
+    """A URL-safe secret that never begins with '-' or '_'.
+
+    token_urlsafe's alphabet includes both, and a leading '-' makes the value
+    look like an option to argparse, to getopt, and to most CLIs that will
+    ever be handed one: `lwcc invite-revoke <token>` failed outright on about
+    one token in thirty-two. Rejection sampling costs nothing and the two
+    characters are worth far less than the surprise.
+    """
+    while True:
+        token = secrets.token_urlsafe(32)
+        if token[:1] not in ('-', '_'):
+            return token
+
+
+def _text(value, where):
+    """A stored string field. A non-string here is not merely wrong, it is
+    unhashable often enough to matter: a session whose email is a list made
+    `email in users` raise TypeError, which is not a StoreError and so used
+    to kill the process at startup."""
+    if not isinstance(value, str):
+        raise StoreError(f'{where} is not a string')
+    return value
+
+
+def _stamp(value, where):
+    """A stored epoch-seconds field. Damage raises rather than defaulting to
+    0: zero reads as long expired, so the record would be pruned in memory
+    and then deleted from disk by the next save — repairing damage into data
+    loss, which is exactly what this store must never do.
+
+    "A number" is not enough: JSON's grammar admits 1e999, which Python
+    parses as inf, and json.loads accepts the literals Infinity and NaN. An
+    infinite stamp outlives every expiry check, so the seven-day link and the
+    six-month session become permanent; a NaN compares false against
+    everything, so the record is pruned as though expired and then deleted by
+    the next save. Neither is a time, and both are damage."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StoreError(f'{where} is not a number')
+    if not math.isfinite(value):
+        raise StoreError(f'{where} is not a finite number ({value})')
+    return float(value)
+
+
+def save(data):
+    """Atomic, 0600. The temp file is created in the app dir (same filesystem)
+    so os.replace is a rename, never a copy."""
+    fd, tmp = tempfile.mkstemp(prefix='.users.json.', dir=ROOT)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh, indent=1, sort_keys=True)
+            fh.write('\n')
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, USERS_FILE)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+NO_CHANGE = object()        # what a _mutate callback returns when it wrote nothing
+
+
+def _mutate(fn):
+    """Read-modify-write inside one exclusive transaction; returns fn's
+    result. fn raising (an AuthError, say) leaves the store untouched — the
+    save only happens on the way out.
+
+    A callback that returns NO_CHANGE skips the save entirely. A save is a
+    whole-file write under the exclusive lock, and some of these paths are
+    reachable unauthenticated: signing out with a cookie that is not a
+    session must not cost a rewrite of the account store, or a burst of
+    bogus sign-outs is disk I/O and lock contention that real sign-ins and
+    invites then queue behind."""
+    with _exclusive():
+        data = load()
+        result = fn(data)
+        if result is not NO_CHANGE:
+            save(data)
+        return result
+
+
+# -- passwords --------------------------------------------------------------
+
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+    with HASH_SLOTS:
+        dk = hashlib.scrypt(password.encode('utf-8'), salt=salt, n=SCRYPT_N,
+                            r=SCRYPT_R, p=SCRYPT_P, dklen=32)
+    return f'scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${salt.hex()}${dk.hex()}'
+
+
+def check_password(password, stored):
+    try:
+        scheme, n, r, p, salt, want = str(stored).split('$')
+        if scheme != 'scrypt':
+            return False
+        with HASH_SLOTS:
+            dk = hashlib.scrypt(password.encode('utf-8'),
+                                salt=bytes.fromhex(salt), n=int(n), r=int(r),
+                                p=int(p), dklen=len(want) // 2)
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(dk.hex(), want)
+
+
+_DUMMY = None
+
+
+def _burn_a_hash():
+    """Hash something on an unknown email so a missing account costs the same
+    as a wrong password — otherwise the reply time says who has an account."""
+    global _DUMMY
+    if _DUMMY is None:
+        _DUMMY = hash_password('a password that is nobody{s'.replace('{', "'"))
+    check_password('wrong password', _DUMMY)
+
+
+def password_problem(password, confirm=None):
+    """None when the password is acceptable, else why not."""
+    password = password or ''
+    if len(password) < MIN_PASSWORD:
+        return f'Password must be at least {MIN_PASSWORD} characters.'
+    if confirm is not None and password != confirm:
+        return 'The two passwords do not match.'
+    return None
+
+
+# -- accounts ---------------------------------------------------------------
+
+def any_users():
+    return bool(load()['users'])
+
+
+def get_user(email):
+    return load()['users'].get(norm_email(email))
+
+
+def list_users():
+    data = load()
+    counts = {}
+    for s in data['sessions'].values():
+        counts[s.get('email')] = counts.get(s.get('email'), 0) + 1
+    out = []
+    for email, u in sorted(data['users'].items()):
+        out.append({**u, 'email': email, 'sessions': counts.get(email, 0)})
+    return out
+
+
+def list_invites():
+    data = load()
+    return sorted(({**i, 'token': t} for t, i in data['invites'].items()),
+                  key=lambda i: i.get('created') or '')
+
+
+def login(email, password):
+    """Check a password and open a session for it, or (None, None).
+
+    One call, not two, and the session is created only if the password that
+    verified is still the account's current one. Verifying and then opening a
+    session as separate transactions leaves a window a password reset can
+    land in: the reset revokes every session that account holds, and a login
+    that matched the *old* hash a moment earlier would then add a fresh one —
+    quietly undoing the eviction that resetting a compromised password is
+    for. The check inside the transaction is a string compare of the stored
+    hash, so the expensive part (scrypt) still happens outside the store
+    lock; hashing under it would stall every other writer for ~60 ms a try.
+    """
+    email = norm_email(email)
+    user = load()['users'].get(email)
+    if not user:
+        _burn_a_hash()
+        return None, None
+    stored = user.get('pw') or ''
+    if not check_password(password or '', stored):
+        return None, None
+    sid = new_token()
+
+    def go(data):
+        fresh = data['users'].get(email)
+        if not fresh or not hmac.compare_digest(fresh.get('pw') or '', stored):
+            return NO_CHANGE     # re-keyed or removed while we were hashing
+        data['sessions'][sid] = {'email': email, 'created': _epoch()}
+        return {**fresh, 'email': email}
+
+    account = _mutate(go)
+    return (sid, account) if account is not NO_CHANGE else (None, None)
+
+
+def remove_user(email, by=None):
+    """Delete an account and every session it holds. Refuses self-removal:
+    the last admin deleting themselves locks everyone out of /admin/users."""
+    email = norm_email(email)
+    if by and norm_email(by) == email:
+        raise AuthError('You cannot remove your own account.', 400)
+
+    def go(data):
+        if email not in data['users']:
+            raise AuthError(f'No account for {email}.', 404)
+        del data['users'][email]
+        data['sessions'] = {s: v for s, v in data['sessions'].items()
+                            if v.get('email') != email}
+        data['invites'] = {t: i for t, i in data['invites'].items()
+                           if norm_email(i.get('email')) != email}
+        return True
+
+    return _mutate(go)
+
+
+# -- invite / reset links ---------------------------------------------------
+
+def create_invite(email=None, role='staff', reset=False):
+    """Mint a one-time link. An invite creates an account on redemption; a
+    reset re-keys an existing one. Both expire after INVITE_TTL."""
+    email = norm_email(email)
+    role = role if role in ROLES else 'staff'
+    if email and not valid_email(email):
+        raise AuthError(f'{email!r} does not look like an email address.', 400)
+    if reset and not email:
+        raise AuthError('A password reset needs the account email.', 400)
+    token = new_token()
+
+    def go(data):
+        if reset:
+            if email not in data['users']:
+                raise AuthError(f'No account for {email}.', 404)
+        elif email and email in data['users']:
+            raise AuthError(f'{email} already has an account — send a '
+                            f'password reset instead.', 409)
+        if email:
+            # One live link per address, so an accidental double-invite
+            # doesn't leave a second working link behind.
+            data['invites'] = {t: i for t, i in data['invites'].items()
+                               if norm_email(i.get('email')) != email}
+        data['invites'][token] = {
+            'email': email or None,
+            'role': data['users'].get(email, {}).get('role', role) if reset else role,
+            'reset': bool(reset),
+            'created': now_iso(),
+            'expires': _epoch() + INVITE_TTL,
+        }
+        return token
+
+    _mutate(go)
+    return {'token': token, 'email': email or None, 'reset': bool(reset),
+            'role': role, 'url': invite_url(token)}
+
+
+def invite_url(token):
+    return f'{site_url()}/invite/{token}'
+
+
+def get_invite(token):
+    """The live invite, or None when it is unknown, spent or expired."""
+    return load()['invites'].get(str(token or ''))
+
+
+def revoke_invite(token):
+    def go(data):
+        if str(token) not in data['invites']:
+            raise AuthError('No such pending link.', 404)
+        del data['invites'][str(token)]
+        return True
+
+    return _mutate(go)
+
+
+def redeem_invite(token, password, confirm=None, email=None):
+    """Set the password the link is for and sign that account in. Returns
+    (session_id, user). The link is spent whether it created the account or
+    reset it, and a reset drops the account's other sessions."""
+    token = str(token or '')
+    problem = password_problem(password, confirm)
+    if problem:
+        raise AuthError(problem, 400)
+    sid = new_token()
+    pw = hash_password(password)
+
+    def go(data):
+        invite = data['invites'].get(token)
+        if not invite or float(invite.get('expires') or 0) <= _epoch():
+            raise AuthError('This link has already been used or has expired. '
+                            'Ask for a new one.', 410)
+        addr = norm_email(invite.get('email') or email)
+        if not addr or not valid_email(addr):
+            raise AuthError('That link needs an email address.', 400)
+        if invite.get('reset'):
+            if addr not in data['users']:
+                raise AuthError(f'No account for {addr}.', 404)
+            data['users'][addr]['pw'] = pw
+            data['users'][addr]['passwordSet'] = now_iso()
+            # A reset means the old password may be in the wrong hands —
+            # every other browser it signed in is signed out.
+            data['sessions'] = {s: v for s, v in data['sessions'].items()
+                                if v.get('email') != addr}
+        else:
+            if addr in data['users']:
+                raise AuthError(f'{addr} already has an account.', 409)
+            data['users'][addr] = {
+                'role': invite.get('role') if invite.get('role') in ROLES else 'staff',
+                'pw': pw, 'created': now_iso(), 'passwordSet': now_iso()}
+        del data['invites'][token]
+        data['sessions'][sid] = {'email': addr, 'created': _epoch()}
+        return {**data['users'][addr], 'email': addr}
+
+    return sid, _mutate(go)
+
+
+# -- sessions ---------------------------------------------------------------
+# There is deliberately no create_session(email): a session is only ever born
+# inside login() or redeem_invite(), both of which check something first.
+
+def session_user(sid):
+    """The signed-in account for a cookie value, or None."""
+    sid = str(sid or '')
+    if not sid:
+        return None
+    data = load()
+    s = data['sessions'].get(sid)
+    if not s:
+        return None
+    user = data['users'].get(s.get('email'))
+    if not user:
+        return None
+    return {**user, 'email': s['email']}
+
+
+def destroy_session(sid):
+    sid = str(sid or '')
+    if not sid:
+        return False
+
+    def go(data):
+        if sid not in data['sessions']:
+            return NO_CHANGE               # nothing to remove, nothing to write
+        del data['sessions'][sid]
+        return True
+
+    return _mutate(go) is True
+
+
+# -- CLI --------------------------------------------------------------------
+
+def _cmd_invite(args):
+    inv = create_invite(email=args.email, role='admin' if args.admin else 'staff',
+                        reset=args.reset)
+    who = inv['email'] or 'anyone with the link'
+    kind = 'Password reset' if inv['reset'] else f'Invite ({inv["role"]})'
+    print(f'{kind} for {who} — expires in 7 days, usable once:\n\n  {inv["url"]}\n')
+    if not inv['email']:
+        print('This link has no email pinned: whoever opens it chooses both '
+              'the address and the password.')
+    return 0
+
+
+def _cmd_users(args):
+    users = list_users()
+    if not users:
+        print('No accounts yet. Mint the first one with:\n'
+              '  lwcc invite --admin --for you@example.com')
+    else:
+        print(f'{len(users)} account(s):')
+        for u in users:
+            print(f'  {u["email"]:<34} {u["role"]:<6} '
+                  f'created {u.get("created", "?")}  '
+                  f'{u["sessions"]} active session(s)')
+    invites = list_invites()
+    if invites:
+        print(f'\n{len(invites)} pending link(s):')
+        for i in invites:
+            kind = 'reset' if i.get('reset') else f'invite/{i.get("role")}'
+            print(f'  {i.get("email") or "(open)":<34} {kind:<13} '
+                  f'{invite_url(i["token"])}')
+    return 0
+
+
+def _cmd_user_remove(args):
+    remove_user(args.email)
+    print(f'Removed {norm_email(args.email)} — any browser it was signed in '
+          f'on is signed out.')
+    return 0
+
+
+def _cmd_invite_revoke(args):
+    revoke_invite(args.token)
+    print('Link revoked.')
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog='lwccauth', description='lwcc accounts, invite links and sessions.')
+    sub = ap.add_subparsers(dest='cmd', required=True)
+
+    p = sub.add_parser('invite', help='mint a one-time sign-up or reset link')
+    p.add_argument('--admin', action='store_true',
+                   help='the account gets the admin role (maintenance tools)')
+    p.add_argument('--for', dest='email', default=None,
+                   help='pin the link to this email address')
+    p.add_argument('--reset', action='store_true',
+                   help='password reset for an existing account (needs --for)')
+    p.set_defaults(fn=_cmd_invite)
+
+    p = sub.add_parser('users', help='list accounts and pending links')
+    p.set_defaults(fn=_cmd_users)
+
+    p = sub.add_parser('user-remove', help='delete an account and its sessions')
+    p.add_argument('email')
+    p.set_defaults(fn=_cmd_user_remove)
+
+    p = sub.add_parser('invite-revoke', help='cancel a pending link')
+    p.add_argument('token')
+    p.set_defaults(fn=_cmd_invite_revoke)
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # A token handed back to `invite-revoke` may be an old one that starts
+    # with '-', and argparse would read it as an option rather than a value.
+    # '--' says the rest is positional; new tokens avoid the character
+    # entirely (new_token), but a link already in someone's inbox does not.
+    if len(argv) > 1 and argv[0] in ('user-remove', 'invite-revoke') \
+            and '--' not in argv:
+        argv = [argv[0], '--'] + argv[1:]
+    args = ap.parse_args(argv)
+    try:
+        return args.fn(args)
+    except AuthError as e:
+        sys.stderr.write(f'error: {e}\n')
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
