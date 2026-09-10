@@ -964,6 +964,36 @@ try:
         _fh.write(_intact)
     assert auth_mod.load()['users'], 'repairing the file brings it all back'
 
+    # A section of the wrong type is damage in the same way: valid JSON, but
+    # defaulting it to {} would let the next write save "no users at all"
+    # over accounts that are still in the file.
+    for _bad in ('{"users": null, "invites": {}, "sessions": {}}',
+                 '{"users": [], "invites": {}, "sessions": {}}',
+                 '{"users": {}, "invites": "nope", "sessions": {}}'):
+        with open(auth_mod.USERS_FILE, 'w') as _fh:
+            _fh.write(_bad)
+        try:
+            auth_mod.load()
+            raise AssertionError(f'a malformed section must not be cleared: {_bad}')
+        except auth_mod.StoreError as _e:
+            assert 'not a JSON object' in _e.detail, _e.detail
+        try:
+            auth_mod.create_invite('x@example.com')
+            raise AssertionError('and a mutation must refuse')
+        except auth_mod.StoreError:
+            pass
+        assert open(auth_mod.USERS_FILE).read() == _bad, 'left as found'
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
+
+    # A section that is simply absent is not damage — an older store, or one
+    # written by hand — and still defaults.
+    with open(auth_mod.USERS_FILE, 'w') as _fh:
+        _fh.write('{"users": {}}')
+    assert auth_mod.load() == {'users': {}, 'invites': {}, 'sessions': {}}
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
+
     # A *missing* file is the other thing entirely — a fresh install.
     os.rename(auth_mod.USERS_FILE, auth_mod.USERS_FILE + '.away')
     assert auth_mod.load() == {'users': {}, 'invites': {}, 'sessions': {}}
@@ -1397,6 +1427,27 @@ try:
 
     # The second browser of the surviving admin is untouched by all of that.
     assert req('/admin', headers=COOKIE2)[0] == 200
+
+    # The two POSTs served before anyone is authenticated cap their bodies
+    # far below the upload limit. Without that, one request can park a thread
+    # on the hash queue holding 40 MB of "password" plus everything parse_qs
+    # copies out of it — the memory exhaustion that bounding the hashes was
+    # supposed to close, arriving by another door.
+    _big = urllib.parse.urlencode(
+        {'email': 'boss@example.com', 'password': 'x' * 20000}).encode()
+    status, body = req('/admin/login', method='POST', data=_big,
+                       headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    assert status == 413 and b'8192' in body, (status, body[:200])
+    status, body = req(f'/invite/{"a" * 43}', method='POST', data=_big,
+                       headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    assert status == 413, 'redeeming a link is capped the same way'
+    # The cap is auth-only: a PDF is still a PDF.
+    status, body = req('/api/upload?sync=1', data=pdf,
+                       headers={**COOKIE, 'Content-Type': 'application/pdf'})
+    assert status == 200 and json.loads(body)['ok'], \
+        'the upload limit is untouched by the auth cap'
+    # And a normal-sized sign-in still goes through.
+    assert login('boss@example.com', ADMIN_PW)[0] == 303
 
     # And end to end: a users.json damaged under the running app (the hand
     # edit this file invites, being untracked and edited on the box) answers

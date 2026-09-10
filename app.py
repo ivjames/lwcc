@@ -55,6 +55,14 @@ RECONVERT_QUEUE_DIR = os.path.join(QUEUE_DIR, 'reconvert')  # one marker per
                                                  # so a restart resumes them
 DATE_DIR_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 MAX_UPLOAD = 40 * 1024 * 1024
+# Signing in and redeeming an invite are the only POSTs served before anyone
+# is authenticated, and an email, a password and a next path come to a few
+# hundred bytes. They are capped far below MAX_UPLOAD because the body is read
+# and form-parsed before the password reaches the hash queue: a thread parked
+# on a hash slot holding 40 MB of "password" (and the copies parse_qs makes of
+# it) is the memory exhaustion that bounding the hashes was meant to close.
+MAX_AUTH_BODY = 8 * 1024
+AUTH_POST_RE = re.compile(r'/admin/login|/invite/[A-Za-z0-9_-]{8,128}')
 COOKIE_NAME = 'wg_session'
 COOKIE_MAX_AGE = 180 * 24 * 3600
 # where /admin/login may redirect after sign-in; anything else falls back
@@ -2999,17 +3007,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def route_post(self):
         # One-shot handling: read the (bounded) body before any error reply,
         # otherwise the client hits a broken pipe mid-upload and never sees it.
+        # The bound is per-route and is applied before the read, so an
+        # oversized body is refused rather than held.
         self.close_connection = True
+        path, _, query = self.path.partition('?')
+        limit = MAX_AUTH_BODY if AUTH_POST_RE.fullmatch(path) else MAX_UPLOAD
         try:
             length = int(self.headers.get('Content-Length', '0'))
         except ValueError:
             length = 0
-        if length < 0 or length > MAX_UPLOAD:
-            self.send_json({'ok': False, 'error': f'body must be 1..{MAX_UPLOAD} bytes'},
+        if length < 0 or length > limit:
+            self.send_json({'ok': False, 'error': f'body must be 1..{limit} bytes'},
                            status=413)
             return
         body = self.rfile.read(length)
-        path, _, query = self.path.partition('?')
         if path == '/admin/login':
             self.handle_login(body)
             return

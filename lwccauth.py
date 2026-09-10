@@ -179,8 +179,15 @@ def load():
     if not isinstance(data, dict):
         raise StoreError('the top level is not a JSON object')
     for key in ('users', 'invites', 'sessions'):
-        if not isinstance(data.get(key), dict):
+        # Absent is fine — a store written before this section existed, or by
+        # hand. Present but the wrong shape is damage, and defaulting it to
+        # {} here is the same destructive shortcut as treating a bad parse as
+        # an empty store: `{"users": null}` would be saved back as no users
+        # at all by the next write.
+        if key not in data:
             data[key] = {}
+        elif not isinstance(data[key], dict):
+            raise StoreError(f'"{key}" is present but is not a JSON object')
     now = _epoch()
     data['invites'] = {t: i for t, i in data['invites'].items()
                        if float(i.get('expires') or 0) > now}
