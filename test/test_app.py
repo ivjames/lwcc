@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 import urllib.error
@@ -853,6 +854,78 @@ finally:
     for k, v in _saved.items():
         setattr(app_mod, k, v)
     shutil.rmtree(_rscratch, ignore_errors=True)
+
+# --- the account store is written by two processes: the app (many threads)
+# and the `lwcc invite|user-remove|invite-revoke` CLI. Every write replaces
+# the whole file, so a mutation that read the store before another one saved
+# would erase it — a sign-in restoring the account a `user-remove` had just
+# revoked. Each mutation therefore takes an OS-level lock across its whole
+# load-modify-save, and hashing is bounded because scrypt is memory-hard and
+# the pages that hash are public.
+import lwccauth as auth_mod  # noqa: E402
+
+_HOLD_LOCK = (
+    'import fcntl, os, sys, time\n'
+    'fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n'
+    'fcntl.flock(fd, fcntl.LOCK_EX)\n'
+    'open(sys.argv[2], "w").close()\n'          # tell the parent we hold it
+    'time.sleep(1.0)\n')
+
+_ascratch = tempfile.mkdtemp(prefix='lwcc-auth-')
+_asaved = (auth_mod.ROOT, auth_mod.USERS_FILE, auth_mod.LOCK_FILE)
+try:
+    auth_mod.ROOT = _ascratch
+    auth_mod.USERS_FILE = os.path.join(_ascratch, 'users.json')
+    auth_mod.LOCK_FILE = os.path.join(_ascratch, '.users.json.lock')
+
+    _inv = auth_mod.create_invite('someone@example.com', role='admin')
+    _sid, _u = auth_mod.redeem_invite(_inv['token'], 'a long enough password',
+                                      'a long enough password')
+    assert _u['role'] == 'admin' and auth_mod.session_user(_sid)
+
+    # Another process holding the lock blocks a mutation here until it lets
+    # go: the app waits for the CLI rather than racing it to the last write.
+    _ready = os.path.join(_ascratch, 'held')
+    _holder = subprocess.Popen([sys.executable, '-c', _HOLD_LOCK,
+                                auth_mod.LOCK_FILE, _ready])
+    try:
+        for _ in range(200):
+            if os.path.exists(_ready):
+                break
+            time.sleep(0.02)
+        assert os.path.exists(_ready), 'the other process never took the lock'
+        _t0 = time.monotonic()
+        auth_mod.create_session('someone@example.com')
+        _waited = time.monotonic() - _t0
+        assert _waited > 0.3, \
+            f'the mutation did not wait for the other process ({_waited:.2f}s)'
+    finally:
+        _holder.wait(timeout=15)
+    assert len(auth_mod.load()['sessions']) == 2, \
+        'both sessions survive — neither write erased the other'
+
+    # Password hashing is bounded. scrypt is memory-hard by design (~16 MB a
+    # go) and /admin/login is public with a thread per connection, so without
+    # a cap a burst of wrong passwords is gigabytes of transient allocation
+    # against a 200 MB process ceiling — an attacker restarting the app.
+    assert auth_mod.MAX_CONCURRENT_HASHES <= 8, 'the cap is a cap'
+    for _ in range(auth_mod.MAX_CONCURRENT_HASHES):
+        assert auth_mod.HASH_SLOTS.acquire(timeout=5)
+    _hashed = []
+    _th = threading.Thread(
+        target=lambda: _hashed.append(auth_mod.hash_password('x' * 12)))
+    _th.start()
+    _th.join(0.4)
+    assert _th.is_alive() and not _hashed, \
+        'a hash beyond the cap waits for a slot instead of allocating'
+    for _ in range(auth_mod.MAX_CONCURRENT_HASHES):
+        auth_mod.HASH_SLOTS.release()
+    _th.join(20)
+    assert _hashed and not _th.is_alive(), 'and runs once one frees up'
+finally:
+    auth_mod.ROOT, auth_mod.USERS_FILE, auth_mod.LOCK_FILE = _asaved
+    shutil.rmtree(_ascratch, ignore_errors=True)
+
 
 PORT = 8972
 BASE = f'http://127.0.0.1:{PORT}'

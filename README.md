@@ -141,6 +141,20 @@ block with `listen 443` in `/etc/nginx/sites-available/lwcc.lab980.com`:
 
 then `nginx -t && systemctl reload nginx`.
 
+**Rate-limiting sign-ins** is nginx's job here, not the app's: only the vhost
+sees the real client address (the app is behind a proxy, and trusting an
+`X-Forwarded-For` it does not control would be worse than not limiting at
+all). The app bounds the *cost* of a burst — at most
+`MAX_CONCURRENT_HASHES` scrypt hashes run at once, so wrong passwords cannot
+exhaust the process — and sleeps half a second on each failure, but it does
+not count attempts per address. If this site ever faces more than the church
+office, add to `http {}` and the sign-in location:
+
+```
+    limit_req_zone $binary_remote_addr zone=lwcclogin:1m rate=10r/m;
+    location = /admin/login { limit_req zone=lwcclogin burst=5 nodelay; proxy_pass ...; }
+```
+
 The app listens on **8069** (`--port` in `START_CMD` and in
 `ecosystem.config.cjs`; `LWCC_PORT` overrides the CLI); make sure it matches
 the `proxy_pass` port in `/etc/nginx/sites-available/lwcc.lab980.com` — edit

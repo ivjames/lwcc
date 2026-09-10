@@ -18,11 +18,18 @@ Two rules shape the design:
     else, so signing out, resetting a password or removing a user revokes
     access immediately instead of waiting for a cookie to expire.
 
-Passwords are scrypt (n=16384, r=8, p=1) over a 16-byte salt.
+Passwords are scrypt (n=16384, r=8, p=1) over a 16-byte salt. scrypt is
+memory-hard on purpose — each hash holds ~16 MB — so the number running at
+once is capped (HASH_SLOTS): the sign-in page is public and the app runs a
+thread per connection, and an unbounded burst of wrong passwords would be
+gigabytes of transient allocation against a 200 MB process ceiling.
 
-The app and this file's CLI both write users.json; writes are atomic
-(temp file + os.replace) and the file is small, so the loser of a race
-between a `lwcc invite` and a sign-in loses one write, not the file.
+The app and this file's CLI write users.json from *different processes*, and
+every write replaces the whole file, so each mutation takes an OS-level lock
+across its whole load-modify-save (_exclusive). Without it a `lwcc
+user-remove` and a simultaneous sign-in each save their own snapshot of the
+store and the later one wins — quietly restoring the account, and the
+sessions, that were just revoked.
 
 CLI:
 
@@ -33,7 +40,9 @@ CLI:
     lwccauth.py invite-revoke TOKEN
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
 import hashlib
 import hmac
 import json
@@ -46,6 +55,7 @@ import threading
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 USERS_FILE = os.path.join(ROOT, 'users.json')
+LOCK_FILE = os.path.join(ROOT, '.users.json.lock')
 ROLES = ('admin', 'staff')
 INVITE_TTL = 7 * 24 * 3600          # one week to redeem a link
 SESSION_TTL = 180 * 24 * 3600       # matches the cookie's Max-Age
@@ -57,7 +67,37 @@ EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$')
 # at a stolen users.json expensive.
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 16384, 8, 1
 
+# How many scrypt hashes may run at once. Each costs 128 * N * r bytes —
+# 16 MB here — and both public entry points (sign-in, redeeming a link) hash
+# before they know whether the caller is anyone at all. The app serves each
+# connection on its own thread, so nothing else bounds this: a few dozen
+# simultaneous wrong passwords would be the app's whole 200 MB pm2 ceiling in
+# transient allocation, and the restart that follows is the outage the
+# attacker wanted. Four at a time is ~64 MB of headroom and, at ~60 ms a
+# hash, still far more sign-ins per second than this site will ever see.
+MAX_CONCURRENT_HASHES = 4
+HASH_SLOTS = threading.Semaphore(MAX_CONCURRENT_HASHES)
+
 _LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _exclusive():
+    """Serialize one whole load-modify-save against every other writer.
+
+    The thread lock covers the app's own worker threads; the flock covers the
+    CLI, which mutates the same file from another process while the app is
+    live. Both are needed: a save writes the entire store, so two writers
+    that each read before the other wrote will not merge — the second simply
+    erases the first.
+    """
+    with _LOCK:
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)            # releases the flock with it
 
 
 class AuthError(Exception):
@@ -143,8 +183,10 @@ def save(data):
 
 
 def _mutate(fn):
-    """Read-modify-write under the process lock; returns whatever fn returns."""
-    with _LOCK:
+    """Read-modify-write inside one exclusive transaction; returns fn's
+    result. fn raising (an AuthError, say) leaves the store untouched — the
+    save only happens on the way out."""
+    with _exclusive():
         data = load()
         result = fn(data)
         save(data)
@@ -155,8 +197,9 @@ def _mutate(fn):
 
 def hash_password(password):
     salt = secrets.token_bytes(16)
-    dk = hashlib.scrypt(password.encode('utf-8'), salt=salt, n=SCRYPT_N,
-                        r=SCRYPT_R, p=SCRYPT_P, dklen=32)
+    with HASH_SLOTS:
+        dk = hashlib.scrypt(password.encode('utf-8'), salt=salt, n=SCRYPT_N,
+                            r=SCRYPT_R, p=SCRYPT_P, dklen=32)
     return f'scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${salt.hex()}${dk.hex()}'
 
 
@@ -165,8 +208,10 @@ def check_password(password, stored):
         scheme, n, r, p, salt, want = str(stored).split('$')
         if scheme != 'scrypt':
             return False
-        dk = hashlib.scrypt(password.encode('utf-8'), salt=bytes.fromhex(salt),
-                            n=int(n), r=int(r), p=int(p), dklen=len(want) // 2)
+        with HASH_SLOTS:
+            dk = hashlib.scrypt(password.encode('utf-8'),
+                                salt=bytes.fromhex(salt), n=int(n), r=int(r),
+                                p=int(p), dklen=len(want) // 2)
     except (ValueError, TypeError):
         return False
     return hmac.compare_digest(dk.hex(), want)
