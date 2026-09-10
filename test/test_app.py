@@ -1004,7 +1004,15 @@ try:
                  '{"users":{},"invites":{},'
                  '"sessions":{"sid":{"email":[],"created":9999999999}}}',
                  '{"users":{},"invites":{},'
-                 '"sessions":{"sid":{"email":{"a":1},"created":9999999999}}}'):
+                 '"sessions":{"sid":{"email":{"a":1},"created":9999999999}}}',
+                 # A number is not enough: JSON admits 1e999, which parses as
+                 # inf and outlives every expiry check, so a seven-day link
+                 # becomes permanent. NaN is the mirror image — it compares
+                 # false against everything, so the record is pruned as though
+                 # expired and deleted by the next save.
+                 '{"users":{},"invites":{"tok":{"expires":1e999}},"sessions":{}}',
+                 '{"users":{},"invites":{"tok":{"expires":NaN}},"sessions":{}}',
+                 '{"users":{},"invites":{"tok":{"expires":Infinity}},"sessions":{}}'):
         with open(auth_mod.USERS_FILE, 'w') as _fh:
             _fh.write(_bad)
         try:

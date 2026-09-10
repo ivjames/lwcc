@@ -45,6 +45,7 @@ import datetime
 import fcntl
 import hashlib
 import hmac
+import math
 import json
 import os
 import re
@@ -266,9 +267,18 @@ def _stamp(value, where):
     """A stored epoch-seconds field. Damage raises rather than defaulting to
     0: zero reads as long expired, so the record would be pruned in memory
     and then deleted from disk by the next save — repairing damage into data
-    loss, which is exactly what this store must never do."""
+    loss, which is exactly what this store must never do.
+
+    "A number" is not enough: JSON's grammar admits 1e999, which Python
+    parses as inf, and json.loads accepts the literals Infinity and NaN. An
+    infinite stamp outlives every expiry check, so the seven-day link and the
+    six-month session become permanent; a NaN compares false against
+    everything, so the record is pruned as though expired and then deleted by
+    the next save. Neither is a time, and both are damage."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise StoreError(f'{where} is not a number')
+    if not math.isfinite(value):
+        raise StoreError(f'{where} is not a finite number ({value})')
     return float(value)
 
 
