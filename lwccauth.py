@@ -60,6 +60,7 @@ ROLES = ('admin', 'staff')
 INVITE_TTL = 7 * 24 * 3600          # one week to redeem a link
 SESSION_TTL = 180 * 24 * 3600       # matches the cookie's Max-Age
 MIN_PASSWORD = 10
+MAX_EMAIL = 254                     # RFC 5321's limit on a forward-path
 EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s.]+(\.[^@\s.]+)+$')
 
 # scrypt work factor. 16384/8/1 needs ~16 MB per hash — comfortably under
@@ -155,6 +156,15 @@ def norm_email(email):
     return str(email or '').strip().lower()
 
 
+def valid_email(email):
+    """Shape *and* length. The length matters on its own: an address is
+    attacker-supplied on the sign-in form and on an open invite link, and
+    without a bound it reaches the audit log, and an account key, at whatever
+    size the request body allows."""
+    email = str(email or '')
+    return len(email) <= MAX_EMAIL and bool(EMAIL_RE.match(email))
+
+
 # -- storage ----------------------------------------------------------------
 
 def _blank():
@@ -188,13 +198,49 @@ def load():
             data[key] = {}
         elif not isinstance(data[key], dict):
             raise StoreError(f'"{key}" is present but is not a JSON object')
+    # Every record, before anything reads a field off one. A malformed record
+    # would otherwise raise AttributeError or ValueError from the filtering
+    # below — which main() does not catch, so a hand edit that left one
+    # session as `null` took the whole site down at startup, public guides
+    # included, instead of the admin area answering 503.
+    for section in ('users', 'invites', 'sessions'):
+        for rid, record in data[section].items():
+            if not isinstance(record, dict):
+                raise StoreError(f'{section}["{rid}"] is not a JSON object')
     now = _epoch()
-    data['invites'] = {t: i for t, i in data['invites'].items()
-                       if float(i.get('expires') or 0) > now}
-    data['sessions'] = {s: v for s, v in data['sessions'].items()
-                        if float(v.get('created') or 0) + SESSION_TTL > now
-                        and v.get('email') in data['users']}
+    data['invites'] = {
+        t: i for t, i in data['invites'].items()
+        if _stamp(i.get('expires'), f'invites["{t}"].expires') > now}
+    data['sessions'] = {
+        s: v for s, v in data['sessions'].items()
+        if _stamp(v.get('created'), f'sessions["{s}"].created') + SESSION_TTL > now
+        and v.get('email') in data['users']}
     return data
+
+
+def new_token():
+    """A URL-safe secret that never begins with '-' or '_'.
+
+    token_urlsafe's alphabet includes both, and a leading '-' makes the value
+    look like an option to argparse, to getopt, and to most CLIs that will
+    ever be handed one: `lwcc invite-revoke <token>` failed outright on about
+    one token in thirty-two. Rejection sampling costs nothing and the two
+    characters are worth far less than the surprise.
+    """
+    while True:
+        token = secrets.token_urlsafe(32)
+        if token[:1] not in ('-', '_'):
+            return token
+
+
+def _stamp(value, where):
+    """A stored epoch-seconds field. Damage raises rather than defaulting to
+    0: zero reads as long expired, so the record would be pruned in memory
+    and then deleted from disk by the next save — repairing damage into data
+    loss, which is exactly what this store must never do."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StoreError(f'{where} is not a number')
+    return float(value)
 
 
 def save(data):
@@ -320,7 +366,7 @@ def login(email, password):
     stored = user.get('pw') or ''
     if not check_password(password or '', stored):
         return None, None
-    sid = secrets.token_urlsafe(32)
+    sid = new_token()
 
     def go(data):
         fresh = data['users'].get(email)
@@ -360,11 +406,11 @@ def create_invite(email=None, role='staff', reset=False):
     reset re-keys an existing one. Both expire after INVITE_TTL."""
     email = norm_email(email)
     role = role if role in ROLES else 'staff'
-    if email and not EMAIL_RE.match(email):
+    if email and not valid_email(email):
         raise AuthError(f'{email!r} does not look like an email address.', 400)
     if reset and not email:
         raise AuthError('A password reset needs the account email.', 400)
-    token = secrets.token_urlsafe(32)
+    token = new_token()
 
     def go(data):
         if reset:
@@ -419,7 +465,7 @@ def redeem_invite(token, password, confirm=None, email=None):
     problem = password_problem(password, confirm)
     if problem:
         raise AuthError(problem, 400)
-    sid = secrets.token_urlsafe(32)
+    sid = new_token()
     pw = hash_password(password)
 
     def go(data):
@@ -428,7 +474,7 @@ def redeem_invite(token, password, confirm=None, email=None):
             raise AuthError('This link has already been used or has expired. '
                             'Ask for a new one.', 410)
         addr = norm_email(invite.get('email') or email)
-        if not addr or not EMAIL_RE.match(addr):
+        if not addr or not valid_email(addr):
             raise AuthError('That link needs an email address.', 400)
         if invite.get('reset'):
             if addr not in data['users']:
@@ -555,6 +601,14 @@ def main(argv=None):
     p.add_argument('token')
     p.set_defaults(fn=_cmd_invite_revoke)
 
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # A token handed back to `invite-revoke` may be an old one that starts
+    # with '-', and argparse would read it as an option rather than a value.
+    # '--' says the rest is positional; new tokens avoid the character
+    # entirely (new_token), but a link already in someone's inbox does not.
+    if len(argv) > 1 and argv[0] in ('user-remove', 'invite-revoke') \
+            and '--' not in argv:
+        argv = [argv[0], '--'] + argv[1:]
     args = ap.parse_args(argv)
     try:
         return args.fn(args)

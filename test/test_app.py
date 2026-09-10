@@ -986,6 +986,55 @@ try:
     with open(auth_mod.USERS_FILE, 'wb') as _fh:
         _fh.write(_intact)
 
+    # Records inside a section get the same treatment, and for a sharper
+    # reason: reading a field off a malformed one raises AttributeError or
+    # ValueError, which main() does not catch — a hand edit leaving one
+    # session as `null` took the whole site down at startup, public guides
+    # and all, instead of the admin area answering 503.
+    for _bad in ('{"users":{},"invites":{"tok":"bad"},"sessions":{}}',
+                 '{"users":{},"invites":{},"sessions":{"sid":null}}',
+                 '{"users":{"a@b.co":null},"invites":{},"sessions":{}}',
+                 '{"users":{},"invites":{"tok":{"expires":"soon"}},"sessions":{}}',
+                 '{"users":{},"invites":{},"sessions":{"sid":{"created":null}}}'):
+        with open(auth_mod.USERS_FILE, 'w') as _fh:
+            _fh.write(_bad)
+        try:
+            auth_mod.load()
+            raise AssertionError(f'a malformed record must not slip through: {_bad}')
+        except auth_mod.StoreError:
+            pass
+        assert open(auth_mod.USERS_FILE).read() == _bad, 'left as found'
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
+
+    # Secrets never begin with '-' or '_': token_urlsafe's alphabet includes
+    # both, and a leading dash makes the value look like an option to
+    # argparse — `lwcc invite-revoke <token>` failed outright on about one
+    # token in thirty-two, which is the kind of bug that shows up as "the CLI
+    # is broken sometimes".
+    for _ in range(400):
+        assert auth_mod.new_token()[:1] not in ('-', '_')
+    # And a link already issued with a leading dash still revokes. Run the
+    # scratch copy: the CLI keys its store off its own path, and the repo's
+    # own directory is not a scratch dir.
+    shutil.copyfile(os.path.join(ROOT, 'lwccauth.py'),
+                    os.path.join(_ascratch, 'lwccauth.py'))
+    _r = subprocess.run([sys.executable, os.path.join(_ascratch, 'lwccauth.py'),
+                         'invite-revoke', '-notarealtoken'],
+                        capture_output=True, text=True)
+    assert 'No such pending link' in _r.stderr, (_r.returncode, _r.stderr)
+    assert 'usage:' not in _r.stderr, 'a dashed token is a value, not an option'
+
+    # An address is attacker-supplied on the sign-in form and on an open
+    # invite link, so its length is bounded and not only its shape.
+    assert auth_mod.valid_email('office@example.com')
+    assert not auth_mod.valid_email('a' * 250 + '@example.com')
+    try:
+        auth_mod.create_invite('a' * 250 + '@example.com')
+        raise AssertionError('an over-long address must be refused')
+    except auth_mod.AuthError:
+        pass
+
     # A section that is simply absent is not damage — an older store, or one
     # written by hand — and still defaults.
     with open(auth_mod.USERS_FILE, 'w') as _fh:
@@ -1427,6 +1476,34 @@ try:
 
     # The second browser of the surviving admin is untouched by all of that.
     assert req('/admin', headers=COOKIE2)[0] == 200
+
+    # An oversized address costs no scrypt (no password is even needed to
+    # reach the audit line) and lands in a log nothing rotates, so what gets
+    # recorded is bounded.
+    _log_path = os.path.join(scratch, 'uploads.log')
+    _before = os.path.getsize(_log_path)
+    status, body = req(
+        '/admin/login', method='POST',
+        data=urllib.parse.urlencode({'email': 'a' * 3000 + '@x.com'}).encode(),
+        headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    assert status == 401, (status, body[:120])
+    _grew = os.path.getsize(_log_path) - _before
+    assert _grew < 600, f'one bad sign-in wrote {_grew} bytes of log'
+    _last = json.loads(open(_log_path).read().rstrip().rsplit('\n', 1)[-1])
+    assert _last['action'] == 'login' and not _last['ok']
+    assert len(_last['email']) <= 254, len(_last['email'])
+
+    # The scanner is dormant, and that has to hold for its artifacts too: a
+    # published Sunday's directory is the static root, so an aiscan.json left
+    # in one from before is served by name unless it is denied.
+    with open(os.path.join(scratch, 'public', '2026-08-02', 'aiscan.json'),
+              'w') as fh:
+        json.dump({'findings': [{'quote': 'left over from the scanner'}]}, fh)
+    assert req('/2026-08-02/aiscan.json')[0] == 404, \
+        'a retained scan file is not served'
+    assert req('/2026-08-02/aiscan.json', headers=COOKIE)[0] == 404
+    assert req('/2026-08-02/source.pdf')[0] == 200, \
+        'and the files that are meant to be served still are'
 
     # The two POSTs served before anyone is authenticated cap their bodies
     # far below the upload limit. Without that, one request can park a thread

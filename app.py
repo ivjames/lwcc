@@ -2809,8 +2809,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # mistyped password is barely noticeable. The attempted address
             # goes to uploads.log so a run is visible afterwards.
             time.sleep(0.5)
+            # The attempted address is recorded so a guessing run is visible
+            # afterwards. It is bounded first: this is attacker-supplied text
+            # going into a log nothing rotates, and a password is not even
+            # needed to reach this line, so an unbounded address here is a
+            # few kilobytes of disk per unauthenticated request.
             audit_log({'action': 'login', 'ok': False,
-                       **({'email': email} if email else {})})
+                       **({'email': email[:lwccauth.MAX_EMAIL]} if email else {})})
             self.send_page(login_page(nxt, error='Wrong email or password.',
                                       email=email), status=401, cache='no-store')
             return
@@ -2983,6 +2988,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_page(guide_with_nav(dates[0]))
                 return
         if '/.' in path:
+            self.send_error(404, 'Not Found')
+            return
+        # A published Sunday's directory IS the static root, so a scanner
+        # artifact left in one from before the scanner was stood down is
+        # served to anyone who asks for it by name — the routes being gone
+        # is not the same as the scanner being unreachable.
+        if path.endswith('/aiscan.json'):
             self.send_error(404, 'Not Found')
             return
         m = re.fullmatch(r'/(\d{4}-\d{2}-\d{2})/original/?', path)
