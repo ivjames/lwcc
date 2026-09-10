@@ -186,6 +186,25 @@ def load():
         return _blank()                      # no store yet: fresh install
     except (OSError, ValueError) as e:
         raise StoreError(e) from e
+    try:
+        return _checked(data)
+    except StoreError:
+        raise
+    except Exception as e:
+        # Whatever the checks below did not anticipate is damage as well.
+        # The alternative is an exception of some other type reaching main(),
+        # which catches StoreError only and would exit — taking the public
+        # guide site down over a file that only /admin reads. Every specific
+        # check that follows exists to give a better message than this; this
+        # exists so that a shape nobody thought of is still a 503.
+        raise StoreError(f'unexpected structure '
+                         f'({type(e).__name__}: {e})') from e
+
+
+def _checked(data):
+    """The parsed store, validated and pruned. Raises StoreError on anything
+    malformed rather than repairing it, because every repair here is written
+    back over the original by the next save."""
     if not isinstance(data, dict):
         raise StoreError('the top level is not a JSON object')
     for key in ('users', 'invites', 'sessions'):
@@ -214,7 +233,7 @@ def load():
     data['sessions'] = {
         s: v for s, v in data['sessions'].items()
         if _stamp(v.get('created'), f'sessions["{s}"].created') + SESSION_TTL > now
-        and v.get('email') in data['users']}
+        and _text(v.get('email'), f'sessions["{s}"].email') in data['users']}
     return data
 
 
@@ -231,6 +250,16 @@ def new_token():
         token = secrets.token_urlsafe(32)
         if token[:1] not in ('-', '_'):
             return token
+
+
+def _text(value, where):
+    """A stored string field. A non-string here is not merely wrong, it is
+    unhashable often enough to matter: a session whose email is a list made
+    `email in users` raise TypeError, which is not a StoreError and so used
+    to kill the process at startup."""
+    if not isinstance(value, str):
+        raise StoreError(f'{where} is not a string')
+    return value
 
 
 def _stamp(value, where):

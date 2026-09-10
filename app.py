@@ -36,6 +36,7 @@ import http.cookies
 import http.server
 import json
 import os
+import posixpath
 import queue
 import re
 import shutil
@@ -2987,14 +2988,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if dates:
                 self.send_page(guide_with_nav(dates[0]))
                 return
-        if '/.' in path:
-            self.send_error(404, 'Not Found')
-            return
+        # Deny by the name the static handler will actually resolve, not by
+        # the one in the request line. SimpleHTTPRequestHandler percent-
+        # decodes and normalizes before it opens a file, so a rule matched
+        # against the raw target is one that %69 steps around.
+        try:
+            served = urllib.parse.unquote(path, errors='surrogatepass')
+        except UnicodeDecodeError:
+            served = urllib.parse.unquote(path)
+        served = posixpath.normpath(served)
         # A published Sunday's directory IS the static root, so a scanner
         # artifact left in one from before the scanner was stood down is
         # served to anyone who asks for it by name — the routes being gone
         # is not the same as the scanner being unreachable.
-        if path.endswith('/aiscan.json'):
+        if '/.' in path or '/.' in served or served.endswith('/aiscan.json'):
             self.send_error(404, 'Not Found')
             return
         m = re.fullmatch(r'/(\d{4}-\d{2}-\d{2})/original/?', path)

@@ -995,7 +995,16 @@ try:
                  '{"users":{},"invites":{},"sessions":{"sid":null}}',
                  '{"users":{"a@b.co":null},"invites":{},"sessions":{}}',
                  '{"users":{},"invites":{"tok":{"expires":"soon"}},"sessions":{}}',
-                 '{"users":{},"invites":{},"sessions":{"sid":{"created":null}}}'):
+                 '{"users":{},"invites":{},"sessions":{"sid":{"created":null}}}',
+                 # A live session whose email is unhashable: `email in users`
+                 # raised TypeError, which is not a StoreError, so it killed
+                 # the process at startup rather than answering 503. (An
+                 # expired stamp short-circuits before the membership test,
+                 # so the stamp here has to be a live one.)
+                 '{"users":{},"invites":{},'
+                 '"sessions":{"sid":{"email":[],"created":9999999999}}}',
+                 '{"users":{},"invites":{},'
+                 '"sessions":{"sid":{"email":{"a":1},"created":9999999999}}}'):
         with open(auth_mod.USERS_FILE, 'w') as _fh:
             _fh.write(_bad)
         try:
@@ -1024,6 +1033,20 @@ try:
                         capture_output=True, text=True)
     assert 'No such pending link' in _r.stderr, (_r.returncode, _r.stderr)
     assert 'usage:' not in _r.stderr, 'a dashed token is a value, not an option'
+
+    # And a shape none of those checks anticipated is damage too, rather
+    # than an exception of some other type reaching main() — which catches
+    # StoreError alone, and would exit.
+    with open(auth_mod.USERS_FILE, 'w') as _fh:
+        _fh.write('{"users":{},"invites":{},"sessions":{"sid":{"created":'
+                  '[1,2],"email":"a@b.co"}}}')
+    try:
+        auth_mod.load()
+        raise AssertionError('an unanticipated shape must still be StoreError')
+    except auth_mod.StoreError:
+        pass
+    with open(auth_mod.USERS_FILE, 'wb') as _fh:
+        _fh.write(_intact)
 
     # An address is attacker-supplied on the sign-in form and on an open
     # invite link, so its length is bounded and not only its shape.
@@ -1499,11 +1522,20 @@ try:
     with open(os.path.join(scratch, 'public', '2026-08-02', 'aiscan.json'),
               'w') as fh:
         json.dump({'findings': [{'quote': 'left over from the scanner'}]}, fh)
-    assert req('/2026-08-02/aiscan.json')[0] == 404, \
-        'a retained scan file is not served'
-    assert req('/2026-08-02/aiscan.json', headers=COOKIE)[0] == 404
+    # Denied by the name the static handler resolves, not the one in the
+    # request line: it percent-decodes and normalizes before opening a file,
+    # so matching the raw target is a rule that %69 walks straight around.
+    for _enc in ('/2026-08-02/aiscan.json',
+                 '/2026-08-02/a%69scan.json',
+                 '/2026-08-02/aiscan%2ejson',
+                 '/2026-08-02%2faiscan.json',
+                 '/2026-08-02/./aiscan.json',
+                 '/2026-08-02/x/../aiscan.json'):
+        assert req(_enc)[0] == 404, f'{_enc} served a retained scan file'
+        assert req(_enc, headers=COOKIE)[0] == 404, _enc
     assert req('/2026-08-02/source.pdf')[0] == 200, \
         'and the files that are meant to be served still are'
+    assert req('/2026-08-02/index.html')[0] == 200
 
     # The two POSTs served before anyone is authenticated cap their bodies
     # far below the upload limit. Without that, one request can park a thread
