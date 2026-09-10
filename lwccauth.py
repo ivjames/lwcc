@@ -266,17 +266,38 @@ def list_invites():
                   key=lambda i: i.get('created') or '')
 
 
-def verify(email, password):
-    """The account when the password is right, else None (constant-ish work
-    either way)."""
+def login(email, password):
+    """Check a password and open a session for it, or (None, None).
+
+    One call, not two, and the session is created only if the password that
+    verified is still the account's current one. Verifying and then opening a
+    session as separate transactions leaves a window a password reset can
+    land in: the reset revokes every session that account holds, and a login
+    that matched the *old* hash a moment earlier would then add a fresh one —
+    quietly undoing the eviction that resetting a compromised password is
+    for. The check inside the transaction is a string compare of the stored
+    hash, so the expensive part (scrypt) still happens outside the store
+    lock; hashing under it would stall every other writer for ~60 ms a try.
+    """
     email = norm_email(email)
     user = load()['users'].get(email)
     if not user:
         _burn_a_hash()
-        return None
-    if not check_password(password or '', user.get('pw') or ''):
-        return None
-    return {**user, 'email': email}
+        return None, None
+    stored = user.get('pw') or ''
+    if not check_password(password or '', stored):
+        return None, None
+    sid = secrets.token_urlsafe(32)
+
+    def go(data):
+        fresh = data['users'].get(email)
+        if not fresh or not hmac.compare_digest(fresh.get('pw') or '', stored):
+            return None          # re-keyed or removed while we were hashing
+        data['sessions'][sid] = {'email': email, 'created': _epoch()}
+        return {**fresh, 'email': email}
+
+    account = _mutate(go)
+    return (sid, account) if account else (None, None)
 
 
 def remove_user(email, by=None):
@@ -399,19 +420,8 @@ def redeem_invite(token, password, confirm=None, email=None):
 
 
 # -- sessions ---------------------------------------------------------------
-
-def create_session(email):
-    email = norm_email(email)
-    sid = secrets.token_urlsafe(32)
-
-    def go(data):
-        if email not in data['users']:
-            raise AuthError(f'No account for {email}.', 404)
-        data['sessions'][sid] = {'email': email, 'created': _epoch()}
-        return sid
-
-    return _mutate(go)
-
+# There is deliberately no create_session(email): a session is only ever born
+# inside login() or redeem_invite(), both of which check something first.
 
 def session_user(sid):
     """The signed-in account for a cookie value, or None."""

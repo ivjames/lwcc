@@ -895,14 +895,47 @@ try:
             time.sleep(0.02)
         assert os.path.exists(_ready), 'the other process never took the lock'
         _t0 = time.monotonic()
-        auth_mod.create_session('someone@example.com')
+        auth_mod.create_invite('later@example.com')
         _waited = time.monotonic() - _t0
         assert _waited > 0.3, \
             f'the mutation did not wait for the other process ({_waited:.2f}s)'
     finally:
         _holder.wait(timeout=15)
-    assert len(auth_mod.load()['sessions']) == 2, \
-        'both sessions survive — neither write erased the other'
+    _store = auth_mod.load()
+    assert len(_store['sessions']) == 1 and len(_store['invites']) == 1, \
+        'both writes survive — neither snapshot erased the other'
+
+    # Verifying a password and opening a session for it are one transaction.
+    # A reset landing between them would otherwise hand a fresh session to
+    # someone logging in with the password the reset just replaced — exactly
+    # the eviction the reset exists for. Forced here by resetting from
+    # inside the password check, which is the whole of the race window.
+    _reset = auth_mod.create_invite('someone@example.com', reset=True)
+    _real_check = auth_mod.check_password
+    _after = []
+
+    def _check_then_reset(password, stored):
+        ok = _real_check(password, stored)
+        auth_mod.check_password = _real_check        # fire once
+        _after.append(auth_mod.redeem_invite(
+            _reset['token'], 'the replacement password',
+            'the replacement password')[0])
+        return ok
+
+    auth_mod.check_password = _check_then_reset
+    try:
+        _sid2, _u2 = auth_mod.login('someone@example.com',
+                                    'a long enough password')
+    finally:
+        auth_mod.check_password = _real_check
+    assert _u2 is None and _sid2 is None, \
+        'a login that verified the pre-reset password must not open a session'
+    assert auth_mod.session_user(_sid) is None, 'the reset evicted the old one'
+    assert len(auth_mod.load()['sessions']) == 1 \
+        and auth_mod.session_user(_after[0]), \
+        'only the session the reset itself opened is left'
+    assert auth_mod.login('someone@example.com', 'a long enough password') \
+        == (None, None), 'and the old password is simply dead now'
 
     # Password hashing is bounded. scrypt is memory-hard by design (~16 MB a
     # go) and /admin/login is public with a thread per connection, so without

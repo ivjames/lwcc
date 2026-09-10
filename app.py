@@ -2767,7 +2767,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         nxt = (form.get('next') or [''])[0]
         if not ADMIN_NEXT_RE.fullmatch(nxt):
             nxt = '/admin'
-        user = lwccauth.verify(email, password) if email and password else None
+        sid, user = (lwccauth.login(email, password) if email and password
+                     else (None, None))
         if not user:
             # The whole of the rate limiting: enough to make a password
             # guessing run through this form pointless, cheap enough that a
@@ -2779,7 +2780,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_page(login_page(nxt, error='Wrong email or password.',
                                       email=email), status=401, cache='no-store')
             return
-        sid = lwccauth.create_session(user['email'])
         audit_log({'action': 'login', 'ok': True, 'email': user['email']})
         self.redirect_303(nxt, cookie=self.session_cookie(sid, COOKIE_MAX_AGE))
 

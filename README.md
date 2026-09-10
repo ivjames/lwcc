@@ -14,7 +14,9 @@ becomes the front page.
   password at `/admin/login`, after which an HttpOnly cookie holding a
   server-side session id (~6 months) keeps that browser signed in.
   `/admin/logout` destroys the session, so the cookie is dead everywhere at
-  once rather than merely forgotten by one browser.
+  once rather than merely forgotten by one browser. Checking the password and
+  opening the session are one transaction, so a reset landing mid-sign-in
+  cannot be outrun by someone still holding the old password.
 - `GET /invite/<token>` — where accounts come from. There is no sign-up and
   no shared password: an administrator mints a one-time link, the person
   opening it chooses their own password and is signed in on the spot. Links
