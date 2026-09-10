@@ -1990,6 +1990,13 @@ try:
     assert b'2026-08-02' in body or b'August 2, 2026' in body
     status, body = req(f'/{aside[0]}/index.html')
     assert status == 404, 'unpublished folder is not served'
+    # Including when the leading dot is spelled as an escape. The static
+    # handler decodes before it resolves, so a deny that reads the request
+    # line served withdrawn guides to anyone who asked for them this way.
+    status, body = req('/%2e' + aside[0][1:] + '/index.html')
+    assert status == 404, 'nor through a percent-encoded dot'
+    status, body = req('/' + aside[0] + '/./index.html')
+    assert status == 404
     status, body = action('unpublish', '2026-08-09')
     assert status == 404, 'acting on a gone date reports not found'
 
