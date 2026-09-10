@@ -290,14 +290,25 @@ def save(data):
         raise
 
 
+NO_CHANGE = object()        # what a _mutate callback returns when it wrote nothing
+
+
 def _mutate(fn):
     """Read-modify-write inside one exclusive transaction; returns fn's
     result. fn raising (an AuthError, say) leaves the store untouched — the
-    save only happens on the way out."""
+    save only happens on the way out.
+
+    A callback that returns NO_CHANGE skips the save entirely. A save is a
+    whole-file write under the exclusive lock, and some of these paths are
+    reachable unauthenticated: signing out with a cookie that is not a
+    session must not cost a rewrite of the account store, or a burst of
+    bogus sign-outs is disk I/O and lock contention that real sign-ins and
+    invites then queue behind."""
     with _exclusive():
         data = load()
         result = fn(data)
-        save(data)
+        if result is not NO_CHANGE:
+            save(data)
         return result
 
 
@@ -400,12 +411,12 @@ def login(email, password):
     def go(data):
         fresh = data['users'].get(email)
         if not fresh or not hmac.compare_digest(fresh.get('pw') or '', stored):
-            return None          # re-keyed or removed while we were hashing
+            return NO_CHANGE     # re-keyed or removed while we were hashing
         data['sessions'][sid] = {'email': email, 'created': _epoch()}
         return {**fresh, 'email': email}
 
     account = _mutate(go)
-    return (sid, account) if account else (None, None)
+    return (sid, account) if account is not NO_CHANGE else (None, None)
 
 
 def remove_user(email, by=None):
@@ -552,9 +563,12 @@ def destroy_session(sid):
         return False
 
     def go(data):
-        return data['sessions'].pop(sid, None) is not None
+        if sid not in data['sessions']:
+            return NO_CHANGE               # nothing to remove, nothing to write
+        del data['sessions'][sid]
+        return True
 
-    return _mutate(go)
+    return _mutate(go) is True
 
 
 # -- CLI --------------------------------------------------------------------

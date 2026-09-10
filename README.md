@@ -13,8 +13,11 @@ becomes the front page.
   panel, guide editor). Every admin page is behind a sign-in: email and
   password at `/admin/login`, after which an HttpOnly cookie holding a
   server-side session id (~6 months) keeps that browser signed in.
-  `/admin/logout` destroys the session, so the cookie is dead everywhere at
-  once rather than merely forgotten by one browser. Checking the password and
+  `POST /admin/logout` destroys the session, so the cookie is dead everywhere
+  at once rather than merely forgotten by one browser (the GET only offers
+  the button — a `SameSite=Lax` cookie rides along with any cross-site
+  navigation, so signing out on a GET would let any page, or a link
+  prefetcher, end someone's session). Checking the password and
   opening the session are one transaction, so a reset landing mid-sign-in
   cannot be outrun by someone still holding the old password.
 - `GET /invite/<token>` — where accounts come from. There is no sign-up and

@@ -63,7 +63,8 @@ MAX_UPLOAD = 40 * 1024 * 1024
 # on a hash slot holding 40 MB of "password" (and the copies parse_qs makes of
 # it) is the memory exhaustion that bounding the hashes was meant to close.
 MAX_AUTH_BODY = 8 * 1024
-AUTH_POST_RE = re.compile(r'/admin/login|/invite/[A-Za-z0-9_-]{8,128}')
+AUTH_POST_RE = re.compile(
+    r'/admin/(login|logout)|/invite/[A-Za-z0-9_-]{8,128}')
 COOKIE_NAME = 'wg_session'
 COOKIE_MAX_AGE = 180 * 24 * 3600
 # where /admin/login may redirect after sign-in; anything else falls back
@@ -1262,6 +1263,9 @@ PAGE_STYLE = """
   button{background:#054253;color:#fff;border:none;cursor:pointer}
   button:disabled{opacity:.5;cursor:default}
   button.busy{opacity:.85}
+  form.inline{display:inline}
+  button.linkish{background:none;border:none;color:#a20816;font:inherit;
+    padding:0;cursor:pointer;text-decoration:underline}
   button.busy::after{content:'';display:inline-block;width:.75em;height:.75em;
     margin-left:7px;vertical-align:-.08em;border:2px solid #fff;
     border-top-color:transparent;border-radius:50%;
@@ -1508,6 +1512,27 @@ def store_error_page(detail):
 """
 
 
+def logout_page():
+    """GET /admin/logout asks; the POST does it. Following a link must never
+    be enough to end someone's session."""
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign out</title><style>{PAGE_STYLE}</style></head>
+<body>
+<h1>Sign out</h1>
+<div class="card">
+  <p>Signing out ends this browser&#8217;s session on the server, so the
+  cookie it holds stops working everywhere at once.</p>
+  <form method="POST" action="/admin/logout">
+    <p><button>Sign out</button></p>
+  </form>
+</div>
+<p><a href="/admin">Back to admin</a> · <a href="/">Current guide</a></p>
+</body></html>
+"""
+
+
 def forbidden_page():
     """Signed in, but not an administrator."""
     return f"""<!DOCTYPE html>
@@ -1653,7 +1678,9 @@ def users_page(user):
   <p><b>Links waiting to be used</b> — each works once, for seven days.</p>
   {pending_html}
 </div>
-<p><a href="/admin">Back to admin</a> · <a href="/admin/logout">Sign out</a></p>
+<p><a href="/admin">Back to admin</a> ·
+   <form class="inline" method="POST" action="/admin/logout">
+     <button class="linkish">Sign out</button></form></p>
 <script>
 const $ = id => document.getElementById(id);
 const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1772,7 +1799,8 @@ __REVIEW__
 __HISTORY__
 <p><a href="/">Current guide</a> · <a href="/archive">Archive</a> ·
    <a href="/admin/history">Upload history</a>__NAV__ ·
-   <a href="/admin/logout">Sign out (__WHO__)</a></p>
+   <form class="inline" method="POST" action="/admin/logout">
+     <button class="linkish">Sign out (__WHO__)</button></form></p>
 <script>
 const $ = id => document.getElementById(id);
 const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -2961,10 +2989,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_page(users_page(user), cache='no-store')
             return
         if path == '/admin/logout':
-            # Server-side: the session is gone for every browser holding it,
-            # not merely forgotten by this one.
-            lwccauth.destroy_session(self.session_id())
-            self.redirect_303('/', cookie=self.session_cookie('', 0))
+            # Signing out is a write, so it does not happen on a GET. A
+            # SameSite=Lax cookie rides along with any cross-site top-level
+            # navigation, which would let any page — or a link prefetcher,
+            # or a mail scanner following the URL — end someone's session.
+            # The GET asks; the POST below does it.
+            self.send_page(logout_page(), cache='no-store')
             return
         m = re.fullmatch(r'/admin/edit/(\d{4}-\d{2}-\d{2})', path)
         if m:
@@ -3042,6 +3072,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         body = self.rfile.read(length)
         if path == '/admin/login':
             self.handle_login(body)
+            return
+        if path == '/admin/logout':
+            # Server-side: the session is gone for every browser holding it,
+            # not merely forgotten by this one. No session needed to sign
+            # out — presenting a dead cookie is not an error.
+            lwccauth.destroy_session(self.session_id())
+            self.redirect_303('/', cookie=self.session_cookie('', 0))
             return
         m = re.fullmatch(r'/invite/([A-Za-z0-9_-]{8,128})', path)
         if m:

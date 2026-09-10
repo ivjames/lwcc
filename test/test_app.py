@@ -1576,7 +1576,8 @@ try:
     status, body = req('/api/rerender-all', data=b'{}',
                        headers={**COOKIE2, 'Content-Type': 'application/json'})
     assert status == 503 and not json.loads(body)['ok'], (status, body)
-    status, body = req('/admin/logout', headers=COOKIE2)
+    status, body = req('/admin/logout', method='POST', data=b'',
+                       headers=COOKIE2)
     assert status == 503, 'even signing out refuses — it is a write'
     assert open(_users_json, 'rb').read() == _damaged, \
         'nothing was written over the damaged store'
@@ -2001,14 +2002,34 @@ try:
     assert status == 404, 'acting on a gone date reports not found'
 
     # Sign out clears the cookie and the browser lands back on the login gate.
-    # Sign out clears the cookie AND destroys the session server-side, so
-    # the value it carried is dead even in a browser that kept it.
+    # Signing out is a write, so a GET only offers the button. A
+    # SameSite=Lax cookie rides along with any cross-site top-level
+    # navigation, so a GET that destroyed the session would let any page —
+    # or a link prefetcher — sign the office out.
     stale = dict(COOKIE)
     status, body = req('/admin/logout', headers=COOKIE)
+    assert status == 200 and b'<form method="POST"' in body, (status, body[:160])
+    assert req('/admin', headers=COOKIE)[0] == 200, 'the GET changed nothing'
+    check_page_js(body, '/admin/logout')
+
+    status, body = req('/admin/logout', method='POST', data=b'', headers=COOKIE)
     assert status == 303 and LAST['headers'].get('Location') == '/'
     assert 'Max-Age=0' in (LAST['headers'].get('Set-Cookie') or '')
     status, body = req('/admin', headers={'Cookie': 'wg_session='})
     assert status == 401, 'cleared cookie no longer signs in'
+
+    # Signing out with a cookie that is not a session writes nothing: a
+    # save is a whole-file write under the exclusive lock, and this path is
+    # reachable without any credential at all.
+    _users_json = os.path.join(scratch, 'users.json')
+    _mtime = os.stat(_users_json).st_mtime_ns
+    time.sleep(0.02)
+    for _ in range(3):
+        status, body = req('/admin/logout', method='POST', data=b'',
+                           headers={'Cookie': 'wg_session=not-a-real-session'})
+        assert status == 303, status
+    assert os.stat(_users_json).st_mtime_ns == _mtime, \
+        'an unknown session id rewrote the account store'
     status, body = req('/admin', headers=stale)
     assert status == 401, 'the signed-out session id is revoked, not just forgotten'
     assert req('/admin', headers=COOKIE2)[0] == 200, \
