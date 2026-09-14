@@ -16,6 +16,59 @@ true in *this* repo, so it is here rather than one clone away.
    loop is: open it, let the bot review, address what it finds, merge it
    yourself. `boxoffice` has said this in its own `CLAUDE.md` for a while —
    it's true everywhere here.
+
+   **When it doesn't review, you review it.** Three ways it is out. It
+   *declines*: the connector posts a plain comment where a review should be,
+   naming something to go and set up — "create a Codex account and connect to
+   github" in one repo, "create an environment for this repo" in another. The
+   wording tracks the cause, so recognise the shape rather than the string. It
+   *doesn't fire*: no review, no comment, nothing to tell that PR apart from
+   one still in flight. Or it was never enabled on the repo at all, which
+   surfaces as the first of these if it surfaces. In all three the PR is not
+   reviewed and is not going to become reviewed, so waiting is the one
+   response that cannot work — and a PR left sitting is the failure this rule
+   opens by warning about.
+
+   Decide it on a clock. A refusal is fast and does not need to be asked for:
+   seconds after the PR opens, or seconds after an ask. Silence needs a bound
+   — two poll cycles from opening (per 7, about ten minutes, against a review
+   that arrives in about four when it arrives at all), then treat the review
+   as not coming. One `@codex review` at that point is allowed and is not the
+   re-request 5 warns against: there is no round to restart, and it is what
+   turns silence into an answer. Silence in reply to it is the same answer,
+   slower.
+
+   Then **review the PR yourself, adversarially, against the diff**, and hold
+   what you find to exactly the standard 4 sets for the bot's findings: verify
+   each against the code, fix what is real, say why the rest isn't. 5's
+   one-round limit does not bind your own pass — it exists because a metered
+   review re-reads the whole diff and restarts the loop, and neither is true
+   of yours — so re-read after your own fixes as often as it is useful. Then
+   merge, and **say on the PR that the bot did not review it, that you did,
+   and what you checked**, so a PR that merged without its intended review
+   carries that in its own record instead of leaving the next reader to infer
+   it from an absence.
+
+   Two things this does not add work to: a PR the bot did review is reviewed,
+   and a sync of this file to canonical was reviewed in the lab980 PR that
+   authored it (per 5), so it needs neither a pass nor a note.
+
+   Evidence, cited as what two repos did rather than as a rule. In `slime` on
+   2026-09-12: PR 73 was reviewed four minutes after it opened and PR 72 —
+   same author, same day, nothing to tell them apart — never was; PRs 74, 76,
+   77 and 78 got no review at all, 74's explicit ask was refused six seconds
+   later, and 76 and 77 sat open for a day with a poll on them learning
+   nothing each time it fired. In `lab980.com` on 2026-09-14, the PR that
+   added this rule was refused **ten seconds after it opened**, unasked, and
+   for a different stated cause than slime's — which is why nothing here
+   generalises about which PRs get refused, only about what to do once one
+   is. That a self-review is not a formality standing in for a real one is
+   evidenced from the same work: it found a harness flag that validated the
+   *shape* of its argument and not its *range*, so an out-of-range value would
+   have exercised none of the code the flag existed to cover while every
+   digest matched and the run exited 0 — and, on a second pass, a colour set
+   as `--dim` under an opacity, compositing to 3.44:1 where that sheet's own
+   `:root` comment says `--dim` was raised to clear the 4.5:1 AA floor.
 4. **Verify each finding before you fix it.** The bot is usually right and
    occasionally not, and a fix pushed on its say-so that changes correct code
    is worse than the bug it imagined. Read the actual script or file it names
@@ -82,11 +135,21 @@ assuming; this repo's `DEPLOY.md` is the full runbook.
   survive a deploy: the keys go into `.env` on the droplet by hand, and that is
   the supported path, not a workaround. Never move a secret into the repo to
   avoid editing there.
-- **A static site has no such state, and must not acquire any.** Its checkout
-  *is* the nginx web root, so anything left in it is something the internet can
-  fetch — the vhost denies dotfiles and `*.md`, and nothing else. A `data/`
-  directory created on the box would be served. Static sites hold no secrets,
-  in git or beside it.
+- **A static site has no such state, and must not acquire any.** Where the
+  checkout *is* the web root, anything left in it is something the internet
+  can fetch, and a `data/` directory created on the box would be served. Do
+  not assume that shape, and do not assume what the vhost denies — both vary.
+  `bonita` roots its vhost at `site/` inside the checkout and `bw` at a build
+  release under `current/`, so most of those two checkouts is not reachable at
+  all. The `new-site` scaffold's static vhost denies dotfiles and `*.md`, but
+  `highlander` denies `/deploy/` as well, and as of 2026-09-07 five of the
+  sites this file fans out to deny no `*.md` at all: `forest`, `haunted`,
+  `resume`, `ffc` and `mbw` each serve their own README over HTTP right now.
+  What a site denies is a fact about its *installed* vhost, which is
+  frequently not the copy in its repo — most of these sites' dotfile rule was
+  inserted on the droplet by `fix-dotgit` and never written back. Check the
+  live host rather than the repo. Static sites hold no secrets, in git or
+  beside it.
 - **Check what is actually live before saying a deploy happened.** A 200 only
   proves the endpoint answered, not which build it served — ask for the
   deployed commit, not just the status code.
@@ -109,9 +172,13 @@ canonical copy rather than a copy of it. It is deliberately not "every entry in
 the registry": `lab980` deploys with `update.sh` rather than a `bin/<stub>`
 CLI, and four entries have no repo recorded yet, so a test written that way
 would be unverifiable and would quietly license checking the same handful while
-believing otherwise. Four claims have already failed that test — a hard reset
+believing otherwise. Five claims have already failed that test — a hard reset
 that one site doesn't do, a `status` command one site doesn't have, a deploy
-ref that isn't always `main`, and a *default branch* that isn't always `main`
-either — and each was wrong in the direction that stops the reader looking. A
-file this widely copied earns its keep only by being narrower than it is
-tempting to make it.
+ref that isn't always `main`, a *default branch* that isn't always `main`
+either, and a vhost deny rule that five sites did not have while this file
+said flatly that they did — and each was wrong in the direction that stops the
+reader looking. The last one cost the most: because the file asserted the deny
+as settled fact, `lab980.com` served its own 51KB `CLAUDE.md` and a 77KB
+droplet security audit to the internet for as long as anyone had been reading
+this paragraph and believing it. A file this widely copied earns its keep only
+by being narrower than it is tempting to make it.
